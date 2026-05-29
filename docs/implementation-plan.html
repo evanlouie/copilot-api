@@ -1,0 +1,1194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>copilot-api Implementation Plan</title>
+  <style>
+    :root {
+      --ink: #191714;
+      --muted: #645b50;
+      --paper: #f6f0e5;
+      --paper-2: #fffaf0;
+      --line: #d7c5a4;
+      --line-strong: #a8834f;
+      --amber: #d48b1f;
+      --rust: #9a3e1f;
+      --green: #356b4b;
+      --blue: #244f73;
+      --violet: #63445d;
+      --shadow: 0 24px 70px rgba(42, 28, 10, 0.18);
+      --radius: 22px;
+      --mono: "Berkeley Mono", "SF Mono", Menlo, Consolas, monospace;
+      --serif: "Iowan Old Style", Charter, "Palatino Linotype", Georgia, serif;
+      --sans: Avenir, "Avenir Next", Optima, Candara, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background:
+        radial-gradient(circle at top left, rgba(212, 139, 31, 0.18), transparent 32rem),
+        radial-gradient(circle at 85% 18%, rgba(53, 107, 75, 0.12), transparent 26rem),
+        var(--paper);
+      color: var(--ink);
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      line-height: 1.58;
+      letter-spacing: 0.005em;
+      overflow-x: clip;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.32;
+      mix-blend-mode: multiply;
+      background-image:
+        linear-gradient(rgba(25, 23, 20, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(25, 23, 20, 0.035) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: linear-gradient(to bottom, black, transparent 80%);
+    }
+
+    a { color: var(--blue); text-underline-offset: 0.18em; }
+    code, pre { font-family: var(--mono); }
+
+    img, svg, video, canvas, iframe {
+      max-width: 100%;
+      height: auto;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 34px 0 70px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 10px);
+      padding: clamp(28px, 5vw, 64px);
+      background:
+        linear-gradient(135deg, rgba(255, 250, 240, 0.96), rgba(245, 231, 204, 0.88)),
+        repeating-linear-gradient(-35deg, rgba(154, 62, 31, 0.08) 0 1px, transparent 1px 16px);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 360px;
+      height: 360px;
+      right: -105px;
+      top: -130px;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(212, 139, 31, 0.22), transparent 61%),
+        conic-gradient(from 45deg, rgba(154,62,31,0.16), rgba(36,79,115,0.12), rgba(53,107,75,0.14), rgba(154,62,31,0.16));
+      filter: blur(1px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 18px;
+      padding: 6px 12px;
+      border: 1px solid rgba(154, 62, 31, 0.25);
+      border-radius: 999px;
+      color: var(--rust);
+      background: rgba(255, 250, 240, 0.72);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, h4 {
+      font-family: var(--serif);
+      line-height: 1.05;
+      letter-spacing: -0.035em;
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 920px;
+      font-size: clamp(2.7rem, 8vw, 6rem);
+      font-weight: 700;
+      overflow-wrap: anywhere;
+      text-wrap: balance;
+    }
+
+    .subtitle {
+      max-width: 780px;
+      margin: 22px 0 0;
+      font-size: clamp(1.08rem, 2vw, 1.36rem);
+      color: var(--muted);
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .meta-card {
+      padding: 16px;
+      border: 1px solid rgba(168, 131, 79, 0.35);
+      border-radius: 17px;
+      background: rgba(255, 250, 240, 0.72);
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .meta-card b {
+      display: block;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--rust);
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      margin-bottom: 5px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 265px) minmax(0, 1fr);
+      gap: 30px;
+      margin-top: 30px;
+      align-items: start;
+      min-width: 0;
+    }
+
+    nav {
+      position: sticky;
+      top: 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 250, 240, 0.78);
+      backdrop-filter: blur(10px);
+      padding: 18px;
+      box-shadow: 0 16px 50px rgba(42, 28, 10, 0.08);
+    }
+
+    nav strong {
+      display: block;
+      font-family: var(--mono);
+      color: var(--rust);
+      font-size: 0.74rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    nav a {
+      display: block;
+      color: var(--ink);
+      text-decoration: none;
+      padding: 9px 10px;
+      border-radius: 12px;
+      font-size: 0.94rem;
+    }
+
+    nav a:hover {
+      background: rgba(212, 139, 31, 0.13);
+      color: var(--rust);
+    }
+
+    main {
+      display: grid;
+      gap: 22px;
+      min-width: 0;
+    }
+
+    section {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 250, 240, 0.84);
+      padding: clamp(22px, 4vw, 38px);
+      box-shadow: 0 18px 55px rgba(42, 28, 10, 0.08);
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    section h2 {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 16px;
+      font-size: clamp(1.8rem, 3.4vw, 3rem);
+      min-width: 0;
+      overflow-wrap: anywhere;
+      text-wrap: balance;
+    }
+
+    section h2 .num {
+      display: inline-grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      color: var(--paper-2);
+      background: var(--ink);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 26px 0 10px;
+      font-size: 1.42rem;
+      color: var(--rust);
+    }
+
+    p { margin: 0 0 14px; }
+    p, li, td, th { overflow-wrap: anywhere; }
+    ul, ol { margin-top: 8px; padding-left: 1.35rem; }
+    li { margin: 0.42rem 0; }
+
+    .callout {
+      margin: 18px 0;
+      padding: 18px 20px;
+      border-left: 5px solid var(--amber);
+      border-radius: 15px;
+      background: rgba(212, 139, 31, 0.12);
+    }
+
+    .callout strong { color: var(--rust); }
+
+    .grid-2, .grid-3 {
+      display: grid;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .tile {
+      padding: 18px;
+      border: 1px solid rgba(168, 131, 79, 0.35);
+      border-radius: 18px;
+      background: rgba(246, 240, 229, 0.62);
+      min-width: 0;
+    }
+
+    .tile h4 {
+      margin-bottom: 8px;
+      font-size: 1.15rem;
+      color: var(--green);
+    }
+
+    .tile p, .tile li { color: var(--muted); }
+
+    .matrix {
+      width: 100%;
+      max-width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--paper-2);
+      font-size: 0.95rem;
+    }
+
+    .matrix th, .matrix td {
+      padding: 13px 14px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid rgba(215, 197, 164, 0.75);
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .matrix th {
+      color: var(--rust);
+      background: rgba(212, 139, 31, 0.12);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .matrix tr:last-child td { border-bottom: 0; }
+
+    .status {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .mvp { color: #1f563c; background: rgba(53, 107, 75, 0.15); }
+    .later { color: #6a3f00; background: rgba(212, 139, 31, 0.18); }
+    .risk { color: #7b2917; background: rgba(154, 62, 31, 0.15); }
+
+    pre {
+      margin: 16px 0 0;
+      padding: 18px;
+      max-width: 100%;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+      border-radius: 17px;
+      border: 1px solid rgba(25, 23, 20, 0.13);
+      color: #f7ead5;
+      background:
+        linear-gradient(135deg, #211d18, #332619),
+        var(--ink);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+      font-size: 0.88rem;
+    }
+
+    pre code {
+      display: block;
+      width: max-content;
+      min-width: 100%;
+    }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 90px 1fr;
+      gap: 16px;
+      padding: 18px;
+      border: 1px solid rgba(168, 131, 79, 0.38);
+      border-radius: 20px;
+      background: linear-gradient(135deg, rgba(255, 250, 240, 0.92), rgba(246, 240, 229, 0.74));
+      min-width: 0;
+    }
+
+    .phase > div {
+      min-width: 0;
+    }
+
+    .phase .badge {
+      display: inline-grid;
+      place-items: center;
+      width: 68px;
+      height: 68px;
+      border-radius: 18px;
+      color: var(--paper-2);
+      background: var(--blue);
+      font-family: var(--mono);
+      font-size: 1.05rem;
+      box-shadow: 0 10px 24px rgba(36, 79, 115, 0.22);
+    }
+
+    .phase:nth-child(3n+1) .badge { background: var(--rust); }
+    .phase:nth-child(3n+2) .badge { background: var(--green); }
+
+    .phase h3 {
+      margin-top: 0;
+      color: var(--ink);
+    }
+
+    .phase .exit {
+      margin-top: 8px;
+      font-size: 0.93rem;
+      color: var(--muted);
+    }
+
+    .kbd {
+      display: inline;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--rust);
+      background: rgba(154, 62, 31, 0.08);
+      border: 1px solid rgba(154, 62, 31, 0.18);
+      border-radius: 7px;
+      padding: 2px 6px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+    }
+
+    .footer {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-align: center;
+    }
+
+    @media (max-width: 920px) {
+      .layout { grid-template-columns: minmax(0, 1fr); }
+      nav { position: static; }
+      .meta-grid, .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(100% - 22px, 1180px); padding-top: 12px; }
+      .hero { padding: 24px; }
+      section { padding: 18px; }
+      section h2 { align-items: flex-start; }
+      .meta-grid, .grid-2, .grid-3 { grid-template-columns: minmax(0, 1fr); }
+      .phase { grid-template-columns: minmax(0, 1fr); }
+      .matrix { display: block; overflow-x: auto; table-layout: auto; }
+      .matrix th, .matrix td { min-width: 10rem; }
+    }
+
+    @media print {
+      html { background: white; }
+      body::before, nav { display: none; }
+      .shell { width: auto; padding: 0; }
+      .layout { display: block; }
+      .hero, section { box-shadow: none; break-inside: avoid; }
+      a { color: inherit; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <p class="eyebrow">Implementation Plan · copilot-api</p>
+      <h1>OpenAI-compatible API gateway for GitHub Copilot models.</h1>
+      <p class="subtitle">
+        A phased plan to build a Go service that exposes OpenAI Chat Completions and Responses API compatible endpoints backed by the GitHub Copilot SDK, while behaving like a raw/vanilla inference provider: no Copilot default persona, no Copilot SDK tools by default, client-owned tool calls, streaming support, model discovery, and a clear path toward richer compatibility.
+      </p>
+      <div class="meta-grid" aria-label="Project metadata">
+        <div class="meta-card"><b>Repository</b>copilot-api</div>
+        <div class="meta-card"><b>Language</b>Go 1.26.3</div>
+        <div class="meta-card"><b>SDK target</b>github/copilot-sdk/go v0.3.0</div>
+        <div class="meta-card"><b>Prepared</b>2026-05-29</div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="Plan navigation">
+        <strong>Plan sections</strong>
+        <a href="#goals">1. Goals</a>
+        <a href="#decisions">2. Decisions</a>
+        <a href="#architecture">3. Architecture</a>
+        <a href="#compatibility">4. Compatibility</a>
+        <a href="#tool-calls">5. Tool calls</a>
+        <a href="#phases">6. Phases</a>
+        <a href="#data-flow">7. Request flows</a>
+        <a href="#testing">8. Testing</a>
+        <a href="#operations">9. Operations</a>
+        <a href="#risks">10. Risks</a>
+        <a href="#done">11. Definition of done</a>
+      </nav>
+
+      <main>
+        <section id="goals">
+          <h2><span class="num">01</span>Goals and boundaries</h2>
+          <p>
+            The project should let a single user point multiple concurrent OpenAI-compatible clients at a local proxy base URL and use models available through their GitHub Copilot subscription. The first release should prioritize a dependable compatibility core over claiming every OpenAI feature immediately.
+          </p>
+
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Primary goals</h4>
+              <ul>
+                <li>Expose <span class="kbd">GET /v1/models</span>, <span class="kbd">POST /v1/chat/completions</span>, and <span class="kbd">POST /v1/responses</span>.</li>
+                <li>Support both buffered JSON responses and OpenAI-style server-sent event streams.</li>
+                <li>Map Copilot SDK model metadata, assistant text events, streaming deltas, usage events, and errors into OpenAI-shaped responses.</li>
+                <li>Never use the Copilot SDK default system prompt, coding-agent persona, or SDK-managed behavioral instructions. The effective model instructions must be only the caller-provided OpenAI <span class="kbd">system</span>/<span class="kbd">developer</span>/<span class="kbd">instructions</span> content plus the minimum neutral adapter framing required for protocol translation.</li>
+                <li>Disable all Copilot SDK tools by default. The runtime must not read files, write files, run shell commands, call MCP servers, access memory, or invoke any SDK-provided tool unless a future explicit opt-in feature enables a narrowly documented capability.</li>
+                <li>Support client-defined OpenAI tools by proxying their schemas into temporary SDK custom tools and yielding tool invocations back to the client for execution; the API broker never runs client business logic itself.</li>
+                <li>Work with standard OpenAI SDKs by changing <span class="kbd">base_url</span> and, when proxy auth is enabled, the API key.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Non-goals for the first milestone</h4>
+              <ul>
+                <li>Perfect parity with every OpenAI request field, beta endpoint, fine-tuning endpoint, batch endpoint, audio endpoint, or embeddings endpoint.</li>
+                <li>Bypassing Copilot subscription rules, quotas, model policies, or authentication requirements.</li>
+                <li>Using Copilot as a coding agent, preserving the Copilot CLI persona, or exposing Copilot SDK tools as part of the default API behavior.</li>
+                <li>Executing arbitrary OpenAI tool calls on the server. The server brokers tool requests and results; clients own execution.</li>
+                <li>Hiding differences in model behavior caused by Copilot SDK agent/session semantics.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="callout">
+            <strong>Compatibility posture:</strong> the Copilot SDK is an upstream model transport, not the product persona. Implement a small, well-tested OpenAI-compatible surface first; replace the SDK default prompt, keep SDK tools unavailable by default, accept unsupported options only when they can be safely ignored, and return OpenAI-shaped <span class="kbd">invalid_request_error</span> responses when ignoring would surprise clients.
+          </div>
+        </section>
+
+        <section id="decisions">
+          <h2><span class="num">02</span>Resolved design decisions</h2>
+          <p>
+            The implementation plan has been refined through design review and two focused spikes: <span class="kbd">spikes/synthetic-session-hydration.md</span> and <span class="kbd">spikes/tool-choice-enforcement.md</span>. These decisions are part of the product contract unless a later implementation spike explicitly supersedes them.
+          </p>
+
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Runtime and state model</h4>
+              <ul>
+                <li>The service is a <strong>single-user concurrent proxy</strong>: many clients and sessions may be active, but there is one Copilot account/auth context.</li>
+                <li>There is no ambient or global conversation. Continuity requires explicit protocol state such as <span class="kbd">previous_response_id</span> or proxy-issued pending tool-call IDs.</li>
+                <li>Chat Completions is stateless and transcript-driven. Ordinary Chat requests use synthetic Copilot session hydration as the default history path.</li>
+                <li>Responses is the higher-fidelity stateful API and reuses the stored SDK session via <span class="kbd">previous_response_id</span>.</li>
+                <li>Retained session state is for observability/debugging, not implicit reuse.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Prompt and SDK behavior</h4>
+              <ul>
+                <li>Always pass <span class="kbd">SystemMessageConfig{Mode: "replace"}</span>. Never pass <span class="kbd">nil</span>, append, or customize mode.</li>
+                <li>Leading Chat <span class="kbd">system</span>/<span class="kbd">developer</span> messages and Responses <span class="kbd">instructions</span> are combined into the replacement prompt. Mid-conversation system/developer messages are rejected.</li>
+                <li>If no caller instructions exist, try empty replacement, then single-space replacement, then exact minimal fallback: <span class="kbd">You are a chat completion model.</span></li>
+                <li>Use the SDK-bundled/matched Copilot CLI by default. <span class="kbd">COPILOT_CLI_PATH</span> is an explicit advanced override.</li>
+                <li>SDK/CLI upgrades are blocked unless hydration, tool, prompt-isolation, and provider-shape tests pass.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Tools</h4>
+              <ul>
+                <li>Copilot SDK built-in tools, proxy-hosted MCP, config discovery, skills, memory, shell, file, and repository tools are disabled by default.</li>
+                <li>Clients may define OpenAI function tools. The proxy registers opaque request-scoped SDK aliases and yields tool calls back to clients; it never executes client business logic.</li>
+                <li>Client-hosted MCP is supported when the client exposes MCP tools as OpenAI function tools. Proxy-hosted MCP is not part of MVP.</li>
+                <li>MVP supports <span class="kbd">tool_choice</span> omitted/<span class="kbd">auto</span> and <span class="kbd">none</span>. Forced function and <span class="kbd">required</span> are rejected because the SDK/CLI does not enforce them.</li>
+                <li>Tool outputs are string-first. JSON object/array outputs are accepted as a convenience and serialized to JSON text; binary/multimodal outputs are rejected in MVP.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Operations and storage</h4>
+              <ul>
+                <li><span class="kbd">model</span> is required on every generation request. Unknown models are rejected after one forced model-cache refresh.</li>
+                <li>Proxy auth is opt-in: if <span class="kbd">COPILOT_API_KEY</span> is set, require bearer auth; if unset, start without auth and log a warning. Default bind remains loopback.</li>
+                <li>No proxy-level concurrency limits, generation timeouts, or payload limits by default. Pending tool-call TTL remains a configurable liveness guard.</li>
+                <li>Use XDG directories for data/state/cache/config. Retain session state verbatim forever by default.</li>
+                <li>Include <span class="kbd">copilot-api purge [--dry-run] [--yes]</span> in MVP. Purge refuses while a server lock is active; the same lock prevents two servers using the same store.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="callout">
+            <strong>Thin proxy principle:</strong> where behavior is not required for OpenAI compatibility or safety, prefer passing through to the SDK/service over adding project-specific throttles, schedulers, or policy layers.
+          </div>
+        </section>
+
+        <section id="architecture">
+          <h2><span class="num">03</span>Proposed architecture</h2>
+          <p>
+            Keep the Copilot SDK behind narrow internal interfaces, and isolate the risky parts: synthetic session hydration, client-tool proxying, and SDK session storage. The HTTP layer should remain OpenAI-shaped while the gateway owns SDK lifecycle and version coupling.
+          </p>
+
+          <div class="grid-3">
+            <div class="tile">
+              <h4>HTTP/API layer</h4>
+              <ul>
+                <li>Routes, request parsing, optional bearer auth, request IDs, and OpenAI-compatible error envelopes for <span class="kbd">/v1/*</span>.</li>
+                <li>SSE response writing with complete buffered tool-call objects in MVP.</li>
+                <li>Simple <span class="kbd">/healthz</span> and <span class="kbd">/readyz</span> operational JSON.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Compatibility layer</h4>
+              <ul>
+                <li>OpenAI Chat Completions and Responses structs, validation, IDs, usage, and error mapping.</li>
+                <li>Instruction folding into replacement system prompts.</li>
+                <li>Tool schema aliasing, pending tool-call batches, and strict tool-output validation.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Copilot integration layer</h4>
+              <ul>
+                <li>Embedded/matched CLI startup, ping, readiness, model cache, and SDK client lifecycle.</li>
+                <li>Synthetic Chat hydration through a project-owned <span class="kbd">SessionFsProvider</span>.</li>
+                <li>Responses SDK session reuse, parked tool handlers, and event collection.</li>
+              </ul>
+            </div>
+          </div>
+
+          <h3>Package layout</h3>
+          <pre><code>cmd/copilot-api/main.go          # serve command: config, lock, logger, HTTP startup/shutdown
+cmd/copilot-api/purge.go         # manual purge command; refuses while server lock is held
+internal/config/                 # env parsing, XDG directory resolution, defaults
+internal/httpapi/                # routes, middleware, OpenAI errors, health/readiness
+internal/openai/                 # OpenAI request/response/SSE schemas and IDs
+internal/copilotgw/              # Copilot SDK client/session abstraction and embedded CLI checks
+internal/hydration/              # versioned OpenAI messages → SDK events.jsonl generator/validator
+internal/sessionfs/              # project-owned SessionFsProvider backed by XDG data dirs
+internal/toolproxy/              # client-defined tool schemas, opaque aliases, pending batches
+internal/sessionstore/           # metadata.json, response lookup, pending-tool records
+internal/observability/          # redacted logs, request correlation, optional content logging
+internal/testutil/               # fake gateway, local provider capture, golden fixtures</code></pre>
+
+          <h3>Configuration surface</h3>
+          <table class="matrix">
+            <thead>
+              <tr><th>Setting</th><th>Purpose</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><span class="kbd">COPILOT_API_ADDR</span></td><td>HTTP listen address.</td><td><span class="kbd">127.0.0.1:8080</span></td></tr>
+              <tr><td><span class="kbd">COPILOT_API_KEY</span></td><td>Optional proxy bearer token. If unset, auth is disabled and a warning is logged.</td><td>Unset / auth disabled.</td></tr>
+              <tr><td><span class="kbd">GITHUB_TOKEN</span></td><td>Optional token passed to the Copilot SDK; otherwise use logged-in user auth.</td><td>Empty.</td></tr>
+              <tr><td><span class="kbd">COPILOT_CLI_PATH</span></td><td>Explicit override for the Copilot CLI. Omit to use the SDK-bundled matched CLI.</td><td>Embedded matched CLI.</td></tr>
+              <tr><td><span class="kbd">COPILOT_MODELS_CACHE_TTL</span></td><td>Successful model-list cache TTL; unknown models force one immediate refresh before rejection.</td><td>10 minutes.</td></tr>
+              <tr><td><span class="kbd">COPILOT_TOOL_CALL_TTL</span></td><td>How long a parked tool-call continuation waits for client outputs.</td><td>5 minutes.</td></tr>
+              <tr><td><span class="kbd">COPILOT_REQUEST_TIMEOUT</span></td><td>Optional generation timeout. <span class="kbd">0</span> disables proxy-imposed generation timeouts.</td><td>0.</td></tr>
+              <tr><td><span class="kbd">COPILOT_MAX_REQUEST_BODY_BYTES</span></td><td>Optional HTTP body cap. <span class="kbd">0</span> means no proxy-specific cap.</td><td>0.</td></tr>
+              <tr><td><span class="kbd">COPILOT_API_DATA_DIR</span></td><td>XDG data override for retained session files.</td><td><span class="kbd">$XDG_DATA_HOME/copilot-api</span>.</td></tr>
+              <tr><td><span class="kbd">COPILOT_API_STATE_DIR</span></td><td>XDG state override for lock, pending records, and diagnostics.</td><td><span class="kbd">$XDG_STATE_HOME/copilot-api</span>.</td></tr>
+              <tr><td><span class="kbd">COPILOT_API_CACHE_DIR</span></td><td>XDG cache override for model cache and transient cache files.</td><td><span class="kbd">$XDG_CACHE_HOME/copilot-api</span>.</td></tr>
+              <tr><td><span class="kbd">COPILOT_STRICT_COMPAT</span></td><td>Reject unsupported OpenAI fields instead of using fallback approximations.</td><td>true.</td></tr>
+              <tr><td><span class="kbd">COPILOT_LOG_CONTENT</span></td><td>Include prompts/responses/tool content in logs. Emits a loud warning when enabled.</td><td>false.</td></tr>
+            </tbody>
+          </table>
+        </section>
+        <section id="compatibility">
+          <h2><span class="num">04</span>Compatibility strategy</h2>
+          <p>
+            The service should publish a README compatibility matrix matching these decisions. Unsupported semantics fail closed by default rather than silently approximating OpenAI behavior.
+          </p>
+
+          <table class="matrix">
+            <thead>
+              <tr><th>Feature</th><th>Target behavior</th><th>Status target</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Model listing</td>
+                <td>Use <span class="kbd">client.ListModels(ctx)</span>, cache successful results, refresh once on unknown model, then reject unavailable models with <span class="kbd">model_not_found</span>.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>Chat history</td>
+                <td>Default to synthetic session hydration: write versioned SDK <span class="kbd">events.jsonl</span> for prior messages, resume the synthetic session, and send only the final user turn. Fail closed on hydration failure unless explicit fallback mode is configured.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>Chat request ending</td>
+                <td>Ordinary Chat requests must end in a user message. Recognized parked tool continuations may end in tool outputs for the pending batch.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>Responses continuity</td>
+                <td>Reuse the stored SDK session for <span class="kbd">previous_response_id</span>. <span class="kbd">store:false</span> disables API-visible retrieval after pending continuations are no longer needed, while debug files remain retained.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>System/developer instructions</td>
+                <td>Combine leading Chat system/developer messages and Responses instructions into a replacement system prompt. Reject mid-conversation instruction messages. Empty instructions use empty → space → exact minimal fallback if required.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>Client-defined function tools</td>
+                <td>Accept OpenAI function tools only. Register opaque SDK aliases, yield calls to clients, park Chat/Responses continuations when tool outputs are required, and validate one output per pending call.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>MCP tools</td>
+                <td>Client-hosted MCP is supported when represented as OpenAI function tools. Proxy-hosted/Copilot SDK MCP remains disabled.</td>
+                <td><span class="status mvp">Client-hosted only</span></td>
+              </tr>
+              <tr>
+                <td><span class="kbd">tool_choice</span></td>
+                <td>Support omitted/<span class="kbd">auto</span> and <span class="kbd">none</span>. Reject forced function and <span class="kbd">required</span>; spike evidence shows the SDK/CLI does not send or enforce true tool-choice controls.</td>
+                <td><span class="status mvp">Partial</span></td>
+              </tr>
+              <tr>
+                <td><span class="kbd">parallel_tool_calls</span></td>
+                <td>Chat accepts omitted/<span class="kbd">false</span> and rejects <span class="kbd">true</span>. Responses accepts omitted/<span class="kbd">true</span> and rejects <span class="kbd">false</span>. Internal pending batches still support multiple calls.</td>
+                <td><span class="status mvp">Backend-shaped</span></td>
+              </tr>
+              <tr>
+                <td>Streaming tool calls</td>
+                <td>Stream text deltas normally, buffer tool calls, emit complete tool-call/function-call objects, preserve any pre-tool text, then finish with <span class="kbd">tool_calls</span> / required-action semantics.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>Usage reporting</td>
+                <td>Map SDK <span class="kbd">assistant.usage</span> input/output/reasoning token fields when present; omit or null unavailable details rather than inventing numbers.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+              <tr>
+                <td>Images and multimodal output</td>
+                <td>Image inputs and binary/multimodal tool outputs are deferred. Text-only tool outputs are MVP; JSON object/array outputs are serialized to JSON text.</td>
+                <td><span class="status later">Phase 2</span></td>
+              </tr>
+              <tr>
+                <td>Unsupported fields</td>
+                <td>Strict mode rejects semantics that cannot be honored. No server default model, no proxy concurrency limits, and no generation timeout are introduced by default.</td>
+                <td><span class="status mvp">MVP</span></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Endpoint target</h3>
+          <pre><code>GET    /healthz
+GET    /readyz
+GET    /v1/models
+POST   /v1/chat/completions
+POST   /v1/responses
+GET    /v1/responses/{response_id}
+DELETE /v1/responses/{response_id}
+
+# CLI, not HTTP:
+copilot-api purge [--dry-run] [--yes]</code></pre>
+        </section>
+        <section id="tool-calls">
+          <h2><span class="num">05</span>Client-defined tool-call proxy plan</h2>
+          <p>
+            Tool calls follow the raw OpenAI provider model: the client declares tools, the model decides whether to call them, the API returns the call to the client, and the client executes the tool and sends the result back. The server is only a schema adapter and synchronization broker.
+          </p>
+
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Client-owned execution</h4>
+              <p>Only tools supplied in the OpenAI request are exposed. The proxy registers opaque SDK aliases and yields calls; clients perform side effects, including MCP if they choose to back a function tool with MCP.</p>
+            </div>
+            <div class="tile">
+              <h4>No SDK built-ins</h4>
+              <p>File, shell, MCP, memory, skill, repository, and other Copilot SDK tools stay unavailable. Unknown SDK tool execution is an invariant violation and aborts the turn.</p>
+            </div>
+            <div class="tile">
+              <h4>Parked continuations</h4>
+              <p>When tools are called, Chat and Responses park live SDK proxy handlers and wait for exact client outputs, bounded by <span class="kbd">COPILOT_TOOL_CALL_TTL</span>.</p>
+            </div>
+          </div>
+
+          <h3>Inbound schema conversion</h3>
+          <ol>
+            <li>Accept only OpenAI function tools in MVP. Reject hosted tools, proxy-hosted MCP, file search, web search, computer/browser tools, and non-function tool types.</li>
+            <li>Validate function name, description, JSON Schema parameters, optional <span class="kbd">strict</span>, and request shape. Do not impose proxy-specific tool-count or payload-size limits by default.</li>
+            <li>Register every client tool under an opaque internal SDK alias and map it back to the public OpenAI name in all client-visible responses.</li>
+            <li>Set <span class="kbd">AvailableTools</span> to exactly the request-scoped aliases, or to an impossible sentinel for <span class="kbd">tool_choice: "none"</span>. Continue denying all SDK-provided or unknown permission requests.</li>
+            <li>Support <span class="kbd">tool_choice</span> omitted/<span class="kbd">auto</span> and <span class="kbd">none</span>. Reject forced function and <span class="kbd">required</span> because the SDK/CLI does not expose true enforcement.</li>
+          </ol>
+
+          <h3>Proxy handler contract</h3>
+          <pre><code>// Created per request from OpenAI function tool schemas.
+func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
+    call := PendingToolCall{
+        OpenAIToolCallID: mapSDKCallID(inv.ToolCallID),
+        SDKToolCallID:    inv.ToolCallID,
+        PublicName:       mapInternalNameToPublic(inv.ToolName),
+        ArgumentsJSON:    preserveArgumentsJSON(inv.Arguments),
+    }
+
+    publishCompleteToolCall(call)       // yields OpenAI tool_calls/function_call output
+    result := waitForClientToolOutput() // parked until all batch outputs arrive or TTL expires
+    return toolResultForLLM(result), nil // string passthrough or JSON text
+}</code></pre>
+
+          <h3>Chat Completions behavior</h3>
+          <table class="matrix">
+            <thead>
+              <tr><th>Step</th><th>Server behavior</th><th>Client behavior</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Request with tools</td>
+                <td>Hydrate prior Chat history, resume synthetic session with replacement prompt, register proxy aliases, and send the final user turn.</td>
+                <td>Send standard OpenAI <span class="kbd">tools</span> with <span class="kbd">tool_choice</span> omitted/<span class="kbd">auto</span> or <span class="kbd">none</span>.</td>
+              </tr>
+              <tr>
+                <td>Model calls tools</td>
+                <td>Capture one or more SDK proxy invocations, return complete OpenAI <span class="kbd">message.tool_calls</span>, preserve any pre-tool text, set <span class="kbd">finish_reason</span> to <span class="kbd">tool_calls</span>, and keep the SDK handlers parked.</td>
+                <td>Execute the named tools locally using returned arguments.</td>
+              </tr>
+              <tr>
+                <td>Continuation</td>
+                <td>Recognize returned <span class="kbd">tool_call_id</span>s as explicit continuation handles, validate exactly one output per pending call, unblock the parked handlers, and let the same SDK turn continue.</td>
+                <td>Append one <span class="kbd">role: "tool"</span> message per returned call and call <span class="kbd">/v1/chat/completions</span> again before TTL expiry.</td>
+              </tr>
+              <tr>
+                <td>Streaming</td>
+                <td>Stream text deltas, buffer tool invocations, emit complete tool-call objects near the end, terminal chunk with <span class="kbd">finish_reason: "tool_calls"</span>, then <span class="kbd">data: [DONE]</span>.</td>
+                <td>Accumulate text/tool calls, execute tools after the stream ends, then submit outputs.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Responses API behavior</h3>
+          <ol>
+            <li>Create or resume the stored SDK session for the response chain; reuse that session for <span class="kbd">previous_response_id</span>.</li>
+            <li>When a proxy tool is invoked, return one or more <span class="kbd">function_call</span> output items with stable <span class="kbd">call_id</span>, public name, and arguments.</li>
+            <li>The client executes tools and submits <span class="kbd">function_call_output</span> items with <span class="kbd">previous_response_id</span>.</li>
+            <li>The server validates ownership, unknown/missing/duplicate IDs, and one output per pending call, then unblocks the matching SDK proxy handlers.</li>
+            <li>If pending state expires, mark retained metadata as expired, abort/disconnect the live SDK session, retain files for debugging, and return an OpenAI-shaped expired-call error on future continuation.</li>
+          </ol>
+
+          <h3>Tool output and error semantics</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Output shape</h4>
+              <ul>
+                <li>String outputs pass through exactly to <span class="kbd">ToolResult.TextResultForLLM</span>.</li>
+                <li>JSON object/array outputs are accepted as a convenience and serialized to JSON text, preserving raw JSON bytes where possible.</li>
+                <li>Binary, image, audio, file-reference, and partial/streaming tool outputs are rejected in MVP.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Errors and batches</h4>
+              <ul>
+                <li>Client tool failures are normal tool output content, not HTTP/proxy failures.</li>
+                <li>Parallel batches are supported internally; all pending outputs for a batch are required before continuation.</li>
+                <li>Unknown SDK tool calls, built-in tool requests, expired pending calls, and aliasing failures are invariant/upstream errors and are logged with request IDs.</li>
+                <li>Pending TTL is configurable; it is a live-handler liveness guard, not a debug-data retention policy.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+        <section id="phases">
+          <h2><span class="num">06</span>Phased implementation roadmap</h2>
+          <div class="timeline">
+            <article class="phase">
+              <div><span class="badge">0</span></div>
+              <div>
+                <h3>Technical spike and compatibility decisions</h3>
+                <ul>
+                  <li>Use <span class="kbd">spikes/synthetic-session-hydration.md</span> as evidence that synthetic <span class="kbd">events.jsonl</span> history is consumed as model context after resume.</li>
+                  <li>Use <span class="kbd">spikes/tool-choice-enforcement.md</span> as evidence that true forced/<span class="kbd">required</span> tool choice is not available through SDK/CLI v0.3.0.</li>
+                  <li>Prove empty/space/minimal replacement prompts, built-in tool disablement, and embedded CLI compatibility with repeatable live tests.</li>
+                  <li>Keep these spikes as upgrade gates: SDK/CLI changes cannot land until equivalent checks pass.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> compatibility evidence is recorded, accepted decisions are reflected in the plan, and remaining unknowns are tracked as tests or deferred work.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">1</span></div>
+              <div>
+                <h3>Project skeleton and server foundation</h3>
+                <ul>
+                  <li>Create <span class="kbd">cmd/copilot-api</span> and internal package structure.</li>
+                  <li>Implement config loading, XDG directory resolution, server lock, optional auth middleware, request IDs, health/readiness endpoints, graceful shutdown, and JSON error writer.</li>
+                  <li>Turn the Copilot SDK dependency from indirect to direct and wire the embedded/matched CLI path by default.</li>
+                  <li>Add <span class="kbd">copilot-api purge [--dry-run] [--yes]</span>, refusing while the server lock is active.</li>
+                  <li>Add CI-friendly commands: <span class="kbd">go test ./...</span>, <span class="kbd">go vet ./...</span>, and a future lint target.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> server boots with or without proxy auth, obtains the store lock, reports readiness, and has baseline tests.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">2</span></div>
+              <div>
+                <h3>Copilot gateway abstraction</h3>
+                <ul>
+                  <li>Implement <span class="kbd">Gateway</span> interface for model listing and single-turn generation.</li>
+                  <li>Manage one SDK client per process with startup, ping/readiness, model cache, and clean stop on shutdown.</li>
+                  <li>Implement project-owned <span class="kbd">SessionFsProvider</span>, metadata storage, and retained session layout under XDG data/state/cache directories.</li>
+                  <li>Add <span class="kbd">internal/hydration</span> for versioned synthetic Chat event generation and validation.</li>
+                  <li>Add <span class="kbd">internal/toolproxy</span> abstractions for request-scoped proxy tool registration, parked pending batches, and client-output continuations.</li>
+                  <li>Collect assistant text, deltas, reasoning events, tool requests, usage, idle, and error events without adding proxy concurrency caps.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> fake and real gateway implementations can complete a text prompt through one internal interface.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">3</span></div>
+              <div>
+                <h3>OpenAI schemas, validation, and model endpoint</h3>
+                <ul>
+                  <li>Define request/response structs for model objects, chat completions, chat chunks, response objects, response stream events, errors, usage, tool definitions, tool calls, and tool outputs.</li>
+                  <li>Implement robust validation for required fields, unsupported fields, content part types, tool schemas, tool-choice semantics, tool result messages, and streaming combinations.</li>
+                  <li>Wire <span class="kbd">GET /v1/models</span> to Copilot model cache and provide OpenAI-compatible object shape.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> OpenAI SDKs can call <span class="kbd">models.list()</span> successfully.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">4</span></div>
+              <div>
+                <h3>Chat Completions MVP</h3>
+                <ul>
+                  <li>Hydrate prior <span class="kbd">messages</span> into synthetic SDK events, resume the session, and send only the final user turn. Reject ordinary Chat requests that do not end in a user message.</li>
+                  <li>Combine leading <span class="kbd">system</span>/<span class="kbd">developer</span> messages into a replacement system prompt; reject mid-conversation instruction messages.</li>
+                  <li>Map final assistant response to <span class="kbd">chat.completion</span> with content, finish reason, created timestamp, id, model, and usage; park and return captured client-tool invocations as <span class="kbd">tool_calls</span>.</li>
+                  <li>Document unsupported fields such as <span class="kbd">n</span>, <span class="kbd">logprobs</span>, audio, and prediction unless later implemented.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> curl, OpenAI Python, and OpenAI JS clients can perform non-streaming chat completions.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">5</span></div>
+              <div>
+                <h3>Streaming Chat Completions</h3>
+                <ul>
+                  <li>Implement SSE writer with flush, context cancellation, heartbeat policy if needed, and OpenAI-compatible <span class="kbd">data:</span> frames.</li>
+                  <li>Emit initial role and text delta chunks from SDK events; buffer tool calls and emit complete tool-call objects near the end, then terminal finish chunk, optional usage chunk, and <span class="kbd">data: [DONE]</span>.</li>
+                  <li>Ensure upstream SDK errors become stream error events where clients can handle them, while logs retain request correlation IDs.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> standard streaming loops in OpenAI clients render tokens incrementally and terminate cleanly.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">6</span></div>
+              <div>
+                <h3>Responses API MVP</h3>
+                <ul>
+                  <li>Support string input and message-array input with text content parts.</li>
+                  <li>Map <span class="kbd">instructions</span> to the same replacement system prompt path and reuse the stored SDK session for <span class="kbd">previous_response_id</span>.</li>
+                  <li>Return OpenAI-shaped response objects with <span class="kbd">output</span>, <span class="kbd">output_text</span>, lifecycle status, model, timestamps, and usage; represent proxy tool invocations as <span class="kbd">function_call</span> output items.</li>
+                  <li>Accept <span class="kbd">function_call_output</span> input items on <span class="kbd">previous_response_id</span> continuations and feed client outputs back into parked SDK proxy handlers.</li>
+                  <li>Implement Responses API stream event sequence for text deltas, function-call arguments, and completion.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> OpenAI Responses API clients can create text responses, stream output text, and resume supported stored responses.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">7</span></div>
+              <div>
+                <h3>Multimodal and advanced compatibility expansion</h3>
+                <ul>
+                  <li>Map image URL/base64 content to Copilot SDK attachments and enforce model vision limits.</li>
+                  <li>Improve tool-choice enforcement, partial tool-output continuation, structured tool-output helpers, and richer argument-delta streaming if SDK behavior supports them.</li>
+                  <li>Add prompt-level JSON mode and optional schema validation/retry for structured output compatibility.</li>
+                  <li>Expand content part handling for refusals, annotations, and reasoning summaries when source events support them.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> each expanded feature has a compatibility test and explicit documentation of known deviations.</p>
+              </div>
+            </article>
+
+            <article class="phase">
+              <div><span class="badge">8</span></div>
+              <div>
+                <h3>Hardening, packaging, and documentation</h3>
+                <ul>
+                  <li>Add Dockerfile, release builds, sample compose file, and example client snippets.</li>
+                  <li>Add panic recovery, redacted logs, readiness diagnostics, startup/model-refresh timeouts, and metrics without proxy-level concurrency or generation-timeout limits by default.</li>
+                  <li>Write README compatibility matrix, configuration reference, XDG storage guide, security model, troubleshooting guide, purge documentation, and OpenAI SDK examples.</li>
+                  <li>Use the SDK bundler flow to embed the matched Copilot CLI and document <span class="kbd">COPILOT_CLI_PATH</span> as an advanced override.</li>
+                </ul>
+                <p class="exit"><strong>Exit:</strong> a user can install, authenticate, run, and call the API using documented commands without reading source code.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="data-flow">
+          <h2><span class="num">07</span>Request and event flows</h2>
+
+          <h3>Chat Completions flow</h3>
+          <ol>
+            <li>If <span class="kbd">COPILOT_API_KEY</span> is set, authenticate <span class="kbd">Authorization: Bearer ...</span>; if unset, run unauthenticated and log a warning.</li>
+            <li>Validate <span class="kbd">model</span>, message ordering, feature support, client tool schemas, <span class="kbd">tool_choice</span>, <span class="kbd">parallel_tool_calls</span>, and any tool-output continuation.</li>
+            <li>For ordinary Chat turns, split leading system/developer messages into replacement prompt, hydrate prior messages into versioned SDK events, resume the synthetic session, and send only the final user message.</li>
+            <li>For recognized parked tool continuations, validate every returned <span class="kbd">tool_call_id</span> against pending state and unblock the live SDK proxy handlers instead of sending a new prompt.</li>
+            <li>Use disabled SDK built-ins, request-scoped proxy tool aliases, no config discovery/MCP/skills, and a denying permission handler with exact proxy-tool exceptions.</li>
+            <li>Return OpenAI JSON or SSE frames. If proxy tools are invoked, yield complete <span class="kbd">tool_calls</span>, preserve pre-tool text, and finish with <span class="kbd">tool_calls</span>.</li>
+            <li>Retain synthetic session state and <span class="kbd">metadata.json</span> forever under XDG data for debugging; never reuse it implicitly for later Chat requests.</li>
+          </ol>
+
+          <h3>Responses API continuity flow</h3>
+          <ol>
+            <li>If <span class="kbd">previous_response_id</span> is absent, create a new stored SDK session and response record.</li>
+            <li>If present, load the stored mapping and resume/reuse the same SDK session with the same safety settings.</li>
+            <li>For <span class="kbd">function_call_output</span> items, validate ownership, unknown/missing/duplicate IDs, and one output per pending call, then unblock matching proxy handlers.</li>
+            <li>For normal new input, send only the new input to the resumed SDK session.</li>
+            <li>Persist response metadata, SDK session ID, model, status, output items, pending call IDs, usage, and API-visible store state. Debug files remain retained forever even when <span class="kbd">store:false</span> disables later retrieval.</li>
+          </ol>
+
+          <h3>Internal gateway sketch</h3>
+          <pre><code>type Gateway interface {
+    ListModels(ctx context.Context) ([]Model, error)
+    Chat(ctx context.Context, req ChatTurnRequest) (*TurnResult, error)
+    StreamChat(ctx context.Context, req ChatTurnRequest) (&lt;-chan TurnEvent, error)
+    CreateResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error)
+    ContinueResponse(ctx context.Context, responseID string, req ResponseRequest) (*ResponseResult, error)
+    ContinueToolCalls(ctx context.Context, pendingID string, outputs []ToolOutput) (*TurnResult, error)
+}
+
+type ChatTurnRequest struct {
+    Model string
+    LeadingInstructions []Instruction
+    HydratedHistory []MessageEvent
+    FinalUserMessage Message
+    ClientTools []ClientToolSchema
+    ToolChoice ToolChoice // auto/none only in MVP
+}
+
+type TurnResult struct {
+    OpenAIID string
+    SDKSessionID string
+    Text string
+    Reasoning string
+    ToolCalls []ToolCall // yielded to client; never executed by the gateway
+    Usage Usage
+    FinishReason string
+    RetainedPath string
+}</code></pre>
+        </section>
+        <section id="testing">
+          <h2><span class="num">08</span>Testing plan</h2>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Default fast tests</h4>
+              <ul>
+                <li>OpenAI schema validation and error envelope unit tests.</li>
+                <li>Hydration generator tests: parent IDs, timestamps, turn delimiters, assistant text, tool calls, tool results, and <span class="kbd">copilot.UnmarshalSessionEvent</span> round trips.</li>
+                <li>Instruction folding tests: leading system/developer ordering, mid-conversation rejection, empty/space/minimal prompt selection.</li>
+                <li>Tool conversion tests: opaque aliases, reserved names, <span class="kbd">tool_choice</span> auto/none/rejection, <span class="kbd">parallel_tool_calls</span> endpoint rules, and output serialization.</li>
+                <li>SSE tests for text chunks, buffered complete tool calls, preserved pre-tool text, terminal finish reasons, <span class="kbd">[DONE]</span>, and cancellation.</li>
+                <li>Store tests for XDG paths, lock behavior, <span class="kbd">metadata.json</span>, forever retention, and purge dry-run/refusal while locked.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Gated integration tests</h4>
+              <ul>
+                <li>Live Copilot tests gated by <span class="kbd">COPILOT_API_LIVE_TESTS=1</span>, not part of default <span class="kbd">go test ./...</span>.</li>
+                <li>Synthetic text-history nonce recall and synthetic tool-result recall.</li>
+                <li>Empty/space/minimal replacement prompt proof using captured provider-bound system content.</li>
+                <li>Built-in tool disablement proof: no file/shell/MCP/memory/SDK tools are visible or executable by default.</li>
+                <li>Provider request capture for tool availability: <span class="kbd">tools: []</span> for none, aliases only for auto, no true forced/<span class="kbd">required</span> tool-choice claim.</li>
+                <li>OpenAI Python and JS SDK compatibility tests against the local server.</li>
+              </ul>
+            </div>
+          </div>
+
+          <h3>SDK upgrade gate</h3>
+          <div class="callout">
+            <strong>No SDK/CLI upgrade lands</strong> unless hydration, tool-result hydration, replacement prompt, built-in tool disablement, and tool-choice provider-shape tests pass against the candidate version.
+          </div>
+
+          <h3>Representative acceptance checks</h3>
+          <pre><code># Model listing; Authorization header is required only when COPILOT_API_KEY is set
+curl http://127.0.0.1:8080/v1/models
+
+# Chat completion
+curl -s http://127.0.0.1:8080/v1/chat/completions   -H "Content-Type: application/json"   -d '{"model":"gpt-5","messages":[{"role":"user","content":"Say hello in five words."}]}'
+
+# Streaming chat completion
+curl -N http://127.0.0.1:8080/v1/chat/completions   -H "Content-Type: application/json"   -d '{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"Count to three."}]}'
+
+# Client-defined tool call should yield to the client, not execute server-side
+curl -s http://127.0.0.1:8080/v1/chat/completions   -H "Content-Type: application/json"   -d '{"model":"gpt-5","messages":[{"role":"user","content":"Use get_weather for Paris."}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather by city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}'
+
+# Manual purge; refuses while server lock is active
+copilot-api purge --dry-run</code></pre>
+        </section>
+        <section id="operations">
+          <h2><span class="num">09</span>Security and operations</h2>
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Security defaults</h4>
+              <ul>
+                <li>Proxy auth is enabled only when <span class="kbd">COPILOT_API_KEY</span> is set; otherwise the server starts unauthenticated and logs a clear warning. Default bind is <span class="kbd">127.0.0.1:8080</span>.</li>
+                <li>Always replace the Copilot SDK system prompt; never use SDK default, append, customize, or nil system prompt.</li>
+                <li>Deny Copilot permission requests by default; allow only exact request-scoped proxy tools whose handlers perform no side effects.</li>
+                <li>Disable SDK tools, proxy-hosted MCP, config discovery, skills, repository instructions, shell/file access, and memory by default.</li>
+                <li>Use logged-in GitHub/Copilot auth by default; <span class="kbd">GITHUB_TOKEN</span> is an optional process-wide override. No per-request GitHub auth in MVP.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>State and lifecycle</h4>
+              <ul>
+                <li>Use XDG data/state/cache/config directories with explicit env overrides. Create sensitive dirs/files with <span class="kbd">0700</span>/<span class="kbd">0600</span> best effort.</li>
+                <li>Retain session state verbatim forever by default for debugging. Store proxy <span class="kbd">metadata.json</span> next to every retained Chat/Responses session.</li>
+                <li>Use a server lock to prevent two processes sharing the same store and to make <span class="kbd">copilot-api purge</span> safe.</li>
+                <li>Do not implement scheduled cleanup. Manual purge is the user-controlled cleanup mechanism.</li>
+                <li>Pending tool-call TTL remains configurable and aborts live parked handlers while retaining debug files.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Thin pass-through operations</h4>
+              <ul>
+                <li>No proxy-level concurrency limits, generation timeouts, or payload limits by default.</li>
+                <li>Startup/readiness and model-refresh operations may have practical timeouts because startup cannot hang forever.</li>
+                <li>Use embedded/matched CLI by default; fail startup/readiness on SDK/CLI incompatibility or model-list failure.</li>
+                <li>Logs redact prompts, responses, tool arguments, tool outputs, and tokens by default. <span class="kbd">COPILOT_LOG_CONTENT=true</span> enables content logging with a loud warning.</li>
+                <li>Every HTTP response includes <span class="kbd">X-Request-ID</span>; client-supplied request IDs are metadata only.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+        <section id="risks">
+          <h2><span class="num">10</span>Risks and mitigations</h2>
+          <table class="matrix">
+            <thead>
+              <tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Synthetic hydration depends on internal SDK event semantics</td>
+                <td>SDK/CLI changes could silently break Chat history fidelity.</td>
+                <td>Pin SDK/CLI, isolate <span class="kbd">internal/hydration</span>, validate generated events, retain transcript fallback as an explicit escape hatch, and gate upgrades on live hydration tests.</td>
+              </tr>
+              <tr>
+                <td>Copilot default prompt or tools leak into requests</td>
+                <td>The API would stop behaving like a vanilla inference provider.</td>
+                <td>Always replacement-mode system prompts; empty/space/minimal fallback tests; layered built-in tool disablement; abort on unknown SDK tool execution.</td>
+              </tr>
+              <tr>
+                <td>OpenAI tool-choice semantics cannot be fully honored</td>
+                <td>Clients using forced function or required tool use could get direct text despite expecting a tool call.</td>
+                <td>Support only auto/none in MVP and reject forced/<span class="kbd">required</span> with OpenAI-shaped errors; document spike evidence.</td>
+              </tr>
+              <tr>
+                <td>Parked tool-call continuations leak live resources</td>
+                <td>Blocked SDK handlers could wait forever if clients never return outputs.</td>
+                <td>Use configurable pending TTL, abort/disconnect expired live sessions, retain expired state for debugging, and reject late continuations clearly.</td>
+              </tr>
+              <tr>
+                <td>Forever retention stores sensitive data</td>
+                <td>Prompts, responses, and tool outputs remain on disk until manual purge.</td>
+                <td>Use XDG user dirs with restrictive permissions, document sensitivity and purge command, redact logs by default, and never expose Chat retrieval endpoints.</td>
+              </tr>
+              <tr>
+                <td>Multiple server processes corrupt the store</td>
+                <td>Concurrent writers could damage retained session state or pending records.</td>
+                <td>Acquire a server lock in XDG state dir; purge refuses while lock is held; users can run multiple instances only with distinct dirs/ports.</td>
+              </tr>
+              <tr>
+                <td>Unsupported OpenAI fields silently mislead users</td>
+                <td>Clients may think parameters were honored when the SDK ignored them.</td>
+                <td>Strict mode defaults to rejection; any fallback/approximation must be explicit and observable.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        <section id="done">
+          <h2><span class="num">11</span>Definition of done</h2>
+          <ul>
+            <li>A user can run the binary with logged-in Copilot auth or <span class="kbd">GITHUB_TOKEN</span>, optionally set <span class="kbd">COPILOT_API_KEY</span>, and call the service from curl plus official OpenAI Python/JS SDKs.</li>
+            <li>The service uses the embedded/matched Copilot CLI by default and fails readiness on SDK/CLI incompatibility or model-list failure.</li>
+            <li><span class="kbd">GET /v1/models</span>, non-streaming/streaming <span class="kbd">/v1/chat/completions</span>, <span class="kbd">POST /v1/responses</span>, <span class="kbd">GET /v1/responses/{response_id}</span>, and <span class="kbd">DELETE /v1/responses/{response_id}</span> are implemented and documented.</li>
+            <li>Chat Completions uses synthetic session hydration by default, rejects unsupported message ordering, fails closed on hydration failures, and retains session state plus metadata forever for debugging.</li>
+            <li>Responses continuations reuse stored SDK sessions through <span class="kbd">previous_response_id</span>, with API-visible <span class="kbd">store</span> behavior separated from debug retention.</li>
+            <li>The Copilot SDK default system prompt and coding-agent persona are never used; empty/space/minimal replacement behavior is proven by tests.</li>
+            <li>SDK-provided tools and proxy-hosted MCP are disabled. Client-defined OpenAI function tools are proxied under opaque aliases, yielded back to clients, and continued from validated client outputs without gateway-side execution.</li>
+            <li>MVP tool semantics are documented: <span class="kbd">tool_choice</span> auto/none only, endpoint-specific <span class="kbd">parallel_tool_calls</span>, buffered streaming tool calls, string-first tool outputs, and strict call-ID validation.</li>
+            <li>OpenAI-shaped error responses are returned consistently for <span class="kbd">/v1/*</span>; health/readiness use simple operational JSON.</li>
+            <li>XDG data/state/cache dirs, server lock, redacted logs, request IDs, forever retention, and <span class="kbd">copilot-api purge [--dry-run] [--yes]</span> are implemented.</li>
+            <li>Default tests pass with <span class="kbd">go test ./...</span>; live Copilot integration tests are gated by env and must pass before SDK/CLI upgrades.</li>
+          </ul>
+
+          <div class="callout">
+            <strong>Recommended first pull request:</strong> server foundation + XDG store/lock + embedded CLI startup/readiness + <span class="kbd">GET /v1/models</span> + hydration and tool-choice proof tests. This creates the compatibility spine before full generation semantics.
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <p class="footer">
+      Source context: repository instructions in <span class="kbd">AGENTS.md</span>, module metadata in <span class="kbd">go.mod</span>, local GitHub Copilot SDK v0.3.0 documentation, and spike reports in <span class="kbd">spikes/</span>.
+    </p>
+  </div>
+</body>
+</html>
