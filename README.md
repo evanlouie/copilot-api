@@ -42,7 +42,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 
 | Feature | Behavior |
 | --- | --- |
-| Models | `model` is required for every generation request. Unknown models are rejected as `model_not_found` after a forced model-cache refresh. Model metadata may include `supports_vision` and `vision` limits. |
+| Models | `model` is required for every generation request. Unknown models are rejected as `model_not_found` after a forced model-cache refresh. Model metadata may include token limits such as `max_context_window_tokens`, `max_prompt_tokens`, and `max_output_tokens`, plus `supports_vision` and `vision` limits. |
 | Reasoning effort | Send top-level `reasoning_effort` on Chat Completions or Responses requests. The value is forwarded to Copilot when supplied; omit it to use the model default. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. The Responses `reasoning` object is not supported. |
 | Chat history | Leading `system`/`developer` messages become replacement system instructions. Prior non-final messages are converted to Copilot SDK `events.jsonl`; only the final user turn is sent. Mid-conversation `system`/`developer` messages are rejected. SDK infinite-session auto-compaction is disabled. |
 | Prompt isolation | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions try empty, single-space, then `You are a chat completion model.`. |

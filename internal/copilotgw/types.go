@@ -11,9 +11,16 @@ type Model struct {
 	ID             string
 	Name           string
 	Metadata       map[string]any
+	Limits         *TokenLimits
 	VisionKnown    bool
 	SupportsVision bool
 	Vision         *VisionLimits
+}
+
+type TokenLimits struct {
+	MaxContextWindowTokens *int64
+	MaxPromptTokens        *int64
+	MaxOutputTokens        *int64
 }
 
 type VisionLimits struct {
