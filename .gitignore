@@ -1,0 +1,26 @@
+# Binaries and build outputs
+/copilot-api
+/bin/
+/build/
+/dist/
+/out/
+
+# Generated Copilot SDK embedded CLI bundle artifacts.
+# Run `go tool bundler --output cmd/copilot-api` before release builds that need an embedded CLI.
+/cmd/copilot-api/zcopilot_*
+
+# Test and coverage artifacts
+*.test
+*.prof
+coverage.out
+coverage.html
+
+# Temporary files
+/tmp/
+*.tmp
+*.log
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
