@@ -43,6 +43,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | Feature | Behavior |
 | --- | --- |
 | Models | `model` is required for every generation request. Unknown models are rejected as `model_not_found` after a forced model-cache refresh. |
+| Reasoning effort | Send top-level `reasoning_effort` on Chat Completions or Responses requests. The value is forwarded to Copilot when supplied; omit it to use the model default. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. The Responses `reasoning` object is not supported. |
 | Chat history | Leading `system`/`developer` messages become replacement system instructions. Prior non-final messages are converted to Copilot SDK `events.jsonl`; only the final user turn is sent. Mid-conversation `system`/`developer` messages are rejected. SDK infinite-session auto-compaction is disabled. |
 | Prompt isolation | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions try empty, single-space, then `You are a chat completion model.`. |
 | SDK tools | Built-in file/shell/MCP/memory/skill/repository tools are not exposed. `AvailableTools` is either request-scoped aliases or an impossible sentinel. Permissions deny everything except exact request-scoped custom tools. |
@@ -86,11 +87,39 @@ curl http://127.0.0.1:8080/v1/models
 
 curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5","messages":[{"role":"user","content":"Say hello in five words."}]}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Say hello in five words."}]}'
 
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"Count to three."}]}'
+  -d '{"model":"gpt-5.5","stream":true,"messages":[{"role":"user","content":"Count to three."}]}'
+```
+
+### Reasoning effort
+
+Reasoning effort is a top-level request field. Values are model-dependent; inspect `GET /v1/models` for `supported_reasoning_efforts` and `default_reasoning_effort` metadata when the Copilot SDK provides it. For Responses requests, use `reasoning_effort` instead of a nested `reasoning` object.
+
+Chat Completions:
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-5.5",
+    "reasoning_effort": "high",
+    "messages": [{"role": "user", "content": "Solve this carefully: 19 * 37."}]
+  }'
+```
+
+Responses API:
+
+```sh
+curl -s http://127.0.0.1:8080/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-5.5",
+    "reasoning_effort": "medium",
+    "input": "Give me a concise migration plan."
+  }'
 ```
 
 ### OpenAI Python SDK
@@ -100,8 +129,15 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local-secret")
 resp = client.chat.completions.create(
-    model="gpt-5",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "Say hello in five words."}],
+)
+print(resp.choices[0].message.content)
+
+resp = client.chat.completions.create(
+    model="gpt-5.5",
+    reasoning_effort="high",
+    messages=[{"role": "user", "content": "Solve this carefully: 19 * 37."}],
 )
 print(resp.choices[0].message.content)
 ```
@@ -113,10 +149,17 @@ import OpenAI from "openai";
 
 const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "local-secret" });
 const resp = await client.chat.completions.create({
-  model: "gpt-5",
+  model: "gpt-5.5",
   messages: [{ role: "user", content: "Say hello in five words." }],
 });
 console.log(resp.choices[0].message.content);
+
+const reasoned = await client.chat.completions.create({
+  model: "gpt-5.5",
+  reasoning_effort: "high",
+  messages: [{ role: "user", content: "Solve this carefully: 19 * 37." }],
+});
+console.log(reasoned.choices[0].message.content);
 ```
 
 ### Client-owned function tools
@@ -125,7 +168,7 @@ console.log(resp.choices[0].message.content);
 curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model":"gpt-5",
+    "model":"gpt-5.5",
     "messages":[{"role":"user","content":"Use get_weather for Paris."}],
     "tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather by city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]
   }'
@@ -135,7 +178,7 @@ If the model calls the tool, the response contains `message.tool_calls`. Execute
 
 ```json
 {
-  "model": "gpt-5",
+  "model": "gpt-5.5",
   "messages": [
     {"role":"user","content":"Use get_weather for Paris."},
     {"role":"assistant","tool_calls":[{"id":"call_...","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},
