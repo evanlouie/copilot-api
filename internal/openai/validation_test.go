@@ -55,4 +55,40 @@ func TestContentTextRejectsImages(t *testing.T) {
 	if _, err := c.Text(); err == nil {
 		t.Fatal("expected unsupported image part error")
 	}
+	prompt, err := c.Prompt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt.Images) != 1 || prompt.Images[0].URL != "x" {
+		t.Fatalf("expected one parsed image, got %#v", prompt.Images)
+	}
+}
+
+func TestValidateChatAllowsUserImageParts(t *testing.T) {
+	var req ChatCompletionRequest
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"low"}}]}]}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateChatRequest(&req, true); err != nil {
+		t.Fatalf("user image content should be accepted: %v", err)
+	}
+	prompt, err := req.Messages[0].Prompt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt.Text != "describe" || len(prompt.Images) != 1 || prompt.Images[0].Detail != "low" {
+		t.Fatalf("unexpected prompt parse: %#v", prompt)
+	}
+}
+
+func TestValidateChatRejectsAssistantImageParts(t *testing.T) {
+	var req ChatCompletionRequest
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateChatRequest(&req, true); err == nil {
+		t.Fatal("expected assistant image content rejection")
+	}
 }

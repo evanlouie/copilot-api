@@ -113,6 +113,10 @@ func (m ChatMessage) Text() (string, error) {
 	return m.Content.Text()
 }
 
+func (m ChatMessage) Prompt() (PromptContent, error) {
+	return m.Content.Prompt()
+}
+
 type Content struct {
 	Raw     json.RawMessage
 	IsNull  bool
@@ -138,16 +142,38 @@ func NewTextContent(s string) Content {
 	return Content{Raw: b, Present: true}
 }
 
+type PromptContent struct {
+	Text   string
+	Images []ImageInput
+}
+
+type ImageInput struct {
+	URL    string
+	Detail string
+}
+
 func (c Content) Text() (string, error) {
+	prompt, err := c.Prompt()
+	if err != nil {
+		return "", err
+	}
+	if len(prompt.Images) > 0 {
+		return "", fmt.Errorf("image content is not supported in text-only content")
+	}
+	return prompt.Text, nil
+}
+
+func (c Content) Prompt() (PromptContent, error) {
 	if !c.Present || c.IsNull {
-		return "", nil
+		return PromptContent{}, nil
 	}
 	var s string
 	if err := json.Unmarshal(c.Raw, &s); err == nil {
-		return s, nil
+		return PromptContent{Text: s}, nil
 	}
 	var parts []ContentPart
 	if err := json.Unmarshal(c.Raw, &parts); err == nil {
+		var prompt PromptContent
 		var b strings.Builder
 		for _, p := range parts {
 			switch p.Type {
@@ -157,19 +183,57 @@ func (c Content) Text() (string, error) {
 				if p.Refusal != "" {
 					b.WriteString(p.Refusal)
 				}
+			case "image_url", "input_image":
+				image, err := p.Image()
+				if err != nil {
+					return PromptContent{}, err
+				}
+				prompt.Images = append(prompt.Images, image)
 			default:
-				return "", fmt.Errorf("unsupported content part type %q", p.Type)
+				return PromptContent{}, fmt.Errorf("unsupported content part type %q", p.Type)
 			}
 		}
-		return b.String(), nil
+		prompt.Text = b.String()
+		return prompt, nil
 	}
-	return "", fmt.Errorf("content must be a string or text content parts")
+	return PromptContent{}, fmt.Errorf("content must be a string or content parts")
 }
 
 type ContentPart struct {
-	Type    string `json:"type"`
-	Text    string `json:"text,omitempty"`
-	Refusal string `json:"refusal,omitempty"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	Refusal  string          `json:"refusal,omitempty"`
+	ImageURL json.RawMessage `json:"image_url,omitempty"`
+	FileID   string          `json:"file_id,omitempty"`
+	Detail   string          `json:"detail,omitempty"`
+}
+
+func (p ContentPart) Image() (ImageInput, error) {
+	if p.FileID != "" {
+		return ImageInput{}, fmt.Errorf("file_id image inputs are not supported")
+	}
+	if len(p.ImageURL) == 0 || string(p.ImageURL) == "null" {
+		return ImageInput{}, fmt.Errorf("%s content parts require image_url", p.Type)
+	}
+	var url string
+	if err := json.Unmarshal(p.ImageURL, &url); err == nil {
+		return ImageInput{URL: url, Detail: p.Detail}, nil
+	}
+	var obj struct {
+		URL    string `json:"url"`
+		Detail string `json:"detail,omitempty"`
+	}
+	if err := json.Unmarshal(p.ImageURL, &obj); err != nil {
+		return ImageInput{}, fmt.Errorf("image_url must be a string or object")
+	}
+	detail := p.Detail
+	if detail == "" {
+		detail = obj.Detail
+	}
+	if obj.URL == "" {
+		return ImageInput{}, fmt.Errorf("image_url.url is required")
+	}
+	return ImageInput{URL: obj.URL, Detail: detail}, nil
 }
 
 type Tool struct {

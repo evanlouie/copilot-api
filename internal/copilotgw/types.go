@@ -8,9 +8,18 @@ import (
 )
 
 type Model struct {
-	ID       string
-	Name     string
-	Metadata map[string]any
+	ID             string
+	Name           string
+	Metadata       map[string]any
+	VisionKnown    bool
+	SupportsVision bool
+	Vision         *VisionLimits
+}
+
+type VisionLimits struct {
+	SupportedMediaTypes []string
+	MaxPromptImages     int64
+	MaxPromptImageSize  int64
 }
 
 type Gateway interface {
@@ -66,7 +75,7 @@ type ResponseRequest struct {
 	ResponseID         string
 	Model              string
 	Instructions       string
-	InputText          string
+	Input              openai.PromptContent
 	FunctionOutputs    map[string]string
 	PreviousResponseID string
 	Tools              []openai.Tool

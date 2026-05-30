@@ -232,7 +232,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
-	inputText, outputs, err := parseResponsesInput(req.Input)
+	input, outputs, err := parseResponsesInput(req.Input)
 	if err != nil {
 		openai.WriteError(w, err)
 		return
@@ -242,7 +242,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if req.Store != nil {
 		store = *req.Store
 	}
-	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: req.Instructions, InputText: inputText, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: req.ReasoningEffort}
+	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: req.Instructions, Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: req.ReasoningEffort}
 	if req.Stream {
 		s.streamResponses(w, r, gwReq)
 		return
@@ -382,48 +382,54 @@ func toolOutputFromContent(content openai.Content) (string, error) {
 	}
 }
 
-func parseResponsesInput(raw json.RawMessage) (string, map[string]string, error) {
+func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]string, error) {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s, nil, nil
+		return openai.PromptContent{Text: s}, nil, nil
 	}
 	var items []openai.ResponseInputItem
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return "", nil, openai.InvalidRequest("input must be a string or an array of response input items", "input")
+		return openai.PromptContent{}, nil, openai.InvalidRequest("input must be a string or an array of response input items", "input")
 	}
 	outputs := map[string]string{}
-	var parts []string
+	var prompt openai.PromptContent
 	for i, item := range items {
 		switch item.Type {
 		case "function_call_output":
 			if item.CallID == "" {
-				return "", nil, openai.InvalidRequest("function_call_output items require call_id", fmt.Sprintf("input.%d.call_id", i))
+				return openai.PromptContent{}, nil, openai.InvalidRequest("function_call_output items require call_id", fmt.Sprintf("input.%d.call_id", i))
 			}
 			out, err := outputRawToString(item.Output)
 			if err != nil {
-				return "", nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
+				return openai.PromptContent{}, nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
 			}
 			if _, exists := outputs[item.CallID]; exists {
-				return "", nil, openai.InvalidRequest("duplicate function_call_output call_id", fmt.Sprintf("input.%d.call_id", i))
+				return openai.PromptContent{}, nil, openai.InvalidRequest("duplicate function_call_output call_id", fmt.Sprintf("input.%d.call_id", i))
 			}
 			outputs[item.CallID] = out
 		case "message", "":
 			if item.Role != "user" && item.Role != "" {
-				return "", nil, openai.InvalidRequest("only user message input items are supported in MVP", fmt.Sprintf("input.%d.role", i))
+				return openai.PromptContent{}, nil, openai.InvalidRequest("only user message input items are supported in MVP", fmt.Sprintf("input.%d.role", i))
 			}
-			text, err := item.Content.Text()
+			part, err := item.Content.Prompt()
 			if err != nil {
-				return "", nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
+				return openai.PromptContent{}, nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
 			}
-			parts = append(parts, text)
+			if part.Text != "" {
+				if prompt.Text != "" {
+					prompt.Text += "\n"
+				}
+				prompt.Text += part.Text
+			}
+			prompt.Images = append(prompt.Images, part.Images...)
 		default:
-			return "", nil, openai.InvalidRequest("unsupported response input item type", fmt.Sprintf("input.%d.type", i))
+			return openai.PromptContent{}, nil, openai.InvalidRequest("unsupported response input item type", fmt.Sprintf("input.%d.type", i))
 		}
 	}
 	if len(outputs) > 0 {
-		return "", outputs, nil
+		return openai.PromptContent{}, outputs, nil
 	}
-	return strings.Join(parts, "\n"), nil, nil
+	return prompt, nil, nil
 }
 
 func outputRawToString(raw json.RawMessage) (string, error) {

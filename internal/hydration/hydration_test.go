@@ -39,3 +39,33 @@ func TestBuildChatHistoryRejectsUnknownToolResult(t *testing.T) {
 		t.Fatal("expected unknown tool result rejection")
 	}
 }
+
+func TestBuildChatHistoryMessagesIncludesUserAttachments(t *testing.T) {
+	data := "AAAA"
+	mimeType := "image/png"
+	displayName := "image.png"
+	res, err := BuildChatHistoryMessages([]Message{{
+		Role:    "user",
+		Content: "describe",
+		Attachments: []copilot.Attachment{{
+			Type:        copilot.AttachmentTypeBlob,
+			Data:        &data,
+			MIMEType:    &mimeType,
+			DisplayName: &displayName,
+		}},
+	}}, Options{SessionID: "synth-image", Model: "gpt-5", Now: time.Unix(1, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonl := string(res.JSONL)
+	for _, want := range []string{`"attachments"`, `"type":"blob"`, `"mimeType":"image/png"`, `"displayName":"image.png"`} {
+		if !strings.Contains(jsonl, want) {
+			t.Fatalf("expected %s in JSONL: %s", want, jsonl)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(jsonl), "\n") {
+		if _, err := copilot.UnmarshalSessionEvent([]byte(line)); err != nil {
+			t.Fatalf("event did not round-trip: %v\n%s", err, line)
+		}
+	}
+}

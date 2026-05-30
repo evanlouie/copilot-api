@@ -87,7 +87,13 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 		if msg.Role != "assistant" && len(msg.ToolCalls) > 0 {
 			return InvalidRequest("tool_calls are only valid on assistant messages", fmt.Sprintf("messages.%d.tool_calls", i))
 		}
-		if _, err := msg.Text(); err != nil {
+		var err error
+		if msg.Role == "user" {
+			_, err = msg.Prompt()
+		} else {
+			_, err = msg.Text()
+		}
+		if err != nil {
 			return InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 		}
 	}

@@ -48,3 +48,25 @@ func TestParseResponsesInputRejectsDuplicateFunctionOutputs(t *testing.T) {
 		t.Fatal("expected duplicate call_id rejection")
 	}
 }
+
+func TestParseResponsesInputAcceptsImageParts(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"describe"},
+			{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"}
+		]}
+	]`)
+	prompt, outputs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outputs != nil {
+		t.Fatalf("unexpected outputs: %#v", outputs)
+	}
+	if prompt.Text != "describe" {
+		t.Fatalf("unexpected prompt text %q", prompt.Text)
+	}
+	if len(prompt.Images) != 1 || prompt.Images[0].URL != "data:image/png;base64,AAAA" || prompt.Images[0].Detail != "high" {
+		t.Fatalf("unexpected images: %#v", prompt.Images)
+	}
+}

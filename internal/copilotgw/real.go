@@ -83,24 +83,8 @@ func (g *RealGateway) ListModels(ctx context.Context) ([]Model, error) {
 }
 
 func (g *RealGateway) ValidateModel(ctx context.Context, model string) error {
-	if model == "" {
-		return openai.InvalidRequest("model is required", "model")
-	}
-	models, err := g.refreshModels(ctx, false)
-	if err != nil {
-		return openai.Upstream(err.Error())
-	}
-	if hasModel(models, model) {
-		return nil
-	}
-	models, err = g.refreshModels(ctx, true)
-	if err != nil {
-		return openai.Upstream(err.Error())
-	}
-	if !hasModel(models, model) {
-		return openai.NotFound("model not found: "+model, "model_not_found")
-	}
-	return nil
+	_, err := g.findModel(ctx, model)
+	return err
 }
 
 func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, error) {
@@ -117,14 +101,16 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 			return nil, err
 		}
 		for _, m := range list.Models {
-			meta := map[string]any{"name": m.Name}
+			supportsVision, visionKnown := rpcVisionSupport(m.Capabilities.Supports)
+			vision := rpcVisionLimits(m.Capabilities.Limits)
+			meta := modelMetadata(m.Name, supportsVision, visionKnown, vision)
 			if len(m.SupportedReasoningEfforts) > 0 {
 				meta["supported_reasoning_efforts"] = m.SupportedReasoningEfforts
 			}
 			if m.DefaultReasoningEffort != nil {
 				meta["default_reasoning_effort"] = *m.DefaultReasoningEffort
 			}
-			out = append(out, Model{ID: m.ID, Name: m.Name, Metadata: meta})
+			out = append(out, Model{ID: m.ID, Name: m.Name, Metadata: meta, VisionKnown: visionKnown, SupportsVision: supportsVision, Vision: vision})
 		}
 	} else {
 		models, err := g.client.ListModels(ctx)
@@ -132,7 +118,8 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 			return nil, err
 		}
 		for _, m := range models {
-			out = append(out, Model{ID: m.ID, Name: m.Name, Metadata: map[string]any{"name": m.Name}})
+			vision := sdkVisionLimits(m.Capabilities.Limits.Vision)
+			out = append(out, Model{ID: m.ID, Name: m.Name, Metadata: modelMetadata(m.Name, m.Capabilities.Supports.Vision, true, vision), VisionKnown: true, SupportsVision: m.Capabilities.Supports.Vision, Vision: vision})
 		}
 	}
 	g.models = append([]Model(nil), out...)
@@ -140,25 +127,71 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 	return out, nil
 }
 
-func hasModel(models []Model, id string) bool {
-	for _, m := range models {
-		if m.ID == id {
-			return true
+func rpcVisionSupport(supports *rpc.ModelCapabilitiesSupports) (bool, bool) {
+	if supports == nil || supports.Vision == nil {
+		return false, false
+	}
+	return *supports.Vision, true
+}
+
+func rpcVisionLimits(limits *rpc.ModelCapabilitiesLimits) *VisionLimits {
+	if limits == nil || limits.Vision == nil {
+		return nil
+	}
+	return &VisionLimits{
+		SupportedMediaTypes: limits.Vision.SupportedMediaTypes,
+		MaxPromptImages:     limits.Vision.MaxPromptImages,
+		MaxPromptImageSize:  limits.Vision.MaxPromptImageSize,
+	}
+}
+
+func sdkVisionLimits(limits *copilot.ModelVisionLimits) *VisionLimits {
+	if limits == nil {
+		return nil
+	}
+	return &VisionLimits{
+		SupportedMediaTypes: limits.SupportedMediaTypes,
+		MaxPromptImages:     int64(limits.MaxPromptImages),
+		MaxPromptImageSize:  int64(limits.MaxPromptImageSize),
+	}
+}
+
+func modelMetadata(name string, supportsVision bool, visionKnown bool, vision *VisionLimits) map[string]any {
+	meta := map[string]any{"name": name}
+	if visionKnown {
+		meta["supports_vision"] = supportsVision
+		meta["capabilities"] = map[string]any{
+			"supports": map[string]any{"vision": supportsVision},
 		}
 	}
-	return false
+	if vision != nil {
+		meta["vision"] = map[string]any{
+			"supported_media_types": vision.SupportedMediaTypes,
+			"max_prompt_images":     vision.MaxPromptImages,
+			"max_prompt_image_size": vision.MaxPromptImageSize,
+		}
+	}
+	return meta
 }
 
 func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, error) {
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
-	text, err := req.FinalUser.Text()
+	finalPrompt, err := req.FinalUser.Prompt()
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "messages")
 	}
+	final, err := g.resolvePrompt(ctx, req.Model, finalPrompt, "messages")
+	if err != nil {
+		return nil, err
+	}
+	history, err := g.resolveChatHistory(ctx, req.Model, req.History)
+	if err != nil {
+		return nil, err
+	}
 	sessionID := "chat_" + uuid.NewString()
-	h, err := hydration.BuildChatHistory(req.History, hydration.Options{SessionID: sessionID, Model: req.Model})
+	h, err := hydration.BuildChatHistoryMessages(history, hydration.Options{SessionID: sessionID, Model: req.Model})
 	if err != nil {
 		return nil, openai.InvalidRequest("failed to hydrate chat history: "+err.Error(), "messages")
 	}
@@ -176,7 +209,7 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 		return nil, openai.Upstream(err.Error())
 	}
 	runner := g.newTurnRunner(req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
-	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: text}); err != nil {
+	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
 	}
@@ -287,12 +320,20 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
-	text, err := req.FinalUser.Text()
+	finalPrompt, err := req.FinalUser.Prompt()
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "messages")
 	}
+	final, err := g.resolvePrompt(ctx, req.Model, finalPrompt, "messages")
+	if err != nil {
+		return nil, err
+	}
+	history, err := g.resolveChatHistory(ctx, req.Model, req.History)
+	if err != nil {
+		return nil, err
+	}
 	sessionID := "chat_" + uuid.NewString()
-	h, err := hydration.BuildChatHistory(req.History, hydration.Options{SessionID: sessionID, Model: req.Model})
+	h, err := hydration.BuildChatHistoryMessages(history, hydration.Options{SessionID: sessionID, Model: req.Model})
 	if err != nil {
 		return nil, openai.InvalidRequest("failed to hydrate chat history: "+err.Error(), "messages")
 	}
@@ -318,7 +359,7 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 		}
 		_ = g.store.SaveSessionMetadata(sessionID, sessionstore.SessionMetadata{ID: sessionID, Kind: "chat", OpenAIID: result.ID, SDKSessionID: sessionID, Model: req.Model, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), RetainedPath: retained, FinishReason: result.FinishReason, PendingBatchID: result.PendingBatchID})
 	}
-	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: text}); err != nil {
+	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
 	}
@@ -341,6 +382,10 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 
 	if len(req.FunctionOutputs) > 0 {
 		return g.continueToolResponse(ctx, req)
+	}
+	prompt, err := g.resolvePrompt(ctx, req.Model, req.Input, "input")
+	if err != nil {
+		return nil, err
 	}
 
 	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
@@ -371,7 +416,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	}
 	retained := g.fs.SessionRoot(sessionID)
 	runner := g.newTurnRunner(req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
-	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: req.InputText}); err != nil {
+	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
 	}
@@ -444,6 +489,10 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
 	}
+	prompt, err := g.resolvePrompt(ctx, req.Model, req.Input, "input")
+	if err != nil {
+		return nil, err
+	}
 	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "tools")
@@ -480,7 +529,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record.PendingBatchID = turn.PendingBatchID
 		_ = g.store.SaveResponse(record)
 	}
-	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: req.InputText}); err != nil {
+	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
 	}
@@ -562,6 +611,33 @@ func (g *RealGateway) DeleteResponse(ctx context.Context, id string) error {
 		return openai.Internal(err.Error())
 	}
 	return nil
+}
+
+func (g *RealGateway) resolveChatHistory(ctx context.Context, model string, messages []openai.ChatMessage) ([]hydration.Message, error) {
+	out := make([]hydration.Message, 0, len(messages))
+	for i, msg := range messages {
+		switch msg.Role {
+		case "user":
+			prompt, err := msg.Prompt()
+			if err != nil {
+				return nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
+			}
+			resolved, err := g.resolvePrompt(ctx, model, prompt, fmt.Sprintf("messages.%d.content", i))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, hydration.Message{Role: msg.Role, Content: resolved.Text, Attachments: resolved.Attachments})
+		case "assistant", "tool":
+			text, err := msg.Text()
+			if err != nil {
+				return nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
+			}
+			out = append(out, hydration.Message{Role: msg.Role, Content: text, ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
+		default:
+			return nil, openai.InvalidRequest(fmt.Sprintf("unsupported message role %q", msg.Role), fmt.Sprintf("messages.%d.role", i))
+		}
+	}
+	return out, nil
 }
 
 func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) (*copilot.Session, error) {

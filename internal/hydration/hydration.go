@@ -26,7 +26,27 @@ type Options struct {
 	Now       time.Time
 }
 
+type Message struct {
+	Role        string
+	Content     string
+	ToolCallID  string
+	ToolCalls   []openai.ChatToolCall
+	Attachments []copilot.Attachment
+}
+
 func BuildChatHistory(messages []openai.ChatMessage, opts Options) (Result, error) {
+	inputs := make([]Message, 0, len(messages))
+	for i, msg := range messages {
+		text, err := msg.Text()
+		if err != nil {
+			return Result{}, fmt.Errorf("messages.%d.content: %w", i, err)
+		}
+		inputs = append(inputs, Message{Role: msg.Role, Content: text, ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
+	}
+	return BuildChatHistoryMessages(inputs, opts)
+}
+
+func BuildChatHistoryMessages(messages []Message, opts Options) (Result, error) {
 	if opts.SessionID == "" {
 		opts.SessionID = "chat_" + uuid.NewString()
 	}
@@ -52,20 +72,12 @@ func BuildChatHistory(messages []openai.ChatMessage, opts Options) (Result, erro
 	for i, msg := range messages {
 		switch msg.Role {
 		case "user":
-			text, err := msg.Text()
-			if err != nil {
-				return Result{}, fmt.Errorf("messages.%d.content: %w", i, err)
-			}
-			b.add(copilot.SessionEventTypeUserMessage, &copilot.UserMessageData{Content: text})
+			b.add(copilot.SessionEventTypeUserMessage, &copilot.UserMessageData{Content: msg.Content, Attachments: msg.Attachments})
 		case "assistant":
-			text, err := msg.Text()
-			if err != nil {
-				return Result{}, fmt.Errorf("messages.%d.content: %w", i, err)
-			}
 			turnID := strconv.Itoa(turn)
 			turn++
 			b.add(copilot.SessionEventTypeAssistantTurnStart, &copilot.AssistantTurnStartData{TurnID: turnID})
-			data := &copilot.AssistantMessageData{Content: text, MessageID: uuid.NewString()}
+			data := &copilot.AssistantMessageData{Content: msg.Content, MessageID: uuid.NewString()}
 			for _, tc := range msg.ToolCalls {
 				if tc.ID == "" {
 					return Result{}, fmt.Errorf("messages.%d.tool_calls: tool call id is required", i)
@@ -94,13 +106,9 @@ func BuildChatHistory(messages []openai.ChatMessage, opts Options) (Result, erro
 			if err != nil {
 				return Result{}, err
 			}
-			text, err := msg.Text()
-			if err != nil {
-				return Result{}, fmt.Errorf("messages.%d.content: %w", i, err)
-			}
-			detail := text
+			detail := msg.Content
 			b.add(copilot.SessionEventTypeToolExecutionStart, &copilot.ToolExecutionStartData{ToolCallID: msg.ToolCallID, ToolName: prev.Function.Name, Arguments: args})
-			b.add(copilot.SessionEventTypeToolExecutionComplete, &copilot.ToolExecutionCompleteData{ToolCallID: msg.ToolCallID, Success: true, Result: &copilot.ToolExecutionCompleteResult{Content: text, DetailedContent: &detail}})
+			b.add(copilot.SessionEventTypeToolExecutionComplete, &copilot.ToolExecutionCompleteData{ToolCallID: msg.ToolCallID, Success: true, Result: &copilot.ToolExecutionCompleteResult{Content: msg.Content, DetailedContent: &detail}})
 		default:
 			return Result{}, fmt.Errorf("messages.%d.role %q cannot be hydrated", i, msg.Role)
 		}

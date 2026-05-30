@@ -34,7 +34,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | `GET /readyz` | Implemented | Checks SDK client state and model listing. |
 | `GET /v1/models` | Implemented | Maps Copilot model metadata to OpenAI model objects. |
 | `POST /v1/chat/completions` | Implemented | Non-streaming and SSE streaming; synthetic session hydration for history. |
-| `POST /v1/responses` | Implemented | Text input, message-array input, function-call outputs, streaming. |
+| `POST /v1/responses` | Implemented | Text/image input, message-array input, function-call outputs, streaming. |
 | `GET /v1/responses/{response_id}` | Implemented | Only for API-visible stored responses. Debug state is retained regardless. |
 | `DELETE /v1/responses/{response_id}` | Implemented | Removes API-visible retrieval while retaining debug files. |
 
@@ -42,7 +42,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 
 | Feature | Behavior |
 | --- | --- |
-| Models | `model` is required for every generation request. Unknown models are rejected as `model_not_found` after a forced model-cache refresh. |
+| Models | `model` is required for every generation request. Unknown models are rejected as `model_not_found` after a forced model-cache refresh. Model metadata may include `supports_vision` and `vision` limits. |
 | Reasoning effort | Send top-level `reasoning_effort` on Chat Completions or Responses requests. The value is forwarded to Copilot when supplied; omit it to use the model default. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. The Responses `reasoning` object is not supported. |
 | Chat history | Leading `system`/`developer` messages become replacement system instructions. Prior non-final messages are converted to Copilot SDK `events.jsonl`; only the final user turn is sent. Mid-conversation `system`/`developer` messages are rejected. SDK infinite-session auto-compaction is disabled. |
 | Prompt isolation | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions try empty, single-space, then `You are a chat completion model.`. |
@@ -53,7 +53,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | `parallel_tool_calls` | Chat accepts omitted/`false` and rejects `true`. Responses accepts omitted/`true` and rejects `false`. Internal pending batches support multiple calls. |
 | Streaming | SSE streams are OpenAI-shaped. SDK streaming deltas are forwarded as text deltas; tool calls are buffered and emitted complete; streams terminate with `[DONE]`. |
 | Usage | SDK input/output/reasoning token events are mapped when available; unavailable fields are omitted. |
-| Multimodal | Image inputs and binary/multimodal tool outputs are rejected/deferred. JSON object/array tool outputs are serialized to JSON text. |
+| Multimodal | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; selected models must support vision. Image `file_id` inputs and binary/multimodal tool outputs are deferred. JSON object/array tool outputs are serialized to JSON text. |
 | Unsupported fields | Strict compatibility defaults to enabled; unsupported semantics fail closed with OpenAI-shaped `invalid_request_error` responses. |
 
 ## Configuration
@@ -92,6 +92,25 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-5.5","stream":true,"messages":[{"role":"user","content":"Count to three."}]}'
+```
+
+Image input:
+
+```sh
+IMAGE_DATA_URL="data:image/png;base64,$(base64 -i screenshot.png | tr -d '\n')"
+
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-5.5",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What is in this image?"},
+        {"type": "image_url", "image_url": {"url": "'"$IMAGE_DATA_URL"'"}}
+      ]
+    }]
+  }'
 ```
 
 ### Reasoning effort

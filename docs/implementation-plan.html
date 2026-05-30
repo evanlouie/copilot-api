@@ -722,8 +722,8 @@ internal/testutil/               # fake gateway, local provider capture, golden 
               </tr>
               <tr>
                 <td>Images and multimodal output</td>
-                <td>Image inputs and binary/multimodal tool outputs are deferred. Text-only tool outputs are MVP; JSON object/array outputs are serialized to JSON text.</td>
-                <td><span class="status later">Phase 2</span></td>
+                <td>Chat and Responses image inputs are mapped to Copilot SDK blob attachments with model vision checks. Binary/multimodal tool outputs remain deferred; JSON object/array outputs are serialized to JSON text.</td>
+                <td><span class="status mvp">Backend-shaped</span></td>
               </tr>
               <tr>
                 <td>Unsupported fields</td>
@@ -957,7 +957,7 @@ func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
               <div>
                 <h3>Multimodal and advanced compatibility expansion</h3>
                 <ul>
-                  <li>Map image URL/base64 content to Copilot SDK attachments and enforce model vision limits.</li>
+                  <li>Broaden image compatibility beyond URL/base64 attachments if future OpenAI or Copilot SDK surfaces require it.</li>
                   <li>Improve tool-choice enforcement, partial tool-output continuation, structured tool-output helpers, and richer argument-delta streaming if SDK behavior supports them.</li>
                   <li>Add prompt-level JSON mode and optional schema validation/retry for structured output compatibility.</li>
                   <li>Expand content part handling for refusals, annotations, and reasoning summaries when source events support them.</li>
