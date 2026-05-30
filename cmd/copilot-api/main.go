@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"copilot-api/internal/config"
-	"copilot-api/internal/copilotgw"
-	"copilot-api/internal/httpapi"
-	"copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/copilotgw"
+	"github.com/evanlouie/copilot-api/internal/httpapi"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
 )
 
 func main() {

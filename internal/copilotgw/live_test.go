@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"copilot-api/internal/config"
-	"copilot-api/internal/openai"
-	"copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
 )
 
 func TestLiveCopilotTextCompletion(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	"copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/openai"
 )
 
 type Store struct {

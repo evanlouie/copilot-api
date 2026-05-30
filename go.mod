@@ -1,4 +1,4 @@
-module copilot-api
+module github.com/evanlouie/copilot-api
 
 go 1.26.3
 

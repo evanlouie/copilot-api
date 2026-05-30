@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"copilot-api/internal/config"
-	"copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
 )
 
 func purge(args []string) error {

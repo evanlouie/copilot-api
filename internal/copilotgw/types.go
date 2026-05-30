@@ -3,8 +3,8 @@ package copilotgw
 import (
 	"context"
 
-	"copilot-api/internal/openai"
-	"copilot-api/internal/toolproxy"
+	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
 
 type Model struct {

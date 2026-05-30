@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/openai"
 
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/google/uuid"

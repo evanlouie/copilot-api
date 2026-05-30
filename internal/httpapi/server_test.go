@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"copilot-api/internal/observability"
+	"github.com/evanlouie/copilot-api/internal/observability"
 )
 
 func TestRequestLoggingMiddlewareLogsMetadata(t *testing.T) {

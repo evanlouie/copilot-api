@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"copilot-api/internal/config"
-	"copilot-api/internal/hydration"
-	"copilot-api/internal/openai"
-	"copilot-api/internal/sessionfs"
-	"copilot-api/internal/sessionstore"
-	"copilot-api/internal/toolproxy"
+	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/hydration"
+	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/sessionfs"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolproxy"
 
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"

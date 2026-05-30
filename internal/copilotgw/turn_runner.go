@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"copilot-api/internal/openai"
-	"copilot-api/internal/sessionstore"
-	"copilot-api/internal/toolproxy"
+	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolproxy"
 
 	copilot "github.com/github/copilot-sdk/go"
 )

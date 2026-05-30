@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"copilot-api/internal/config"
-	"copilot-api/internal/copilotgw"
-	"copilot-api/internal/observability"
-	"copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/copilotgw"
+	"github.com/evanlouie/copilot-api/internal/observability"
+	"github.com/evanlouie/copilot-api/internal/openai"
 )
 
 type Server struct {
