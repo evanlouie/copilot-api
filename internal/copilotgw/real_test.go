@@ -2,7 +2,11 @@ package copilotgw
 
 import (
 	"testing"
+	"time"
 
+	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/sessionfs"
+	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
 )
@@ -83,5 +87,159 @@ func TestSDKTokenLimits(t *testing.T) {
 	}
 	if limits.MaxOutputTokens != nil {
 		t.Fatalf("MaxOutputTokens = %d, want nil", *limits.MaxOutputTokens)
+	}
+}
+
+func TestRealClientOptionsUseV1ModeEmpty(t *testing.T) {
+	cfg := config.Config{
+		CLIPath:     "/tmp/copilot",
+		StateDir:    "/tmp/state",
+		ConfigDir:   "/tmp/config",
+		GitHubToken: "gho_test",
+	}
+	opts := newRealClientOptions(cfg)
+	if opts.Mode != copilot.ModeEmpty {
+		t.Fatalf("Mode = %q, want %q", opts.Mode, copilot.ModeEmpty)
+	}
+	conn, ok := opts.Connection.(copilot.StdioConnection)
+	if !ok {
+		t.Fatalf("Connection = %T, want copilot.StdioConnection", opts.Connection)
+	}
+	if conn.Path != cfg.CLIPath {
+		t.Fatalf("Connection.Path = %q, want %q", conn.Path, cfg.CLIPath)
+	}
+	if opts.WorkingDirectory != cfg.StateDir {
+		t.Fatalf("WorkingDirectory = %q, want %q", opts.WorkingDirectory, cfg.StateDir)
+	}
+	if opts.BaseDirectory != cfg.ConfigDir {
+		t.Fatalf("BaseDirectory = %q, want %q", opts.BaseDirectory, cfg.ConfigDir)
+	}
+	if opts.SessionFs == nil {
+		t.Fatal("SessionFs is nil")
+	}
+}
+
+func TestSessionConfigBuildersApplyV1Hardening(t *testing.T) {
+	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := &RealGateway{
+		cfg: config.Config{
+			ConfigDir:   "/tmp/config",
+			GitHubToken: "gho_test",
+		},
+		fs: sessionfs.NewManager(t.TempDir()),
+	}
+
+	createCfg := gw.newCreateSessionConfig("session-id", "gpt-5", "instructions", "medium", rt, true, nil)
+	if createCfg.SessionID != "session-id" {
+		t.Fatalf("SessionID = %q, want session-id", createCfg.SessionID)
+	}
+	if createCfg.GitHubToken != "gho_test" {
+		t.Fatalf("GitHubToken = %q, want gho_test", createCfg.GitHubToken)
+	}
+	assertCreateSessionHardening(t, createCfg)
+
+	resumeCfg := gw.newResumeSessionConfig("gpt-5", "instructions", "medium", rt, false, nil)
+	if resumeCfg.GitHubToken != "gho_test" {
+		t.Fatalf("GitHubToken = %q, want gho_test", resumeCfg.GitHubToken)
+	}
+	assertResumeSessionHardening(t, resumeCfg)
+}
+
+func assertCreateSessionHardening(t *testing.T, cfg *copilot.SessionConfig) {
+	t.Helper()
+	if len(cfg.AvailableTools) == 0 {
+		t.Fatal("AvailableTools is empty")
+	}
+	if cfg.WorkingDirectory != "/" {
+		t.Fatalf("WorkingDirectory = %q, want /", cfg.WorkingDirectory)
+	}
+	if cfg.ConfigDirectory != "/tmp/config" {
+		t.Fatalf("ConfigDirectory = %q, want /tmp/config", cfg.ConfigDirectory)
+	}
+	if cfg.EnableConfigDiscovery {
+		t.Fatal("EnableConfigDiscovery = true, want false")
+	}
+	if cfg.MCPServers == nil || len(cfg.MCPServers) != 0 {
+		t.Fatalf("MCPServers = %#v, want non-nil empty map", cfg.MCPServers)
+	}
+	if len(cfg.DisabledSkills) != 1 || cfg.DisabledSkills[0] != "*" {
+		t.Fatalf("DisabledSkills = %#v, want [*]", cfg.DisabledSkills)
+	}
+	assertFalsePtr(t, "InfiniteSessions.Enabled", cfg.InfiniteSessions.Enabled)
+	assertBoolPtr(t, "Streaming", cfg.Streaming, true)
+	assertFalsePtr(t, "IncludeSubAgentStreamingEvents", cfg.IncludeSubAgentStreamingEvents)
+	assertTruePtr(t, "SkipCustomInstructions", cfg.SkipCustomInstructions)
+	assertFalsePtr(t, "EnableHostGitOperations", cfg.EnableHostGitOperations)
+	assertFalsePtr(t, "EnableSessionStore", cfg.EnableSessionStore)
+	assertFalsePtr(t, "EnableSkills", cfg.EnableSkills)
+	assertTruePtr(t, "CustomAgentsLocalOnly", cfg.CustomAgentsLocalOnly)
+	assertFalsePtr(t, "CoauthorEnabled", cfg.CoauthorEnabled)
+	assertFalsePtr(t, "ManageScheduleEnabled", cfg.ManageScheduleEnabled)
+	if cfg.OnEvent == nil {
+		t.Fatal("OnEvent is nil")
+	}
+	if cfg.CreateSessionFsProvider == nil {
+		t.Fatal("CreateSessionFsProvider is nil")
+	}
+}
+
+func assertResumeSessionHardening(t *testing.T, cfg *copilot.ResumeSessionConfig) {
+	t.Helper()
+	if len(cfg.AvailableTools) == 0 {
+		t.Fatal("AvailableTools is empty")
+	}
+	if cfg.WorkingDirectory != "/" {
+		t.Fatalf("WorkingDirectory = %q, want /", cfg.WorkingDirectory)
+	}
+	if cfg.ConfigDirectory != "/tmp/config" {
+		t.Fatalf("ConfigDirectory = %q, want /tmp/config", cfg.ConfigDirectory)
+	}
+	if cfg.EnableConfigDiscovery {
+		t.Fatal("EnableConfigDiscovery = true, want false")
+	}
+	if cfg.MCPServers == nil || len(cfg.MCPServers) != 0 {
+		t.Fatalf("MCPServers = %#v, want non-nil empty map", cfg.MCPServers)
+	}
+	if len(cfg.DisabledSkills) != 1 || cfg.DisabledSkills[0] != "*" {
+		t.Fatalf("DisabledSkills = %#v, want [*]", cfg.DisabledSkills)
+	}
+	assertFalsePtr(t, "InfiniteSessions.Enabled", cfg.InfiniteSessions.Enabled)
+	assertBoolPtr(t, "Streaming", cfg.Streaming, false)
+	assertFalsePtr(t, "IncludeSubAgentStreamingEvents", cfg.IncludeSubAgentStreamingEvents)
+	assertTruePtr(t, "SkipCustomInstructions", cfg.SkipCustomInstructions)
+	assertFalsePtr(t, "EnableHostGitOperations", cfg.EnableHostGitOperations)
+	assertFalsePtr(t, "EnableSessionStore", cfg.EnableSessionStore)
+	assertFalsePtr(t, "EnableSkills", cfg.EnableSkills)
+	assertTruePtr(t, "CustomAgentsLocalOnly", cfg.CustomAgentsLocalOnly)
+	assertFalsePtr(t, "CoauthorEnabled", cfg.CoauthorEnabled)
+	assertFalsePtr(t, "ManageScheduleEnabled", cfg.ManageScheduleEnabled)
+	if cfg.OnEvent == nil {
+		t.Fatal("OnEvent is nil")
+	}
+	if cfg.CreateSessionFsProvider == nil {
+		t.Fatal("CreateSessionFsProvider is nil")
+	}
+}
+
+func assertTruePtr(t *testing.T, name string, got *bool) {
+	t.Helper()
+	assertBoolPtr(t, name, got, true)
+}
+
+func assertFalsePtr(t *testing.T, name string, got *bool) {
+	t.Helper()
+	assertBoolPtr(t, name, got, false)
+}
+
+func assertBoolPtr(t *testing.T, name string, got *bool, want bool) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s is nil, want %v", name, want)
+	}
+	if *got != want {
+		t.Fatalf("%s = %v, want %v", name, *got, want)
 	}
 }

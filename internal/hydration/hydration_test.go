@@ -1,6 +1,7 @@
 package hydration
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,8 @@ func TestBuildChatHistoryTextAndToolEventsRoundTrip(t *testing.T) {
 		t.Fatalf("expected tool execution event in JSONL: %s", res.JSONL)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(res.JSONL)), "\n") {
-		if _, err := copilot.UnmarshalSessionEvent([]byte(line)); err != nil {
+		var event copilot.SessionEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			t.Fatalf("event did not round-trip: %v\n%s", err, line)
 		}
 	}
@@ -47,10 +49,9 @@ func TestBuildChatHistoryMessagesIncludesUserAttachments(t *testing.T) {
 	res, err := BuildChatHistoryMessages([]Message{{
 		Role:    "user",
 		Content: "describe",
-		Attachments: []copilot.Attachment{{
-			Type:        copilot.AttachmentTypeBlob,
-			Data:        &data,
-			MIMEType:    &mimeType,
+		Attachments: []copilot.Attachment{copilot.UserMessageAttachmentBlob{
+			Data:        data,
+			MIMEType:    mimeType,
 			DisplayName: &displayName,
 		}},
 	}}, Options{SessionID: "synth-image", Model: "gpt-5", Now: time.Unix(1, 0).UTC()})
@@ -64,7 +65,8 @@ func TestBuildChatHistoryMessagesIncludesUserAttachments(t *testing.T) {
 		}
 	}
 	for _, line := range strings.Split(strings.TrimSpace(jsonl), "\n") {
-		if _, err := copilot.UnmarshalSessionEvent([]byte(line)); err != nil {
+		var event copilot.SessionEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			t.Fatalf("event did not round-trip: %v\n%s", err, line)
 		}
 	}

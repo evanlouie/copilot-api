@@ -2,9 +2,11 @@
 
 Date: 2026-05-29
 
+Current v1 readiness note: the implementation now targets `github.com/github/copilot-sdk/go v1.0.0-beta.10`. Local module tags currently stop at beta releases, so a stable Go `v1.0.0` tag is not available locally yet. The original live experiment below was run against SDK `v0.3.0`; the compatibility lessons still apply, but code and docs should use the v1 names: `InitialWorkingDirectory`, `CreateSessionFsProvider`, `ConfigDirectory`, and `SessionFs...`.
+
 ## Verdict
 
-**Feasible with caveats.** A synthetic `/session-state/events.jsonl` created through an isolated `SessionFsProvider` can be resumed by `github.com/github/copilot-sdk/go@v0.3.0`, and the resumed model uses the seeded events as conversation context, not merely UI/history. This was proven with live model calls for:
+**Feasible with caveats.** A synthetic `/session-state/events.jsonl` created through an isolated `SessionFsProvider` can be resumed by the GitHub Copilot SDK, and the resumed model uses the seeded events as conversation context, not merely UI/history. This was proven with live model calls for:
 
 - ordinary prior `user.message` + `assistant.message` turns; and
 - a synthetic prior assistant tool-call turn with `tool.execution_start` + `tool.execution_complete` result.
@@ -13,24 +15,24 @@ Recommendation: **use synthetic hydration as the preferred path for Chat Complet
 
 ## SDK source and tests inspected
 
-SDK path: `$(go env GOPATH)/pkg/mod/github.com/github/copilot-sdk/go@v0.3.0`
+Current SDK path: `$(go env GOPATH)/pkg/mod/github.com/github/copilot-sdk/go@v1.0.0-beta.10`
 
 Key files:
 
 - `session_fs_provider.go`
-  - Defines `SessionFsProvider` with `ReadFile`, `WriteFile`, `AppendFile`, `Exists`, `Stat`, `Mkdir`, `Readdir`, `ReaddirWithTypes`, `Rm`, `Rename`.
-  - The adapter maps Go filesystem errors to RPC `SessionFSError`s. This is the hook that lets this project own a per-session virtual filesystem and seed `/session-state/events.jsonl` before `session.resume`.
+  - Defines `SessionFsProvider` with `ReadFile`, `WriteFile`, `AppendFile`, `Exists`, `Stat`, `MakeDirectory`, `ReadDirectory`, `ReadDirectoryWithTypes`, `Remove`, `Rename`.
+  - The adapter maps Go filesystem errors to RPC `SessionFsError`s. This is the hook that lets this project own a per-session virtual filesystem and seed `/session-state/events.jsonl` before `session.resume`.
 - `client.go`
   - `CreateSession` and `ResumeSessionWithOptions` both register the per-session `SessionFs` adapter before issuing `session.create` / `session.resume` RPCs.
-  - When `ClientOptions.SessionFs` is configured, `CreateSessionFsHandler` is required in both create and resume configs.
-  - `ResumeSessionWithOptions` forwards `SystemMessage`, `Tools`, `AvailableTools`, `ExcludedTools`, `WorkingDirectory`, `ConfigDir`, `DisableResume`, etc. into the resume RPC.
+  - When `ClientOptions.SessionFs` is configured, `CreateSessionFsProvider` is required in both create and resume configs.
+  - `ResumeSessionWithOptions` forwards `SystemMessage`, `Tools`, `AvailableTools`, `ExcludedTools`, `WorkingDirectory`, `ConfigDirectory`, `DisableResume`, etc. into the resume RPC.
 - `types.go`
-  - `SessionFsConfig` has `InitialCwd`, `SessionStatePath`, and `Conventions`.
+  - `SessionFsConfig` has `InitialWorkingDirectory`, `SessionStatePath`, and `Conventions`.
   - `SystemMessageConfig{Mode: "replace", Content: ...}` is the SDK path for replacing, not appending to, the SDK-managed system prompt.
-  - `SessionConfig` / `ResumeSessionConfig` support `CreateSessionFsHandler`, `AvailableTools`, request-scoped `Tools`, and `OnPermissionRequest`.
-- `generated_session_events.go`
+  - `SessionConfig` / `ResumeSessionConfig` support `CreateSessionFsProvider`, `AvailableTools`, request-scoped `Tools`, and `OnPermissionRequest`.
+- `rpc/zsession_events.go`
   - Defines the persisted event envelope and typed payloads for `session.start`, `session.resume`, `system.message`, `user.message`, `assistant.message`, `assistant.turn_start`, `assistant.turn_end`, `tool.execution_start`, `tool.execution_complete`, etc.
-- `internal/e2e/session_fs_test.go`
+- `internal/e2e/session_fs_e2e_test.go`
   - Confirms events are persisted at `/session-state/events.jsonl` through the provider.
   - Test “should load session data from fs provider on resume” creates a session, asks `What is 50 + 50?`, disconnects, resumes through the provider, then asks `What is that times 3?`; expected answer contains `300`. This is strong source-level evidence that provider-backed persisted state feeds model context.
   - Also covers workspace metadata (`workspace.yaml`, checkpoints), compaction rewriting events, and temp file routing.
@@ -41,7 +43,7 @@ Key files:
 
 Scratch location only: `/tmp/copilot-synth-spike` and `/tmp/copilot-synth-spike/*state`. No project implementation files were changed; only this report was written in the repo.
 
-Commands run:
+Original historical commands run:
 
 ```sh
 cd /tmp/copilot-synth-spike
@@ -53,7 +55,7 @@ goimports -w main.go
 go run .
 ```
 
-Important environment note: the installed `copilot` CLI was `1.0.55` and failed against SDK `v0.3.0` with:
+Historical environment note: the installed `copilot` CLI was `1.0.55` and failed against SDK `v0.3.0` with:
 
 ```text
 json: cannot unmarshal string into Go struct field PingResponse.timestamp of type int64
@@ -401,7 +403,7 @@ Parallel tool calls: the event schema allows `toolRequests: []` and one executio
 ## Risks and caveats
 
 - **Schema drift:** `events.jsonl` is generated from an SDK schema but persisted resume semantics are not a public “import messages” contract. Pin SDK/CLI versions and add regression tests around hydration.
-- **SDK/CLI version coupling:** local CLI `1.0.55` was incompatible with SDK `v0.3.0`; matching embedded CLI `1.0.36-0` worked. The service should control the SDK/CLI pairing.
+- **SDK/CLI version coupling:** the original spike showed that a mismatched installed CLI can fail at startup with protocol-shape errors. The service should control the SDK/CLI pairing, prefer the SDK-matched embedded CLI, and fail startup if runtime status cannot be read.
 - **Parent IDs/timestamps:** synthetic unique IDs, RFC3339 timestamps, and a linear `parentId` chain worked. Do not assume malformed chains will continue to work.
 - **Checkpoints/compaction:** e2e tests show compaction rewrites `events.jsonl` with checkpoint data. Long synthetic histories may trigger compaction or summarization. Keep synthetic Chat sessions short-lived and have a transcript fallback.
 - **`transformedContent`:** real `user.message` includes SDK-generated `transformedContent`; minimal synthetic messages without it worked. Future runtimes could rely more heavily on transformed content.
@@ -432,8 +434,8 @@ This should improve role-native history handling while preserving the hard produ
    - assistant text -> `assistant.turn_start`, `assistant.message`, `assistant.turn_end`;
    - assistant tool calls -> `assistant.message.toolRequests`;
    - tool results -> `tool.execution_start` + `tool.execution_complete`.
-3. Add schema validation by unmarshalling every generated line with `copilot.UnmarshalSessionEvent` before resume.
-4. Pin and verify SDK/CLI compatibility; prefer the SDK embedded CLI path for reproducibility.
+3. Add schema validation by unmarshalling every generated line into `copilot.SessionEvent` before resume.
+4. Pin and verify SDK/CLI compatibility; prefer the SDK embedded CLI path for reproducibility and log runtime status at startup.
 5. Add integration tests behind an opt-in/live-test flag:
    - synthetic text history nonce recall;
    - synthetic tool-result recall;

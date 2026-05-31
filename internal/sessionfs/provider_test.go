@@ -24,6 +24,37 @@ func TestProviderPreventsTraversal(t *testing.T) {
 	}
 }
 
+func TestEnsureSessionCreatesReadableProviderRoot(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	sessionID := "resp/sdk:1"
+	if err := m.EnsureSession(sessionID); err != nil {
+		t.Fatal(err)
+	}
+	p := m.Provider(sessionID)
+	info, err := p.Stat("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDirectory || info.IsFile {
+		t.Fatalf("root info = %#v, want directory", info)
+	}
+	entries, err := p.ReadDirectory("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("root entries = %#v, want empty", entries)
+	}
+	typedEntries, err := p.ReadDirectoryWithTypes("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(typedEntries) != 0 {
+		t.Fatalf("typed root entries = %#v, want empty", typedEntries)
+	}
+}
+
 func TestWriteEvents(t *testing.T) {
 	root := t.TempDir()
 	path, err := WriteEvents(root, "abc", []byte("{}\n"))

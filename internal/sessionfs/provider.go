@@ -100,7 +100,7 @@ func (p *Provider) Stat(path string) (*copilot.SessionFsFileInfo, error) {
 	return &copilot.SessionFsFileInfo{IsFile: !info.IsDir(), IsDirectory: info.IsDir(), Size: info.Size(), Mtime: ts, Birthtime: ts}, nil
 }
 
-func (p *Provider) Mkdir(path string, recursive bool, mode *int) error {
+func (p *Provider) MakeDirectory(path string, recursive bool, mode *int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	full := p.fullPath(path)
@@ -114,7 +114,7 @@ func (p *Provider) Mkdir(path string, recursive bool, mode *int) error {
 	return os.Mkdir(full, perm)
 }
 
-func (p *Provider) Readdir(path string) ([]string, error) {
+func (p *Provider) ReadDirectory(path string) ([]string, error) {
 	entries, err := os.ReadDir(p.fullPath(path))
 	if err != nil {
 		return nil, err
@@ -126,23 +126,23 @@ func (p *Provider) Readdir(path string) ([]string, error) {
 	return names, nil
 }
 
-func (p *Provider) ReaddirWithTypes(path string) ([]rpc.SessionFSReaddirWithTypesEntry, error) {
+func (p *Provider) ReadDirectoryWithTypes(path string) ([]rpc.SessionFsReaddirWithTypesEntry, error) {
 	entries, err := os.ReadDir(p.fullPath(path))
 	if err != nil {
 		return nil, err
 	}
-	result := make([]rpc.SessionFSReaddirWithTypesEntry, 0, len(entries))
+	result := make([]rpc.SessionFsReaddirWithTypesEntry, 0, len(entries))
 	for _, entry := range entries {
-		entryType := rpc.SessionFSReaddirWithTypesEntryTypeFile
+		entryType := rpc.SessionFsReaddirWithTypesEntryTypeFile
 		if entry.IsDir() {
-			entryType = rpc.SessionFSReaddirWithTypesEntryTypeDirectory
+			entryType = rpc.SessionFsReaddirWithTypesEntryTypeDirectory
 		}
-		result = append(result, rpc.SessionFSReaddirWithTypesEntry{Name: entry.Name(), Type: entryType})
+		result = append(result, rpc.SessionFsReaddirWithTypesEntry{Name: entry.Name(), Type: entryType})
 	}
 	return result, nil
 }
 
-func (p *Provider) Rm(path string, recursive bool, force bool) error {
+func (p *Provider) Remove(path string, recursive bool, force bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	full := p.fullPath(path)

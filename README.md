@@ -4,6 +4,8 @@
 
 The implementation follows the decisions in [`docs/implementation-plan.html`](docs/implementation-plan.html): replacement-mode prompts, Copilot SDK tools disabled by default, OpenAI-shaped errors, synthetic Chat history hydration, Responses continuity, client-owned function tool execution, SSE streaming, XDG storage, and manual purge.
 
+Current SDK target: `github.com/github/copilot-sdk/go v1.0.0-beta.10`. As of the latest locally available module tags, a stable Go `v1.0.0` tag is not available yet.
+
 ## Quick start
 
 ```sh
@@ -46,10 +48,10 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | Reasoning effort | Send top-level `reasoning_effort` on Chat Completions or Responses requests. The value is forwarded to Copilot when supplied; omit it to use the model default. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. The Responses `reasoning` object is not supported. |
 | Chat history | Leading `system`/`developer` messages become replacement system instructions. Prior non-final messages are converted to Copilot SDK `events.jsonl`; only the final user turn is sent. Mid-conversation `system`/`developer` messages are rejected. SDK infinite-session auto-compaction is disabled. |
 | Prompt isolation | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions try empty, single-space, then `You are a chat completion model.`. |
-| SDK tools | Built-in file/shell/MCP/memory/skill/repository tools are not exposed. `AvailableTools` is either request-scoped aliases or an impossible sentinel. Permissions deny everything except exact request-scoped custom tools. |
+| SDK tools | The SDK client runs in `ModeEmpty`. Built-in file/shell/MCP/memory/skill/repository tools are not exposed. `AvailableTools` is either request-scoped aliases or an impossible sentinel. Permissions reject everything except exact request-scoped custom tools. |
 | OpenAI function tools | Only `type: "function"` tools are accepted. Public names are mapped to opaque SDK aliases. Tool calls are returned to clients; the proxy never executes business logic. |
 | Tool continuations | Chat clients append `role: "tool"` messages. Responses clients send `function_call_output` items with `previous_response_id`. The proxy validates one output per pending call before unblocking the parked SDK handlers. |
-| `tool_choice` | Omitted/`auto` and `none` are supported. Forced function and `required` are rejected because SDK/CLI v0.3.0 does not enforce them. |
+| `tool_choice` | Omitted/`auto` and `none` are supported. Forced function and `required` are rejected because the current SDK/runtime does not expose OpenAI-compatible enforcement for them. |
 | `parallel_tool_calls` | Chat accepts omitted/`false` and rejects `true`. Responses accepts omitted/`true` and rejects `false`. Internal pending batches support multiple calls. |
 | Streaming | SSE streams are OpenAI-shaped. SDK streaming deltas are forwarded as text deltas; tool calls are buffered and emitted complete; streams terminate with `[DONE]`. |
 | Usage | SDK input/output/reasoning token events are mapped when available; unavailable fields are omitted. |

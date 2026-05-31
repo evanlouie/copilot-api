@@ -54,68 +54,68 @@ func (g *RealGateway) resolvePrompt(ctx context.Context, model string, prompt op
 func resolveImageAttachment(ctx context.Context, image openai.ImageInput, index int, limits *VisionLimits, param string) (copilot.Attachment, error) {
 	raw := strings.TrimSpace(image.URL)
 	if raw == "" {
-		return copilot.Attachment{}, openai.InvalidRequest("image_url is required", param)
+		return nil, openai.InvalidRequest("image_url is required", param)
 	}
 	if strings.HasPrefix(strings.ToLower(raw), "data:") {
 		return dataURLAttachment(raw, index, limits, param)
 	}
 	u, err := url.Parse(raw)
 	if err != nil || !u.IsAbs() {
-		return copilot.Attachment{}, openai.InvalidRequest("image_url must be an absolute URL or data URL", param)
+		return nil, openai.InvalidRequest("image_url must be an absolute URL or data URL", param)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
 		return remoteImageAttachment(ctx, u, index, limits, param)
 	default:
-		return copilot.Attachment{}, openai.InvalidRequest("image_url scheme must be http, https, or data", param)
+		return nil, openai.InvalidRequest("image_url scheme must be http, https, or data", param)
 	}
 }
 
 func dataURLAttachment(raw string, index int, limits *VisionLimits, param string) (copilot.Attachment, error) {
 	mediaType, data, err := parseImageDataURL(raw)
 	if err != nil {
-		return copilot.Attachment{}, openai.InvalidRequest(err.Error(), param)
+		return nil, openai.InvalidRequest(err.Error(), param)
 	}
 	if !mediaTypeAllowed(mediaType, limits) {
-		return copilot.Attachment{}, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
+		return nil, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
 	}
 	displayName := imageDisplayName(index, mediaType, "")
-	return copilot.Attachment{Type: copilot.AttachmentTypeBlob, Data: &data, MIMEType: &mediaType, DisplayName: &displayName}, nil
+	return copilot.UserMessageAttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
 }
 
 func remoteImageAttachment(ctx context.Context, u *url.URL, index int, limits *VisionLimits, param string) (copilot.Attachment, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return copilot.Attachment{}, openai.InvalidRequest("invalid image_url", param)
+		return nil, openai.InvalidRequest("invalid image_url", param)
 	}
 	resp, err := imageHTTPClient.Do(req)
 	if err != nil {
-		return copilot.Attachment{}, openai.InvalidRequest("failed to fetch image_url: "+err.Error(), param)
+		return nil, openai.InvalidRequest("failed to fetch image_url: "+err.Error(), param)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return copilot.Attachment{}, openai.InvalidRequest(fmt.Sprintf("image_url returned HTTP %d", resp.StatusCode), param)
+		return nil, openai.InvalidRequest(fmt.Sprintf("image_url returned HTTP %d", resp.StatusCode), param)
 	}
 	if resp.ContentLength > maxImageBytes {
-		return copilot.Attachment{}, openai.InvalidRequest("image_url exceeds the 50 MB size limit", param)
+		return nil, openai.InvalidRequest("image_url exceeds the 50 MB size limit", param)
 	}
 	body, err := readLimited(resp.Body, maxImageBytes)
 	if err != nil {
-		return copilot.Attachment{}, openai.InvalidRequest(err.Error(), param)
+		return nil, openai.InvalidRequest(err.Error(), param)
 	}
 	if len(body) == 0 {
-		return copilot.Attachment{}, openai.InvalidRequest("image_url returned an empty image", param)
+		return nil, openai.InvalidRequest("image_url returned an empty image", param)
 	}
 	mediaType := imageMediaType(resp.Header.Get("Content-Type"), body)
 	if mediaType == "" {
-		return copilot.Attachment{}, openai.InvalidRequest("image_url did not return a supported image MIME type", param)
+		return nil, openai.InvalidRequest("image_url did not return a supported image MIME type", param)
 	}
 	if !mediaTypeAllowed(mediaType, limits) {
-		return copilot.Attachment{}, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
+		return nil, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
 	}
 	data := base64.StdEncoding.EncodeToString(body)
 	displayName := imageDisplayName(index, mediaType, path.Base(u.Path))
-	return copilot.Attachment{Type: copilot.AttachmentTypeBlob, Data: &data, MIMEType: &mediaType, DisplayName: &displayName}, nil
+	return copilot.UserMessageAttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
 }
 
 func parseImageDataURL(raw string) (string, string, error) {

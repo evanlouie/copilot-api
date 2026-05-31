@@ -3,7 +3,7 @@ module github.com/evanlouie/copilot-api
 go 1.26.3
 
 require (
-	github.com/github/copilot-sdk/go v0.3.0
+	github.com/github/copilot-sdk/go v1.0.0-beta.10
 	github.com/google/uuid v1.6.0
 )
 

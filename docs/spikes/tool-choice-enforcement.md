@@ -1,17 +1,19 @@
-# Spike: Copilot SDK v0.3.0 tool_choice enforcement
+# Spike: Copilot SDK tool_choice enforcement
 
 Date: 2026-05-29
 
+Current v1 readiness note: the implementation now targets `github.com/github/copilot-sdk/go v1.0.0-beta.10`. Local module tags currently stop at beta releases, so a stable Go `v1.0.0` tag is not available locally yet. The v1 beta generated RPC shape includes a lower-level `RequiredTool` availability check, but the public `MessageOptions` path used by this service does not expose it, and it still is not an OpenAI-compatible way to force the model to call a function or require tool use for a turn.
+
 ## Verdict
 
-**Copilot SDK/CLI v0.3.0 does not expose or send true OpenAI `tool_choice` / `function_call` / required-tool-use controls.**
+**The Copilot SDK/runtime does not expose or send true OpenAI `tool_choice` / `function_call` / required-tool-use controls.**
 
 What is supportable with evidence:
 
 - **`auto`**: yes, by exposing the desired tools and letting the model decide. The provider request does not include `tool_choice`; this is effectively provider/model default behavior.
 - **`none`**: yes, but by **withholding all tools** (`tools: []`) rather than by sending `tool_choice: "none"`.
 - **forced specific function**: only a **best-effort approximation** is possible by registering/exposing only the selected tool alias. This does not force a tool call; live tests showed the model can still answer directly.
-- **`required`**: not enforceable through SDK/CLI. Live tests showed the model can answer directly when tools are available.
+- **`required`**: not enforceable through SDK/runtime. Live tests showed the model can answer directly when tools are available.
 - **`parallel_tool_calls: false`**:
   - Chat Completions wire path: captured requests include `"parallel_tool_calls": false`, apparently hard-coded by the CLI.
   - Responses wire path: captured request included `"parallel_tool_calls": true`; no SDK field was found to set it false.
@@ -20,21 +22,17 @@ Recommended MVP stance: claim support for `auto` and `none`; treat forced specif
 
 ## SDK / RPC source findings
 
-Searched `github.com/github/copilot-sdk/go@v0.3.0` for `tool_choice`, `toolChoice`, `function_call`, `parallel_tool`, `required`, provider request controls, and RPC structs.
+Searched `github.com/github/copilot-sdk/go@v1.0.0-beta.10` for `tool_choice`, `toolChoice`, `function_call`, `parallel_tool`, `required`, provider request controls, and RPC structs. The original experiment was performed against `v0.3.0`; the source-level conclusion remains the same for OpenAI-compatible tool-choice semantics.
 
 Findings:
 
-- `types.go:503-570` `SessionConfig` exposes `Tools`, `AvailableTools`, `ExcludedTools`, `Provider`, `ModelCapabilities`, etc. It has **no** `ToolChoice`, `FunctionCall`, `Required`, or `ParallelToolCalls` field.
-- `types.go:734-760` `ResumeSessionConfig` has the same tool-surface controls and **no** tool-choice controls.
-- `types.go:852-862` `MessageOptions` has only `Prompt`, `Attachments`, `Mode`, and `RequestHeaders`; no per-turn tool-choice controls.
-- `types.go:986-1019` private `createSessionRequest` sends `tools`, `availableTools`, `excludedTools`, and `provider`; no tool-choice field.
-- `types.go:1034-1055` private `resumeSessionRequest` is the same: `tools`, `availableTools`, `excludedTools`, `provider`; no tool-choice field.
-- `client.go:588-593` maps `SessionConfig.Tools`, `SystemMessage`, `AvailableTools`, `ExcludedTools`, and `Provider` to the create request. No hidden mapping for tool choice.
-- `client.go:746-754` maps resume options similarly. No hidden mapping for tool choice.
-- `types.go:819-835` `ProviderConfig` supports `WireApi: "completions" | "responses"`, `BaseURL`, credentials, and headers. No provider request override fields for tool choice.
-- `rpc/generated_rpc.go:1304-1347` generated RPC tool structs cover `Tool`, `ToolList`, `ToolsHandlePendingToolCallRequest`, and `ToolsListRequest`. No generated `tool_choice`, `function_call`, `parallel_tool_calls`, or required-tool-use control was found.
+- `SessionConfig` and `ResumeSessionConfig` expose tool registration/filtering through `Tools`, `AvailableTools`, and `ExcludedTools`, plus provider/model configuration. They do not expose `ToolChoice`, `FunctionCall`, `Required`, or `ParallelToolCalls`.
+- `MessageOptions` exposes prompt, attachments, delivery mode, agent mode, request headers, and display prompt. It does not expose per-turn tool-choice controls.
+- Create/resume requests serialize `tools`, `availableTools`, `excludedTools`, and provider settings. They do not serialize an OpenAI-style tool-choice field.
+- `ProviderConfig` supports provider routing and credentials. It does not expose provider request override fields for tool choice.
+- Generated RPC tool structs cover tool registration/listing and pending tool-call handling. They do not provide OpenAI-style `tool_choice`, `function_call`, `parallel_tool_calls`, or required-tool-use controls.
 
-Conclusion from source: the SDK-level controls are only tool registration/filtering (`Tools`, `AvailableTools`, `ExcludedTools`) plus handlers/permissions. There is no public or generated lower-level control for OpenAI `tool_choice` semantics.
+Conclusion from source: the SDK-level controls are tool registration/filtering (`Tools`, `AvailableTools`, `ExcludedTools`) plus handlers/permissions. The v1 beta generated RPC `SendRequest.RequiredTool` field checks that a named tool is available on a lower-level send path; it is not exposed through public `MessageOptions` used by this service and does not force the model to emit a tool call.
 
 ## SDK e2e harness findings
 
@@ -249,4 +247,4 @@ Next steps:
 1. Implement `auto`/omitted and `none` using tool availability filtering only.
 2. Decide product/API stance for forced function and `required`: recommended fail closed with a clear unsupported error.
 3. Add regression tests around outbound provider request shape using a local provider capture: no `tool_choice`, `tools: []` for `none`, only selected alias for best-effort forced if ever enabled.
-4. Re-run this spike when upgrading beyond SDK `v0.3.0` or embedded CLI `1.0.36-0`.
+4. Re-run this spike when upgrading beyond SDK `v1.0.0-beta.10` or when a stable Go `v1.0.0` tag becomes available.

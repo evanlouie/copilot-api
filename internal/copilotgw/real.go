@@ -40,18 +40,24 @@ type RealGateway struct {
 
 func NewReal(cfg config.Config, store *sessionstore.Store, log *slog.Logger) *RealGateway {
 	fs := sessionfs.NewManager(cfg.DataDir)
-	opts := &copilot.ClientOptions{
-		CLIPath:     cfg.CLIPath,
-		Cwd:         cfg.StateDir,
-		LogLevel:    "error",
-		GitHubToken: cfg.GitHubToken,
+	opts := newRealClientOptions(cfg)
+	return &RealGateway{cfg: cfg, log: log, client: copilot.NewClient(opts), fs: fs, store: store, broker: toolproxy.NewBroker(cfg.ToolCallTTL), modelsCacheTTL: cfg.ModelsCacheTTL, pendingRunners: map[string]*turnRunner{}}
+}
+
+func newRealClientOptions(cfg config.Config) *copilot.ClientOptions {
+	return &copilot.ClientOptions{
+		Connection:       copilot.StdioConnection{Path: cfg.CLIPath},
+		WorkingDirectory: cfg.StateDir,
+		BaseDirectory:    cfg.ConfigDir,
+		LogLevel:         "error",
+		GitHubToken:      cfg.GitHubToken,
+		Mode:             copilot.ModeEmpty,
 		SessionFs: &copilot.SessionFsConfig{
-			InitialCwd:       "/",
-			SessionStatePath: sessionfs.SessionStatePath,
-			Conventions:      rpc.SessionFSSetProviderConventionsPosix,
+			InitialWorkingDirectory: "/",
+			SessionStatePath:        sessionfs.SessionStatePath,
+			Conventions:             rpc.SessionFsSetProviderConventionsPosix,
 		},
 	}
-	return &RealGateway{cfg: cfg, log: log, client: copilot.NewClient(opts), fs: fs, store: store, broker: toolproxy.NewBroker(cfg.ToolCallTTL), modelsCacheTTL: cfg.ModelsCacheTTL, pendingRunners: map[string]*turnRunner{}}
 }
 
 func (g *RealGateway) Start(ctx context.Context) error {
@@ -64,15 +70,25 @@ func (g *RealGateway) Start(ctx context.Context) error {
 	if err := g.client.Start(ctx); err != nil {
 		return err
 	}
-	_, err := g.ListModels(ctx)
-	return err
+	status, err := g.client.GetStatus(ctx)
+	if err != nil {
+		return errors.Join(fmt.Errorf("get copilot runtime status: %w", err), g.client.Stop())
+	}
+	if g.log != nil {
+		g.log.Info("copilot runtime ready", "version", status.Version, "protocol_version", status.ProtocolVersion)
+	}
+	_, err = g.ListModels(ctx)
+	if err != nil {
+		return errors.Join(err, g.client.Stop())
+	}
+	return nil
 }
 
 func (g *RealGateway) Stop() error { return g.client.Stop() }
 
 func (g *RealGateway) Ready(ctx context.Context) error {
-	if g.client.State() != copilot.StateConnected {
-		return fmt.Errorf("copilot client is %s", g.client.State())
+	if g.client.RPC == nil {
+		return fmt.Errorf("copilot client is not connected")
 	}
 	_, err := g.ListModels(ctx)
 	return err
@@ -722,32 +738,12 @@ func (g *RealGateway) resolveChatHistory(ctx context.Context, model string, mess
 }
 
 func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) (*copilot.Session, error) {
+	if err := g.fs.EnsureSession(sessionID); err != nil {
+		return nil, fmt.Errorf("ensure session fs: %w", err)
+	}
 	var lastErr error
 	for _, candidate := range openai.InstructionCandidates(instructions) {
-		cfg := &copilot.SessionConfig{
-			SessionID:                      sessionID,
-			ClientName:                     "copilot-api",
-			Model:                          model,
-			ReasoningEffort:                reasoning,
-			Tools:                          rt.Tools(),
-			AvailableTools:                 rt.AvailableTools(),
-			SystemMessage:                  &copilot.SystemMessageConfig{Mode: "replace", Content: candidate},
-			OnPermissionRequest:            rt.PermissionHandler(),
-			WorkingDirectory:               "/",
-			ConfigDir:                      g.cfg.ConfigDir,
-			EnableConfigDiscovery:          false,
-			MCPServers:                     map[string]copilot.MCPServerConfig{},
-			SkillDirectories:               nil,
-			DisabledSkills:                 []string{"*"},
-			InfiniteSessions:               &copilot.InfiniteSessionConfig{Enabled: copilot.Bool(false)},
-			Streaming:                      streaming,
-			IncludeSubAgentStreamingEvents: copilot.Bool(false),
-			OnEvent:                        func(e copilot.SessionEvent) { sendEvent(events, e) },
-			CreateSessionFsHandler:         func(session *copilot.Session) copilot.SessionFsProvider { return g.fs.Provider(session.SessionID) },
-		}
-		if g.cfg.GitHubToken != "" {
-			cfg.GitHubToken = g.cfg.GitHubToken
-		}
+		cfg := g.newCreateSessionConfig(sessionID, model, candidate, reasoning, rt, streaming, events)
 		s, err := g.client.CreateSession(ctx, cfg)
 		if err == nil {
 			return s, nil
@@ -758,31 +754,12 @@ func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instr
 }
 
 func (g *RealGateway) resumeSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) (*copilot.Session, error) {
+	if err := g.fs.EnsureSession(sessionID); err != nil {
+		return nil, fmt.Errorf("ensure session fs: %w", err)
+	}
 	var lastErr error
 	for _, candidate := range openai.InstructionCandidates(instructions) {
-		cfg := &copilot.ResumeSessionConfig{
-			ClientName:                     "copilot-api",
-			Model:                          model,
-			ReasoningEffort:                reasoning,
-			Tools:                          rt.Tools(),
-			AvailableTools:                 rt.AvailableTools(),
-			SystemMessage:                  &copilot.SystemMessageConfig{Mode: "replace", Content: candidate},
-			OnPermissionRequest:            rt.PermissionHandler(),
-			WorkingDirectory:               "/",
-			ConfigDir:                      g.cfg.ConfigDir,
-			EnableConfigDiscovery:          false,
-			MCPServers:                     map[string]copilot.MCPServerConfig{},
-			SkillDirectories:               nil,
-			DisabledSkills:                 []string{"*"},
-			InfiniteSessions:               &copilot.InfiniteSessionConfig{Enabled: copilot.Bool(false)},
-			Streaming:                      streaming,
-			IncludeSubAgentStreamingEvents: copilot.Bool(false),
-			OnEvent:                        func(e copilot.SessionEvent) { sendEvent(events, e) },
-			CreateSessionFsHandler:         func(session *copilot.Session) copilot.SessionFsProvider { return g.fs.Provider(session.SessionID) },
-		}
-		if g.cfg.GitHubToken != "" {
-			cfg.GitHubToken = g.cfg.GitHubToken
-		}
+		cfg := g.newResumeSessionConfig(model, candidate, reasoning, rt, streaming, events)
 		s, err := g.client.ResumeSession(ctx, sessionID, cfg)
 		if err == nil {
 			return s, nil
@@ -790,6 +767,127 @@ func (g *RealGateway) resumeSession(ctx context.Context, sessionID, model, instr
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+func (g *RealGateway) newCreateSessionConfig(sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) *copilot.SessionConfig {
+	cfg := &copilot.SessionConfig{
+		SessionID:           sessionID,
+		ClientName:          "copilot-api",
+		Model:               model,
+		ReasoningEffort:     reasoning,
+		Tools:               rt.Tools(),
+		AvailableTools:      rt.AvailableTools(),
+		SystemMessage:       &copilot.SystemMessageConfig{Mode: "replace", Content: instructions},
+		OnPermissionRequest: rt.PermissionHandler(),
+	}
+	g.sessionRuntimeDefaults(streaming, events).applyCreate(cfg)
+	if g.cfg.GitHubToken != "" {
+		cfg.GitHubToken = g.cfg.GitHubToken
+	}
+	return cfg
+}
+
+func (g *RealGateway) newResumeSessionConfig(model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) *copilot.ResumeSessionConfig {
+	cfg := &copilot.ResumeSessionConfig{
+		ClientName:          "copilot-api",
+		Model:               model,
+		ReasoningEffort:     reasoning,
+		Tools:               rt.Tools(),
+		AvailableTools:      rt.AvailableTools(),
+		SystemMessage:       &copilot.SystemMessageConfig{Mode: "replace", Content: instructions},
+		OnPermissionRequest: rt.PermissionHandler(),
+	}
+	g.sessionRuntimeDefaults(streaming, events).applyResume(cfg)
+	if g.cfg.GitHubToken != "" {
+		cfg.GitHubToken = g.cfg.GitHubToken
+	}
+	return cfg
+}
+
+type sessionRuntimeDefaults struct {
+	workingDirectory               string
+	configDirectory                string
+	enableConfigDiscovery          bool
+	mcpServers                     map[string]copilot.MCPServerConfig
+	skillDirectories               []string
+	disabledSkills                 []string
+	infiniteSessions               *copilot.InfiniteSessionConfig
+	streaming                      *bool
+	includeSubAgentStreamingEvents *bool
+	onEvent                        copilot.SessionEventHandler
+	createSessionFsProvider        func(session *copilot.Session) copilot.SessionFsProvider
+	skipCustomInstructions         *bool
+	enableHostGitOperations        *bool
+	enableSessionStore             *bool
+	enableSkills                   *bool
+	customAgentsLocalOnly          *bool
+	coauthorEnabled                *bool
+	manageScheduleEnabled          *bool
+}
+
+func (g *RealGateway) sessionRuntimeDefaults(streaming bool, events chan<- copilot.SessionEvent) sessionRuntimeDefaults {
+	return sessionRuntimeDefaults{
+		workingDirectory:               "/",
+		configDirectory:                g.cfg.ConfigDir,
+		enableConfigDiscovery:          false,
+		mcpServers:                     map[string]copilot.MCPServerConfig{},
+		skillDirectories:               nil,
+		disabledSkills:                 []string{"*"},
+		infiniteSessions:               &copilot.InfiniteSessionConfig{Enabled: copilot.Bool(false)},
+		streaming:                      copilot.Bool(streaming),
+		includeSubAgentStreamingEvents: copilot.Bool(false),
+		onEvent:                        func(e copilot.SessionEvent) { sendEvent(events, e) },
+		createSessionFsProvider:        func(session *copilot.Session) copilot.SessionFsProvider { return g.fs.Provider(session.SessionID) },
+		skipCustomInstructions:         copilot.Bool(true),
+		enableHostGitOperations:        copilot.Bool(false),
+		enableSessionStore:             copilot.Bool(false),
+		enableSkills:                   copilot.Bool(false),
+		customAgentsLocalOnly:          copilot.Bool(true),
+		coauthorEnabled:                copilot.Bool(false),
+		manageScheduleEnabled:          copilot.Bool(false),
+	}
+}
+
+func (d sessionRuntimeDefaults) applyCreate(cfg *copilot.SessionConfig) {
+	cfg.WorkingDirectory = d.workingDirectory
+	cfg.ConfigDirectory = d.configDirectory
+	cfg.EnableConfigDiscovery = d.enableConfigDiscovery
+	cfg.MCPServers = d.mcpServers
+	cfg.SkillDirectories = d.skillDirectories
+	cfg.DisabledSkills = d.disabledSkills
+	cfg.InfiniteSessions = d.infiniteSessions
+	cfg.Streaming = d.streaming
+	cfg.IncludeSubAgentStreamingEvents = d.includeSubAgentStreamingEvents
+	cfg.OnEvent = d.onEvent
+	cfg.CreateSessionFsProvider = d.createSessionFsProvider
+	cfg.SkipCustomInstructions = d.skipCustomInstructions
+	cfg.EnableHostGitOperations = d.enableHostGitOperations
+	cfg.EnableSessionStore = d.enableSessionStore
+	cfg.EnableSkills = d.enableSkills
+	cfg.CustomAgentsLocalOnly = d.customAgentsLocalOnly
+	cfg.CoauthorEnabled = d.coauthorEnabled
+	cfg.ManageScheduleEnabled = d.manageScheduleEnabled
+}
+
+func (d sessionRuntimeDefaults) applyResume(cfg *copilot.ResumeSessionConfig) {
+	cfg.WorkingDirectory = d.workingDirectory
+	cfg.ConfigDirectory = d.configDirectory
+	cfg.EnableConfigDiscovery = d.enableConfigDiscovery
+	cfg.MCPServers = d.mcpServers
+	cfg.SkillDirectories = d.skillDirectories
+	cfg.DisabledSkills = d.disabledSkills
+	cfg.InfiniteSessions = d.infiniteSessions
+	cfg.Streaming = d.streaming
+	cfg.IncludeSubAgentStreamingEvents = d.includeSubAgentStreamingEvents
+	cfg.OnEvent = d.onEvent
+	cfg.CreateSessionFsProvider = d.createSessionFsProvider
+	cfg.SkipCustomInstructions = d.skipCustomInstructions
+	cfg.EnableHostGitOperations = d.enableHostGitOperations
+	cfg.EnableSessionStore = d.enableSessionStore
+	cfg.EnableSkills = d.enableSkills
+	cfg.CustomAgentsLocalOnly = d.customAgentsLocalOnly
+	cfg.CoauthorEnabled = d.coauthorEnabled
+	cfg.ManageScheduleEnabled = d.manageScheduleEnabled
 }
 
 func sendEvent(ch chan<- copilot.SessionEvent, e copilot.SessionEvent) {

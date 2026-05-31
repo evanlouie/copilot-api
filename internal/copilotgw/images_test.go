@@ -43,17 +43,17 @@ func TestResolvePromptDataURLAttachment(t *testing.T) {
 	if len(got.Attachments) != 1 {
 		t.Fatalf("expected one attachment, got %d", len(got.Attachments))
 	}
-	attachment := got.Attachments[0]
-	if attachment.Type != copilot.AttachmentTypeBlob {
-		t.Fatalf("unexpected attachment type %q", attachment.Type)
+	attachment := requireBlobAttachment(t, got.Attachments[0])
+	if attachment.Type() != copilot.AttachmentTypeBlob {
+		t.Fatalf("unexpected attachment type %q", attachment.Type())
 	}
-	if attachment.MIMEType == nil || *attachment.MIMEType != "image/png" {
+	if attachment.MIMEType != "image/png" {
 		t.Fatalf("unexpected MIME type %#v", attachment.MIMEType)
 	}
 	if attachment.DisplayName == nil || *attachment.DisplayName != "image_1.png" {
 		t.Fatalf("unexpected display name %#v", attachment.DisplayName)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(*attachment.Data)
+	decoded, err := base64.StdEncoding.DecodeString(attachment.Data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +98,12 @@ func TestResolvePromptFetchesRemoteImage(t *testing.T) {
 	if len(got.Attachments) != 1 {
 		t.Fatalf("expected one attachment, got %d", len(got.Attachments))
 	}
-	if got.Attachments[0].DisplayName == nil || *got.Attachments[0].DisplayName != "shot.png" {
-		t.Fatalf("unexpected display name %#v", got.Attachments[0].DisplayName)
+	attachment := requireBlobAttachment(t, got.Attachments[0])
+	if attachment.DisplayName == nil || *attachment.DisplayName != "shot.png" {
+		t.Fatalf("unexpected display name %#v", attachment.DisplayName)
 	}
-	if got.Attachments[0].Data == nil || *got.Attachments[0].Data != tinyPNG {
-		t.Fatalf("unexpected data %#v", got.Attachments[0].Data)
+	if attachment.Data != tinyPNG {
+		t.Fatalf("unexpected data %#v", attachment.Data)
 	}
 }
 
@@ -118,5 +119,21 @@ func TestResolvePromptRejectsUnsupportedMIME(t *testing.T) {
 	}, "input")
 	if err == nil {
 		t.Fatal("expected unsupported MIME rejection")
+	}
+}
+
+func requireBlobAttachment(t *testing.T, attachment copilot.Attachment) copilot.UserMessageAttachmentBlob {
+	t.Helper()
+	switch a := attachment.(type) {
+	case copilot.UserMessageAttachmentBlob:
+		return a
+	case *copilot.UserMessageAttachmentBlob:
+		if a == nil {
+			t.Fatal("attachment is nil")
+		}
+		return *a
+	default:
+		t.Fatalf("unexpected attachment type %T", attachment)
+		return copilot.UserMessageAttachmentBlob{}
 	}
 }

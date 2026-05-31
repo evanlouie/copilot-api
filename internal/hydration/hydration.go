@@ -141,7 +141,7 @@ type builder struct {
 
 func (b *builder) add(t copilot.SessionEventType, data copilot.SessionEventData) {
 	id := uuid.NewString()
-	e := copilot.SessionEvent{ID: id, Timestamp: b.now.Add(time.Duration(len(b.events)) * time.Millisecond), ParentID: b.lastID, Type: t, Data: data}
+	e := copilot.SessionEvent{ID: id, Timestamp: b.now.Add(time.Duration(len(b.events)) * time.Millisecond), ParentID: b.lastID, Data: data}
 	b.events = append(b.events, e)
 	b.lastID = &b.events[len(b.events)-1].ID
 }
@@ -153,8 +153,9 @@ func (b *builder) jsonl() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, err := copilot.UnmarshalSessionEvent(line); err != nil {
-			return nil, fmt.Errorf("generated invalid session event %s: %w", b.events[i].Type, err)
+		var event copilot.SessionEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			return nil, fmt.Errorf("generated invalid session event %s: %w", b.events[i].Type(), err)
 		}
 		out.Write(line)
 		out.WriteByte('\n')

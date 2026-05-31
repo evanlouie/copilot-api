@@ -12,6 +12,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/openai"
 
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 	"github.com/google/uuid"
 )
 
@@ -134,13 +135,29 @@ func (rt *RequestTools) PermissionHandler() copilot.PermissionHandlerFunc {
 	for _, name := range rt.available {
 		allowed[name] = struct{}{}
 	}
-	return func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
-		if request.Kind == copilot.PermissionRequestKindCustomTool && request.ToolName != nil {
-			if _, ok := allowed[*request.ToolName]; ok && *request.ToolName != NoToolsSentinel {
-				return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+	return func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+		if request.Kind() == copilot.PermissionRequestKindCustomTool {
+			if name, ok := permissionToolName(request); ok {
+				if _, allowedTool := allowed[name]; allowedTool && name != NoToolsSentinel {
+					return &rpc.PermissionDecisionApproveOnce{}, nil
+				}
 			}
 		}
-		return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindDeniedByRules}, nil
+		return &rpc.PermissionDecisionReject{}, nil
+	}
+}
+
+func permissionToolName(request copilot.PermissionRequest) (string, bool) {
+	switch r := request.(type) {
+	case copilot.PermissionRequestCustomTool:
+		return r.ToolName, true
+	case *copilot.PermissionRequestCustomTool:
+		if r == nil {
+			return "", false
+		}
+		return r.ToolName, true
+	default:
+		return "", false
 	}
 }
 

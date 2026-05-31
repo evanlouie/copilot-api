@@ -473,7 +473,7 @@
       <div class="meta-grid" aria-label="Project metadata">
         <div class="meta-card"><b>Repository</b>copilot-api</div>
         <div class="meta-card"><b>Language</b>Go 1.26.3</div>
-        <div class="meta-card"><b>SDK target</b>github/copilot-sdk/go v0.3.0</div>
+        <div class="meta-card"><b>SDK target</b>github/copilot-sdk/go v1.0.0-beta.10</div>
         <div class="meta-card"><b>Prepared</b>2026-05-29</div>
       </div>
     </header>
@@ -858,7 +858,7 @@ func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
                 <h3>Technical spike and compatibility decisions</h3>
                 <ul>
                   <li>Use <span class="kbd">spikes/synthetic-session-hydration.md</span> as evidence that synthetic <span class="kbd">events.jsonl</span> history is consumed as model context after resume.</li>
-                  <li>Use <span class="kbd">spikes/tool-choice-enforcement.md</span> as evidence that true forced/<span class="kbd">required</span> tool choice is not available through SDK/CLI v0.3.0.</li>
+                  <li>Use <span class="kbd">spikes/tool-choice-enforcement.md</span> as evidence that true forced/<span class="kbd">required</span> tool choice is not available through the current SDK/runtime. The v1 beta generated RPC shape includes a lower-level <span class="kbd">RequiredTool</span> availability check, but public <span class="kbd">MessageOptions</span> used by this service does not expose OpenAI-compatible forced tool-call semantics.</li>
                   <li>Prove empty/space/minimal replacement prompts, built-in tool disablement, and embedded CLI compatibility with repeatable live tests.</li>
                   <li>Keep these spikes as upgrade gates: SDK/CLI changes cannot land until equivalent checks pass.</li>
                 </ul>
@@ -1042,7 +1042,7 @@ type TurnResult struct {
               <h4>Default fast tests</h4>
               <ul>
                 <li>OpenAI schema validation and error envelope unit tests.</li>
-                <li>Hydration generator tests: parent IDs, timestamps, turn delimiters, assistant text, tool calls, tool results, and <span class="kbd">copilot.UnmarshalSessionEvent</span> round trips.</li>
+                <li>Hydration generator tests: parent IDs, timestamps, turn delimiters, assistant text, tool calls, tool results, and <span class="kbd">copilot.SessionEvent</span> JSON round trips.</li>
                 <li>Instruction folding tests: leading system/developer ordering, mid-conversation rejection, empty/space/minimal prompt selection.</li>
                 <li>Tool conversion tests: opaque aliases, reserved names, <span class="kbd">tool_choice</span> auto/none/rejection, <span class="kbd">parallel_tool_calls</span> endpoint rules, and output serialization.</li>
                 <li>SSE tests for text chunks, buffered complete tool calls, preserved pre-tool text, terminal finish reasons, <span class="kbd">[DONE]</span>, and cancellation.</li>
@@ -1187,7 +1187,7 @@ copilot-api purge --dry-run</code></pre>
     </div>
 
     <p class="footer">
-      Source context: repository instructions in <span class="kbd">AGENTS.md</span>, module metadata in <span class="kbd">go.mod</span>, local GitHub Copilot SDK v0.3.0 documentation, and spike reports in <span class="kbd">spikes/</span>.
+      Source context: repository instructions in <span class="kbd">AGENTS.md</span>, module metadata in <span class="kbd">go.mod</span>, local GitHub Copilot SDK v1.0.0-beta.10 documentation, latest local module tags showing no stable Go <span class="kbd">v1.0.0</span> release yet, and spike reports in <span class="kbd">spikes/</span>.
     </p>
   </div>
 </body>

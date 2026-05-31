@@ -8,6 +8,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/openai"
 
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 )
 
 func TestRequestToolsNoneUsesSentinel(t *testing.T) {
@@ -18,6 +19,36 @@ func TestRequestToolsNoneUsesSentinel(t *testing.T) {
 	}
 	if got := rt.AvailableTools(); len(got) != 1 || got[0] != NoToolsSentinel {
 		t.Fatalf("unexpected available tools: %#v", got)
+	}
+}
+
+func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := rt.PermissionHandler()
+	allowed, err := handler(copilot.PermissionRequestCustomTool{ToolName: rt.Tools()[0].Name}, copilot.PermissionInvocation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed.Kind() != rpc.PermissionDecisionKindApproveOnce {
+		t.Fatalf("expected approve-once, got %s", allowed.Kind())
+	}
+	denied, err := handler(copilot.PermissionRequestCustomTool{ToolName: NoToolsSentinel}, copilot.PermissionInvocation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied.Kind() != rpc.PermissionDecisionKindReject {
+		t.Fatalf("expected reject, got %s", denied.Kind())
+	}
+	unknown, err := handler(copilot.PermissionRequestCustomTool{ToolName: "unknown_alias"}, copilot.PermissionInvocation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknown.Kind() != rpc.PermissionDecisionKindReject {
+		t.Fatalf("expected reject for unknown tool, got %s", unknown.Kind())
 	}
 }
 
