@@ -54,7 +54,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | Streaming | SSE streams are OpenAI-shaped. SDK streaming deltas are forwarded as text deltas; tool calls are buffered and emitted complete; streams terminate with `[DONE]`. |
 | Usage | SDK input/output/reasoning token events are mapped when available; unavailable fields are omitted. |
 | Multimodal | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; selected models must support vision. Image `file_id` inputs and binary/multimodal tool outputs are deferred. JSON object/array tool outputs are serialized to JSON text. |
-| Unsupported fields | Strict compatibility defaults to enabled; unsupported semantics fail closed with OpenAI-shaped `invalid_request_error` responses. |
+| Unsupported fields | Strict compatibility defaults to disabled, so harmless unsupported client knobs such as `temperature` are ignored. Unsupported semantics that would mislead clients still fail closed with OpenAI-shaped `invalid_request_error` responses. |
 
 ## Configuration
 
@@ -72,7 +72,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | `COPILOT_API_STATE_DIR` | `$XDG_STATE_HOME/copilot-api` | Lock file, response records, and pending metadata. |
 | `COPILOT_API_CACHE_DIR` | `$XDG_CACHE_HOME/copilot-api` | Model cache and transient cache files. |
 | `COPILOT_API_CONFIG_DIR` | `$XDG_CONFIG_HOME/copilot-api` | Isolated Copilot SDK config dir. |
-| `COPILOT_STRICT_COMPAT` | `true` | Reject unsupported OpenAI fields. |
+| `COPILOT_STRICT_COMPAT` | `false` | Reject harmless unsupported OpenAI fields that permissive mode normally ignores; useful for debugging client conformance. Unsafe unsupported semantics are always rejected. |
 | `COPILOT_LOG_CONTENT` | `false` | Enables content logging; use with care. |
 | `COPILOT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. Request metadata is logged at this level; 4xx responses log at warn and 5xx responses at error. Generation request logs include the requested `model` field and `reasoning_effort` when supplied. |
 

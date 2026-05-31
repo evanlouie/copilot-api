@@ -649,7 +649,7 @@ internal/testutil/               # fake gateway, local provider capture, golden 
               <tr><td><span class="kbd">COPILOT_API_DATA_DIR</span></td><td>XDG data override for retained session files.</td><td><span class="kbd">$XDG_DATA_HOME/copilot-api</span>.</td></tr>
               <tr><td><span class="kbd">COPILOT_API_STATE_DIR</span></td><td>XDG state override for lock, pending records, and diagnostics.</td><td><span class="kbd">$XDG_STATE_HOME/copilot-api</span>.</td></tr>
               <tr><td><span class="kbd">COPILOT_API_CACHE_DIR</span></td><td>XDG cache override for model cache and transient cache files.</td><td><span class="kbd">$XDG_CACHE_HOME/copilot-api</span>.</td></tr>
-              <tr><td><span class="kbd">COPILOT_STRICT_COMPAT</span></td><td>Reject unsupported OpenAI fields instead of using fallback approximations.</td><td>true.</td></tr>
+              <tr><td><span class="kbd">COPILOT_STRICT_COMPAT</span></td><td>Reject harmless unsupported OpenAI fields that permissive mode normally ignores. Unsafe unsupported semantics are always rejected.</td><td>false.</td></tr>
               <tr><td><span class="kbd">COPILOT_LOG_CONTENT</span></td><td>Include prompts/responses/tool content in logs. Emits a loud warning when enabled.</td><td>false.</td></tr>
             </tbody>
           </table>

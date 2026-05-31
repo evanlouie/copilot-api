@@ -43,7 +43,7 @@ func Load() (Config, error) {
 		APIKey:         os.Getenv("COPILOT_API_KEY"),
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 		CLIPath:        os.Getenv("COPILOT_CLI_PATH"),
-		StrictCompat:   true,
+		StrictCompat:   false,
 		ModelsCacheTTL: DefaultModelsCacheTTL,
 		ToolCallTTL:    DefaultToolCallTTL,
 	}
@@ -60,7 +60,7 @@ func Load() (Config, error) {
 	if cfg.MaxRequestBodyBytes, err = parseBytesEnv("COPILOT_MAX_REQUEST_BODY_BYTES", 0); err != nil {
 		return Config{}, err
 	}
-	if cfg.StrictCompat, err = parseBoolEnv("COPILOT_STRICT_COMPAT", true); err != nil {
+	if cfg.StrictCompat, err = parseBoolEnv("COPILOT_STRICT_COMPAT", false); err != nil {
 		return Config{}, err
 	}
 	if cfg.LogContent, err = parseBoolEnv("COPILOT_LOG_CONTENT", false); err != nil {

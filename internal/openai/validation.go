@@ -9,42 +9,54 @@ import (
 
 var functionNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
 
-var unsupportedChatFields = map[string]string{
-	"audio":                 "audio output is not supported",
-	"function_call":         "legacy function_call is not supported; use tools",
-	"functions":             "legacy functions are not supported; use tools",
-	"logit_bias":            "logit_bias is not supported",
-	"logprobs":              "logprobs is not supported",
-	"max_tokens":            "max_tokens is not supported by this proxy in MVP",
-	"max_completion_tokens": "max_completion_tokens is not supported by this proxy in MVP",
-	"metadata":              "metadata is not supported on chat completions",
-	"modalities":            "modalities are not supported",
-	"n":                     "n other than 1 is not supported",
-	"prediction":            "prediction is not supported",
-	"response_format":       "response_format is not supported in MVP",
-	"seed":                  "seed is not supported",
-	"service_tier":          "service_tier is not supported",
-	"stop":                  "stop sequences are not supported by this backend",
-	"temperature":           "temperature is not forwarded by this proxy in MVP",
-	"top_logprobs":          "top_logprobs is not supported",
-	"top_p":                 "top_p is not forwarded by this proxy in MVP",
-	"presence_penalty":      "presence_penalty is not forwarded by this proxy in MVP",
-	"frequency_penalty":     "frequency_penalty is not forwarded by this proxy in MVP",
-	"user":                  "user is not forwarded by this single-user proxy",
+type unsupportedField struct {
+	name    string
+	message string
+	allow   func(any) bool
 }
 
-var unsupportedResponseFields = map[string]string{
-	"background":        "background mode is not supported",
-	"include":           "include is not supported",
-	"max_output_tokens": "max_output_tokens is not supported by this proxy in MVP",
-	"metadata":          "metadata is not supported in MVP",
-	"reasoning":         "reasoning object controls are not supported; use reasoning_effort when available",
-	"service_tier":      "service_tier is not supported",
-	"temperature":       "temperature is not forwarded by this proxy in MVP",
-	"text":              "text formatting controls are not supported in MVP",
-	"top_p":             "top_p is not forwarded by this proxy in MVP",
-	"truncation":        "truncation controls are not supported in MVP",
-	"user":              "user is not forwarded by this single-user proxy",
+var alwaysRejectChatFields = []unsupportedField{
+	{name: "audio", message: "audio output is not supported"},
+	{name: "function_call", message: "legacy function_call is not supported; use tools"},
+	{name: "functions", message: "legacy functions are not supported; use tools"},
+	{name: "logit_bias", message: "logit_bias is not supported"},
+	{name: "logprobs", message: "logprobs is not supported"},
+	{name: "top_logprobs", message: "top_logprobs is not supported"},
+	{name: "max_tokens", message: "max_tokens is not supported by this proxy in MVP"},
+	{name: "max_completion_tokens", message: "max_completion_tokens is not supported by this proxy in MVP"},
+	{name: "modalities", message: "modalities are not supported"},
+	{name: "prediction", message: "prediction is not supported"},
+	{name: "response_format", message: "response_format is not supported in MVP"},
+	{name: "stop", message: "stop sequences are not supported by this backend"},
+	{name: "n", message: "n other than 1 is not supported", allow: isOne},
+}
+
+var strictOnlyChatFields = []unsupportedField{
+	{name: "temperature", message: "temperature is not forwarded by this proxy in MVP"},
+	{name: "top_p", message: "top_p is not forwarded by this proxy in MVP"},
+	{name: "presence_penalty", message: "presence_penalty is not forwarded by this proxy in MVP"},
+	{name: "frequency_penalty", message: "frequency_penalty is not forwarded by this proxy in MVP"},
+	{name: "seed", message: "seed is not supported"},
+	{name: "metadata", message: "metadata is not supported on chat completions"},
+	{name: "service_tier", message: "service_tier is not supported"},
+	{name: "user", message: "user is not forwarded by this single-user proxy"},
+}
+
+var alwaysRejectResponseFields = []unsupportedField{
+	{name: "background", message: "background mode is not supported"},
+	{name: "include", message: "include is not supported"},
+	{name: "max_output_tokens", message: "max_output_tokens is not supported by this proxy in MVP"},
+	{name: "reasoning", message: "reasoning object controls are not supported; use reasoning_effort when available"},
+	{name: "text", message: "text formatting controls are not supported in MVP"},
+	{name: "truncation", message: "truncation controls are not supported in MVP"},
+}
+
+var strictOnlyResponseFields = []unsupportedField{
+	{name: "temperature", message: "temperature is not forwarded by this proxy in MVP"},
+	{name: "top_p", message: "top_p is not forwarded by this proxy in MVP"},
+	{name: "metadata", message: "metadata is not supported in MVP"},
+	{name: "service_tier", message: "service_tier is not supported"},
+	{name: "user", message: "user is not forwarded by this single-user proxy"},
 }
 
 func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
@@ -54,16 +66,12 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 	if len(req.Messages) == 0 {
 		return InvalidRequest("messages is required", "messages")
 	}
+	if err := validateUnsupportedFields(req.Raw, alwaysRejectChatFields); err != nil {
+		return err
+	}
 	if strict {
-		for field, msg := range unsupportedChatFields {
-			if _, ok := req.Raw[field]; ok {
-				if field == "n" {
-					if isOne(req.Raw[field]) {
-						continue
-					}
-				}
-				return InvalidRequest(msg, field)
-			}
+		if err := validateUnsupportedFields(req.Raw, strictOnlyChatFields); err != nil {
+			return err
 		}
 	}
 	if req.ParallelToolCalls != nil && *req.ParallelToolCalls {
@@ -107,11 +115,12 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 	if len(req.Input) == 0 || string(req.Input) == "null" {
 		return InvalidRequest("input is required", "input")
 	}
+	if err := validateUnsupportedFields(req.Raw, alwaysRejectResponseFields); err != nil {
+		return err
+	}
 	if strict {
-		for field, msg := range unsupportedResponseFields {
-			if _, ok := req.Raw[field]; ok {
-				return InvalidRequest(msg, field)
-			}
+		if err := validateUnsupportedFields(req.Raw, strictOnlyResponseFields); err != nil {
+			return err
 		}
 	}
 	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
@@ -122,6 +131,20 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 	}
 	if err := validateToolChoice(req.ToolChoice); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateUnsupportedFields(raw map[string]any, fields []unsupportedField) error {
+	for _, field := range fields {
+		value, ok := raw[field.name]
+		if !ok {
+			continue
+		}
+		if field.allow != nil && field.allow(value) {
+			continue
+		}
+		return InvalidRequest(field.message, field.name)
 	}
 	return nil
 }
