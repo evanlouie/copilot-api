@@ -67,7 +67,7 @@ type ResponseRecord struct {
 	Deleted            bool                        `json:"deleted"`
 	Output             []openai.ResponseOutputItem `json:"output"`
 	OutputText         string                      `json:"output_text"`
-	Usage              *openai.Usage               `json:"usage,omitempty"`
+	Usage              *openai.ResponseUsage       `json:"usage,omitempty"`
 	PreviousResponseID string                      `json:"previous_response_id,omitempty"`
 	PendingBatchID     string                      `json:"pending_batch_id,omitempty"`
 	RetainedPath       string                      `json:"retained_path,omitempty"`

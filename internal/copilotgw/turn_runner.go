@@ -266,15 +266,13 @@ func responseFromTurn(id, model, instructions string, previous *string, store bo
 	if id == "" {
 		id = openai.NewID("resp_")
 	}
-	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: time.Now().Unix(), Status: "completed", Model: model, Instructions: instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: store, Usage: turn.Usage, Error: nil, IncompleteDetails: nil}
-	if len(turn.ToolCalls) > 0 {
-		for _, tc := range turn.ToolCalls {
-			resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: "fc_" + tc.ID, Type: "function_call", Status: "completed", CallID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
-		}
-		return resp
+	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: time.Now().Unix(), Status: "completed", Model: model, Instructions: instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: previous, Store: store, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
+	if turn.Text != "" || len(turn.ToolCalls) == 0 {
+		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: openai.NewID("msg_"), Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}})
 	}
-	resp.OutputText = turn.Text
-	resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: openai.NewID("msg_"), Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}})
+	for _, tc := range turn.ToolCalls {
+		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: "fc_" + tc.ID, Type: "function_call", Status: "completed", CallID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+	}
 	return resp
 }
 

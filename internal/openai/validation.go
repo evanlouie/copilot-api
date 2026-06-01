@@ -44,16 +44,16 @@ var strictOnlyChatFields = []unsupportedField{
 
 var alwaysRejectResponseFields = []unsupportedField{
 	{name: "background", message: "background mode is not supported"},
-	{name: "include", message: "include is not supported"},
 	{name: "max_output_tokens", message: "max_output_tokens is not supported by this proxy in MVP"},
-	{name: "reasoning", message: "reasoning object controls are not supported; use reasoning_effort when available"},
-	{name: "text", message: "text formatting controls are not supported in MVP"},
 	{name: "truncation", message: "truncation controls are not supported in MVP"},
 }
 
 var strictOnlyResponseFields = []unsupportedField{
 	{name: "temperature", message: "temperature is not forwarded by this proxy in MVP"},
 	{name: "top_p", message: "top_p is not forwarded by this proxy in MVP"},
+	{name: "include", message: "include is ignored by this proxy in permissive mode"},
+	{name: "reasoning", message: "reasoning object controls are only partially supported in permissive mode; use reasoning_effort"},
+	{name: "text", message: "text controls are ignored by this proxy in permissive mode"},
 	{name: "metadata", message: "metadata is not supported in MVP"},
 	{name: "service_tier", message: "service_tier is not supported"},
 	{name: "user", message: "user is not forwarded by this single-user proxy"},
@@ -123,16 +123,131 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 			return err
 		}
 	}
+	if err := validateResponsesInclude(req.Include); err != nil {
+		return err
+	}
+	if err := validateResponsesReasoning(req); err != nil {
+		return err
+	}
+	if err := validateResponsesText(req.Text); err != nil {
+		return err
+	}
 	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
 		return InvalidRequest("parallel_tool_calls=false is not supported for Responses through this backend", "parallel_tool_calls")
 	}
-	if err := ValidateTools(req.Tools); err != nil {
+	if err := ValidateResponsesTools(req.Tools, strict); err != nil {
 		return err
 	}
 	if err := validateToolChoice(req.ToolChoice); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateResponsesInclude(raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return InvalidRequest("include must be an array of strings", "include")
+	}
+	for _, value := range values {
+		if value != "reasoning.encrypted_content" {
+			return InvalidRequest("unsupported include value", "include")
+		}
+	}
+	return nil
+}
+
+func validateResponsesReasoning(req *ResponsesRequest) error {
+	if len(req.Reasoning) == 0 || string(req.Reasoning) == "null" {
+		return nil
+	}
+	fields, err := rawObject(req.Reasoning, "reasoning")
+	if err != nil {
+		return err
+	}
+	for name := range fields {
+		switch name {
+		case "effort", "summary":
+		default:
+			return InvalidRequest("unsupported reasoning field", "reasoning."+name)
+		}
+	}
+	if raw, ok := fields["effort"]; ok && string(raw) != "null" {
+		var effort string
+		if err := json.Unmarshal(raw, &effort); err != nil || effort == "" {
+			return InvalidRequest("reasoning.effort must be a string", "reasoning.effort")
+		}
+		if req.ReasoningEffort != "" && req.ReasoningEffort != effort {
+			return InvalidRequest("reasoning.effort conflicts with reasoning_effort", "reasoning.effort")
+		}
+	}
+	if raw, ok := fields["summary"]; ok && string(raw) != "null" {
+		var summary string
+		if err := json.Unmarshal(raw, &summary); err != nil {
+			return InvalidRequest("reasoning.summary must be a string", "reasoning.summary")
+		}
+	}
+	return nil
+}
+
+func validateResponsesText(raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	fields, err := rawObject(raw, "text")
+	if err != nil {
+		return err
+	}
+	for name := range fields {
+		switch name {
+		case "verbosity", "format":
+		default:
+			return InvalidRequest("unsupported text field", "text."+name)
+		}
+	}
+	if raw, ok := fields["verbosity"]; ok && string(raw) != "null" {
+		var verbosity string
+		if err := json.Unmarshal(raw, &verbosity); err != nil || verbosity == "" {
+			return InvalidRequest("text.verbosity must be a string", "text.verbosity")
+		}
+	}
+	if raw, ok := fields["format"]; ok && string(raw) != "null" {
+		return InvalidRequest("text.format is not supported in MVP", "text.format")
+	}
+	return nil
+}
+
+func rawObject(raw json.RawMessage, param string) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, InvalidRequest(param+" must be an object", param)
+	}
+	return fields, nil
+}
+
+func ResponsesReasoningEffort(req *ResponsesRequest) string {
+	if req.ReasoningEffort != "" {
+		return req.ReasoningEffort
+	}
+	if len(req.Reasoning) == 0 || string(req.Reasoning) == "null" {
+		return ""
+	}
+	fields, err := rawObject(req.Reasoning, "reasoning")
+	if err != nil {
+		return ""
+	}
+	raw, ok := fields["effort"]
+	if !ok || string(raw) == "null" {
+		return ""
+	}
+	var effort string
+	if err := json.Unmarshal(raw, &effort); err != nil {
+		return ""
+	}
+	return effort
 }
 
 func validateUnsupportedFields(raw map[string]any, fields []unsupportedField) error {
@@ -150,9 +265,20 @@ func validateUnsupportedFields(raw map[string]any, fields []unsupportedField) er
 }
 
 func ValidateTools(tools []Tool) error {
+	return validateTools(tools, false)
+}
+
+func ValidateResponsesTools(tools []Tool, strict bool) error {
+	return validateTools(tools, !strict)
+}
+
+func validateTools(tools []Tool, allowUnsupported bool) error {
 	seen := map[string]struct{}{}
 	for i, tool := range tools {
 		if tool.Type != "function" {
+			if allowUnsupported {
+				continue
+			}
 			return InvalidRequest("only function tools are supported", fmt.Sprintf("tools.%d.type", i))
 		}
 		fn := tool.Function
@@ -171,6 +297,16 @@ func ValidateTools(tools []Tool) error {
 		}
 	}
 	return nil
+}
+
+func SupportedTools(tools []Tool) []Tool {
+	out := make([]Tool, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Type == "function" {
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 func validateToolChoice(raw json.RawMessage) error {

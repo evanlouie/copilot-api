@@ -227,12 +227,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setRequestLogModel(r, req.Model)
-	setRequestLogReasoningEffort(r, req.ReasoningEffort)
+	reasoningEffort := openai.ResponsesReasoningEffort(&req)
+	setRequestLogReasoningEffort(r, reasoningEffort)
 	if err := openai.ValidateResponsesRequest(&req, s.cfg.StrictCompat); err != nil {
 		openai.WriteError(w, err)
 		return
 	}
-	input, outputs, err := parseResponsesInput(req.Input)
+	input, outputs, inputInstructions, err := parseResponsesInput(req.Input)
 	if err != nil {
 		openai.WriteError(w, err)
 		return
@@ -242,7 +243,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if req.Store != nil {
 		store = *req.Store
 	}
-	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: req.Instructions, Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: req.ReasoningEffort}
+	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: combineInstructions(req.Instructions, inputInstructions), Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: openai.SupportedTools(req.Tools), ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: reasoningEffort}
 	if req.Stream {
 		s.streamResponses(w, r, gwReq)
 		return
@@ -271,12 +272,31 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		_ = writer.Done()
 		return
 	}
+	var previous *string
+	if req.PreviousResponseID != "" {
+		previous = &req.PreviousResponseID
+	}
+	_ = writer.Event("response.created", openai.ResponseStreamEvent{Type: "response.created", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "in_progress", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}})
+	messageID := openai.NewID("msg_")
+	messageStarted := false
+	var messageText strings.Builder
 	for ev := range ch {
 		switch ev.Kind {
 		case "delta":
 			zero := 0
-			_ = writer.Event("response.output_text.delta", openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &zero, ContentIndex: &zero, Delta: ev.Delta})
+			if !messageStarted {
+				item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "in_progress", Role: "assistant", Content: []openai.ResponseText{}}
+				_ = writer.Event("response.output_item.added", openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &zero, Item: &item})
+				messageStarted = true
+			}
+			messageText.WriteString(ev.Delta)
+			_ = writer.Event("response.output_text.delta", openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Delta: ev.Delta})
 		case "response":
+			if messageStarted {
+				if item, idx := streamedMessageItem(ev.Response, messageID, messageText.String()); item != nil {
+					_ = writer.Event("response.output_item.done", openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: item})
+				}
+			}
 			s.writeResponseOutputEvents(writer, ev.Response)
 			_ = writer.Event("response.completed", openai.ResponseStreamEvent{Type: "response.completed", Response: ev.Response})
 		case "error":
@@ -284,6 +304,30 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		}
 	}
 	_ = writer.Done()
+}
+
+func streamedMessageItem(resp *openai.Response, id, text string) (*openai.ResponseOutputItem, int) {
+	if resp == nil {
+		return nil, 0
+	}
+	if resp.OutputText == "" {
+		resp.OutputText = text
+	}
+	item := openai.ResponseOutputItem{ID: id, Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: resp.OutputText}}}
+	for i := range resp.Output {
+		if resp.Output[i].Type == "message" {
+			item = resp.Output[i]
+			item.ID = id
+			item.Status = "completed"
+			if len(item.Content) == 0 {
+				item.Content = []openai.ResponseText{{Type: "output_text", Text: resp.OutputText}}
+			}
+			resp.Output = append(resp.Output[:i], resp.Output[i+1:]...)
+			break
+		}
+	}
+	resp.Output = append([]openai.ResponseOutputItem{item}, resp.Output...)
+	return &resp.Output[0], 0
 }
 
 func (s *Server) writeResponseOutputEvents(writer *openai.SSEWriter, resp *openai.Response) {
@@ -382,54 +426,164 @@ func toolOutputFromContent(content openai.Content) (string, error) {
 	}
 }
 
-func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]string, error) {
+func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]string, string, error) {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return openai.PromptContent{Text: s}, nil, nil
+		return openai.PromptContent{Text: s}, nil, "", nil
 	}
 	var items []openai.ResponseInputItem
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return openai.PromptContent{}, nil, openai.InvalidRequest("input must be a string or an array of response input items", "input")
+		return openai.PromptContent{}, nil, "", openai.InvalidRequest("input must be a string or an array of response input items", "input")
 	}
-	outputs := map[string]string{}
+	if responsesInputIsToolContinuation(items) {
+		outputs := map[string]string{}
+		for i, item := range items {
+			out, err := parseFunctionOutputItem(item, i)
+			if err != nil {
+				return openai.PromptContent{}, nil, "", err
+			}
+			if _, exists := outputs[item.CallID]; exists {
+				return openai.PromptContent{}, nil, "", openai.InvalidRequest("duplicate function_call_output call_id", fmt.Sprintf("input.%d.call_id", i))
+			}
+			outputs[item.CallID] = out
+		}
+		return openai.PromptContent{}, outputs, "", nil
+	}
+
+	transcriptMode := responsesInputNeedsTranscript(items)
 	var prompt openai.PromptContent
+	var instructions []string
+	var transcript []string
 	for i, item := range items {
 		switch item.Type {
 		case "function_call_output":
-			if item.CallID == "" {
-				return openai.PromptContent{}, nil, openai.InvalidRequest("function_call_output items require call_id", fmt.Sprintf("input.%d.call_id", i))
-			}
-			out, err := outputRawToString(item.Output)
+			out, err := parseFunctionOutputItem(item, i)
 			if err != nil {
-				return openai.PromptContent{}, nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
+				return openai.PromptContent{}, nil, "", err
 			}
-			if _, exists := outputs[item.CallID]; exists {
-				return openai.PromptContent{}, nil, openai.InvalidRequest("duplicate function_call_output call_id", fmt.Sprintf("input.%d.call_id", i))
-			}
-			outputs[item.CallID] = out
+			transcript = append(transcript, "Function output "+item.CallID+":\n"+out)
 		case "message", "":
-			if item.Role != "user" && item.Role != "" {
-				return openai.PromptContent{}, nil, openai.InvalidRequest("only user message input items are supported in MVP", fmt.Sprintf("input.%d.role", i))
+			role := item.Role
+			if role == "" {
+				role = "user"
 			}
-			part, err := item.Content.Prompt()
-			if err != nil {
-				return openai.PromptContent{}, nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
-			}
-			if part.Text != "" {
-				if prompt.Text != "" {
-					prompt.Text += "\n"
+			switch role {
+			case "system", "developer":
+				text, err := item.Content.Text()
+				if err != nil {
+					return openai.PromptContent{}, nil, "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
 				}
-				prompt.Text += part.Text
+				if strings.TrimSpace(text) != "" {
+					instructions = append(instructions, responseRoleLabel(role)+":\n"+text)
+				}
+			case "user":
+				part, err := item.Content.Prompt()
+				if err != nil {
+					return openai.PromptContent{}, nil, "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
+				}
+				appendPromptPart(&prompt, part, transcriptMode, &transcript, "User")
+			case "assistant":
+				text, err := item.Content.Text()
+				if err != nil {
+					return openai.PromptContent{}, nil, "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
+				}
+				if strings.TrimSpace(text) != "" {
+					transcript = append(transcript, "Assistant:\n"+text)
+				}
+			default:
+				return openai.PromptContent{}, nil, "", openai.InvalidRequest("unsupported response input message role", fmt.Sprintf("input.%d.role", i))
 			}
-			prompt.Images = append(prompt.Images, part.Images...)
+		case "reasoning":
+			// Reasoning items may appear in Codex history. They are not user-visible prompt content.
+		case "function_call":
+			transcript = append(transcript, "Assistant function call "+item.Name+" "+item.CallID+":\n"+item.Arguments)
+		case "custom_tool_call":
+			transcript = append(transcript, "Assistant custom tool call "+item.Name+" "+item.CallID+":\n"+item.Input)
 		default:
-			return openai.PromptContent{}, nil, openai.InvalidRequest("unsupported response input item type", fmt.Sprintf("input.%d.type", i))
+			return openai.PromptContent{}, nil, "", openai.InvalidRequest("unsupported response input item type", fmt.Sprintf("input.%d.type", i))
 		}
 	}
-	if len(outputs) > 0 {
-		return openai.PromptContent{}, outputs, nil
+	if len(transcript) > 0 {
+		if prompt.Text != "" {
+			transcript = append(transcript, "User:\n"+prompt.Text)
+			prompt.Text = ""
+		}
+		prompt.Text = strings.Join(transcript, "\n\n")
 	}
-	return prompt, nil, nil
+	return prompt, nil, strings.Join(instructions, "\n\n"), nil
+}
+
+func responsesInputIsToolContinuation(items []openai.ResponseInputItem) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if item.Type != "function_call_output" {
+			return false
+		}
+	}
+	return true
+}
+
+func responsesInputNeedsTranscript(items []openai.ResponseInputItem) bool {
+	for _, item := range items {
+		if item.Type == "function_call" || item.Type == "custom_tool_call" || item.Type == "function_call_output" {
+			return true
+		}
+		if (item.Type == "message" || item.Type == "") && item.Role == "assistant" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseFunctionOutputItem(item openai.ResponseInputItem, i int) (string, error) {
+	if item.CallID == "" {
+		return "", openai.InvalidRequest("function_call_output items require call_id", fmt.Sprintf("input.%d.call_id", i))
+	}
+	out, err := outputRawToString(item.Output)
+	if err != nil {
+		return "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
+	}
+	return out, nil
+}
+
+func responseRoleLabel(role string) string {
+	switch role {
+	case "system":
+		return "System"
+	case "developer":
+		return "Developer"
+	default:
+		return role
+	}
+}
+
+func appendPromptPart(prompt *openai.PromptContent, part openai.PromptContent, transcriptMode bool, transcript *[]string, label string) {
+	if transcriptMode {
+		if strings.TrimSpace(part.Text) != "" {
+			*transcript = append(*transcript, label+":\n"+part.Text)
+		}
+		prompt.Images = append(prompt.Images, part.Images...)
+		return
+	}
+	if part.Text != "" {
+		if prompt.Text != "" {
+			prompt.Text += "\n"
+		}
+		prompt.Text += part.Text
+	}
+	prompt.Images = append(prompt.Images, part.Images...)
+}
+
+func combineInstructions(base, extra string) string {
+	if strings.TrimSpace(extra) == "" {
+		return base
+	}
+	if strings.TrimSpace(base) == "" {
+		return extra
+	}
+	return base + "\n\n" + extra
 }
 
 func outputRawToString(raw json.RawMessage) (string, error) {

@@ -22,6 +22,20 @@ func TestRequestToolsNoneUsesSentinel(t *testing.T) {
 	}
 }
 
+func TestRequestToolsUnsupportedOnlyUsesSentinel(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "custom"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.Tools()) != 0 {
+		t.Fatalf("SDK tools = %#v, want none", rt.Tools())
+	}
+	if got := rt.AvailableTools(); len(got) != 1 || got[0] != NoToolsSentinel {
+		t.Fatalf("unexpected available tools: %#v", got)
+	}
+}
+
 func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)

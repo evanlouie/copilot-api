@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -116,14 +117,19 @@ func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 		param string
 	}{
 		{
-			name:  "text",
+			name:  "text format",
 			body:  `{"model":"gpt-5","text":{"format":{"type":"json_object"}},"input":"hi"}`,
-			param: "text",
+			param: "text.format",
 		},
 		{
-			name:  "reasoning",
-			body:  `{"model":"gpt-5","reasoning":{"effort":"high"},"input":"hi"}`,
-			param: "reasoning",
+			name:  "unknown reasoning field",
+			body:  `{"model":"gpt-5","reasoning":{"foo":"bar"},"input":"hi"}`,
+			param: "reasoning.foo",
+		},
+		{
+			name:  "unsupported include value",
+			body:  `{"model":"gpt-5","include":["file_search_call.results"],"input":"hi"}`,
+			param: "include",
 		},
 		{
 			name:  "max output tokens",
@@ -160,6 +166,78 @@ func TestResponsesPermissiveAllowsIgnoredFields(t *testing.T) {
 	}
 	if err := ValidateResponsesRequest(&req, true); err == nil {
 		t.Fatal("expected ignored fields to be rejected in strict mode")
+	}
+}
+
+func TestResponsesPermissiveAllowsCodexReasoningDefaults(t *testing.T) {
+	var req ResponsesRequest
+	body := []byte(`{"model":"gpt-5.5","include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium","summary":"auto"},"text":{"verbosity":"low"},"tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch","description":"patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},{"type":"web_search","external_web_access":true}],"input":"hi"}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateResponsesRequest(&req, false); err != nil {
+		t.Fatalf("Codex reasoning defaults should be accepted in permissive mode: %v", err)
+	}
+	if got := ResponsesReasoningEffort(&req); got != "medium" {
+		t.Fatalf("ResponsesReasoningEffort = %q, want medium", got)
+	}
+	supported := SupportedTools(req.Tools)
+	if len(supported) != 1 || supported[0].Function.Name != "exec_command" {
+		t.Fatalf("SupportedTools = %#v, want exec_command only", supported)
+	}
+	if err := ValidateResponsesRequest(&req, true); err == nil {
+		t.Fatal("expected Codex-only ignored fields to be rejected in strict mode")
+	}
+}
+
+func TestValidateChatRejectsUnsupportedToolTypes(t *testing.T) {
+	var req ChatCompletionRequest
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateChatRequest(&req, false); err == nil {
+		t.Fatal("expected Chat custom tools to be rejected")
+	}
+}
+
+func TestNewResponseUsageUsesResponsesTokenNames(t *testing.T) {
+	prompt := int64(3)
+	completion := int64(5)
+	reasoning := int64(2)
+	usage := NewResponseUsage(&Usage{PromptTokens: &prompt, CompletionTokens: &completion, CompletionTokensDetails: &TokenDetails{ReasoningTokens: &reasoning}})
+	b, err := json.Marshal(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for _, want := range []string{`"input_tokens":3`, `"output_tokens":5`, `"total_tokens":8`, `"reasoning_tokens":2`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("usage JSON missing %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "prompt_tokens") || strings.Contains(got, "completion_tokens") {
+		t.Fatalf("usage JSON should use Responses field names: %s", got)
+	}
+}
+
+func TestNewResponseUsageOmitsReasoningOnlyUsage(t *testing.T) {
+	reasoning := int64(2)
+	if usage := NewResponseUsage(&Usage{CompletionTokensDetails: &TokenDetails{ReasoningTokens: &reasoning}}); usage != nil {
+		t.Fatalf("reasoning-only usage = %#v, want nil", usage)
+	}
+}
+
+func TestResponseUsageUnmarshalsLegacyChatUsage(t *testing.T) {
+	var usage ResponseUsage
+	if err := json.Unmarshal([]byte(`{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8,"completion_tokens_details":{"reasoning_tokens":2}}`), &usage); err != nil {
+		t.Fatal(err)
+	}
+	if usage.InputTokens == nil || *usage.InputTokens != 3 || usage.OutputTokens == nil || *usage.OutputTokens != 5 || usage.TotalTokens == nil || *usage.TotalTokens != 8 {
+		t.Fatalf("legacy usage was not migrated: %#v", usage)
+	}
+	if usage.OutputTokensDetails == nil || usage.OutputTokensDetails.ReasoningTokens == nil || *usage.OutputTokensDetails.ReasoningTokens != 2 {
+		t.Fatalf("legacy reasoning tokens were not migrated: %#v", usage.OutputTokensDetails)
 	}
 }
 

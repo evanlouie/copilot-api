@@ -47,6 +47,75 @@ type TokenDetails struct {
 	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
 }
 
+type ResponseUsage struct {
+	InputTokens         *int64                       `json:"input_tokens,omitempty"`
+	InputTokensDetails  *ResponseInputTokensDetails  `json:"input_tokens_details,omitempty"`
+	OutputTokens        *int64                       `json:"output_tokens,omitempty"`
+	OutputTokensDetails *ResponseOutputTokensDetails `json:"output_tokens_details,omitempty"`
+	TotalTokens         *int64                       `json:"total_tokens,omitempty"`
+}
+
+type ResponseInputTokensDetails struct {
+	CachedTokens *int64 `json:"cached_tokens,omitempty"`
+}
+
+type ResponseOutputTokensDetails struct {
+	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
+}
+
+func NewResponseUsage(usage *Usage) *ResponseUsage {
+	if usage == nil {
+		return nil
+	}
+	if usage.PromptTokens == nil && usage.CompletionTokens == nil && usage.TotalTokens == nil {
+		return nil
+	}
+	out := &ResponseUsage{InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens}
+	if out.TotalTokens == nil && out.InputTokens != nil && out.OutputTokens != nil {
+		total := *out.InputTokens + *out.OutputTokens
+		out.TotalTokens = &total
+	}
+	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens != nil {
+		out.OutputTokensDetails = &ResponseOutputTokensDetails{ReasoningTokens: usage.CompletionTokensDetails.ReasoningTokens}
+	}
+	return out
+}
+
+func (u *ResponseUsage) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err == nil {
+		if _, ok := raw["prompt_tokens"]; ok {
+			return u.unmarshalLegacyJSON(data)
+		}
+		if _, ok := raw["completion_tokens"]; ok {
+			return u.unmarshalLegacyJSON(data)
+		}
+		if _, ok := raw["completion_tokens_details"]; ok {
+			return u.unmarshalLegacyJSON(data)
+		}
+	}
+	type alias ResponseUsage
+	var current alias
+	if err := json.Unmarshal(data, &current); err != nil {
+		return err
+	}
+	*u = ResponseUsage(current)
+	return nil
+}
+
+func (u *ResponseUsage) unmarshalLegacyJSON(data []byte) error {
+	var legacy Usage
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	if converted := NewResponseUsage(&legacy); converted != nil {
+		*u = *converted
+		return nil
+	}
+	*u = ResponseUsage{}
+	return nil
+}
+
 type ChatCompletionRequest struct {
 	Model               string          `json:"model"`
 	Messages            []ChatMessage   `json:"messages"`
@@ -241,6 +310,28 @@ type Tool struct {
 	Function FunctionTool `json:"function"`
 }
 
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	type alias Tool
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	if a.Type == "function" && a.Function.Name == "" {
+		var flat struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description,omitempty"`
+			Parameters  json.RawMessage `json:"parameters,omitempty"`
+			Strict      *bool           `json:"strict,omitempty"`
+		}
+		if err := json.Unmarshal(data, &flat); err != nil {
+			return err
+		}
+		a.Function = FunctionTool{Name: flat.Name, Description: flat.Description, Parameters: flat.Parameters, Strict: flat.Strict}
+	}
+	*t = Tool(a)
+	return nil
+}
+
 type FunctionTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
@@ -320,6 +411,9 @@ type ResponsesRequest struct {
 	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
 	Store              *bool           `json:"store,omitempty"`
 	ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
+	Include            json.RawMessage `json:"include,omitempty"`
+	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
+	Text               json.RawMessage `json:"text,omitempty"`
 	Raw                map[string]any  `json:"-"`
 }
 
@@ -354,7 +448,7 @@ type Response struct {
 	ParallelToolCalls  bool                 `json:"parallel_tool_calls"`
 	PreviousResponseID *string              `json:"previous_response_id"`
 	Store              bool                 `json:"store"`
-	Usage              *Usage               `json:"usage,omitempty"`
+	Usage              *ResponseUsage       `json:"usage,omitempty"`
 	Error              any                  `json:"error"`
 	IncompleteDetails  any                  `json:"incomplete_details"`
 	Metadata           map[string]string    `json:"metadata,omitempty"`
@@ -378,11 +472,14 @@ type ResponseText struct {
 }
 
 type ResponseInputItem struct {
-	Type    string          `json:"type,omitempty"`
-	Role    string          `json:"role,omitempty"`
-	Content Content         `json:"content,omitempty"`
-	CallID  string          `json:"call_id,omitempty"`
-	Output  json.RawMessage `json:"output,omitempty"`
+	Type      string          `json:"type,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   Content         `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Input     string          `json:"input,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
 }
 
 type ResponseStreamEvent struct {

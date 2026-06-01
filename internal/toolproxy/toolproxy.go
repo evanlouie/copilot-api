@@ -87,6 +87,7 @@ type RequestTools struct {
 }
 
 func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*RequestTools, error) {
+	tools = openai.SupportedTools(tools)
 	rt := &RequestTools{broker: broker, aliasToPublic: map[string]string{}, publicToAlias: map[string]string{}, choiceNone: choiceNone}
 	if choiceNone || len(tools) == 0 {
 		rt.available = []string{NoToolsSentinel}

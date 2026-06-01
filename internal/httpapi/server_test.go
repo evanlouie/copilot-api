@@ -25,6 +25,22 @@ func (g modelsGateway) ListModels(context.Context) ([]copilotgw.Model, error) {
 	return g.models, nil
 }
 
+type codexStreamGateway struct {
+	copilotgw.Gateway
+	got copilotgw.ResponseRequest
+}
+
+func (g *codexStreamGateway) StreamResponse(_ context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
+	g.got = req
+	ch := make(chan copilotgw.ResponseStreamEvent, 2)
+	go func() {
+		defer close(ch)
+		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "ok"}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, OutputText: "ok", Output: []openai.ResponseOutputItem{{ID: "msg_final", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "ok"}}}}, ParallelToolCalls: true, Store: req.Store}}
+	}()
+	return ch, nil
+}
+
 func TestModelsEndpointIncludesContextWindowLimits(t *testing.T) {
 	contextWindow := int64(200000)
 	s := New(config.Config{}, modelsGateway{models: []copilotgw.Model{{
@@ -96,14 +112,100 @@ func TestRequestLoggingMiddlewareLogsMetadata(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
+	gw := &codexStreamGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := strings.NewReader(`{"model":"gpt-5.5","stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium","summary":"auto"},"text":{"verbosity":"low"},"tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch"}],"instructions":"base","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"desktop context"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if gw.got.ReasoningEffort != "medium" {
+		t.Fatalf("ReasoningEffort = %q, want medium", gw.got.ReasoningEffort)
+	}
+	if len(gw.got.Tools) != 1 || gw.got.Tools[0].Function.Name != "exec_command" {
+		t.Fatalf("gateway tools = %#v, want exec_command only", gw.got.Tools)
+	}
+	if gw.got.Instructions != "base\n\nDeveloper:\ndesktop context" {
+		t.Fatalf("Instructions = %q, want developer context folded in", gw.got.Instructions)
+	}
+	if gw.got.Input.Text != "hi" {
+		t.Fatalf("Input.Text = %q, want hi", gw.got.Input.Text)
+	}
+	out := rr.Body.String()
+	created := strings.Index(out, "event: response.created")
+	added := strings.Index(out, "event: response.output_item.added")
+	delta := strings.Index(out, "event: response.output_text.delta")
+	completed := strings.Index(out, "event: response.completed")
+	if created < 0 || added < 0 || delta < 0 || completed < 0 || !(created < added && added < delta && delta < completed) {
+		t.Fatalf("unexpected SSE order:\n%s", out)
+	}
+}
+
+func TestStreamedMessageItemKeepsTextAtStableIndex(t *testing.T) {
+	resp := &openai.Response{Output: []openai.ResponseOutputItem{{ID: "fc_call_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "lookup", Arguments: `{}`}}}
+	item, idx := streamedMessageItem(resp, "msg_stream", "hello")
+	if idx != 0 || item == nil || item.ID != "msg_stream" || item.Type != "message" {
+		t.Fatalf("streamedMessageItem = (%#v, %d), want message at index 0", item, idx)
+	}
+	if len(resp.Output) != 2 || resp.Output[0].Type != "message" || resp.Output[1].Type != "function_call" {
+		t.Fatalf("unexpected output order: %#v", resp.Output)
+	}
+	if resp.Output[1].CallID != "call_1" {
+		t.Fatalf("function call was not preserved: %#v", resp.Output[1])
+	}
+}
+
 func TestParseResponsesInputRejectsDuplicateFunctionOutputs(t *testing.T) {
 	raw := json.RawMessage(`[
 		{"type":"function_call_output","call_id":"call_1","output":"a"},
 		{"type":"function_call_output","call_id":"call_1","output":"b"}
 	]`)
-	_, _, err := parseResponsesInput(raw)
+	_, _, _, err := parseResponsesInput(raw)
 	if err == nil {
 		t.Fatal("expected duplicate call_id rejection")
+	}
+}
+
+func TestParseResponsesInputFoldsDeveloperMessagesIntoInstructions(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"message","role":"developer","content":[{"type":"input_text","text":"desktop context"}]},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
+	]`)
+	prompt, outputs, instructions, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outputs != nil {
+		t.Fatalf("unexpected outputs: %#v", outputs)
+	}
+	if instructions != "Developer:\ndesktop context" {
+		t.Fatalf("instructions = %q, want developer context", instructions)
+	}
+	if prompt.Text != "hello" {
+		t.Fatalf("prompt text = %q, want hello", prompt.Text)
+	}
+}
+
+func TestParseResponsesInputSerializesAssistantHistoryAsTranscript(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"message","role":"user","content":"hi"},
+		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]},
+		{"type":"message","role":"user","content":"again"}
+	]`)
+	prompt, outputs, instructions, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outputs != nil || instructions != "" {
+		t.Fatalf("unexpected outputs/instructions: %#v %q", outputs, instructions)
+	}
+	want := "User:\nhi\n\nAssistant:\nhello\n\nUser:\nagain"
+	if prompt.Text != want {
+		t.Fatalf("prompt text = %q, want %q", prompt.Text, want)
 	}
 }
 
@@ -114,12 +216,15 @@ func TestParseResponsesInputAcceptsImageParts(t *testing.T) {
 			{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"}
 		]}
 	]`)
-	prompt, outputs, err := parseResponsesInput(raw)
+	prompt, outputs, instructions, err := parseResponsesInput(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if outputs != nil {
 		t.Fatalf("unexpected outputs: %#v", outputs)
+	}
+	if instructions != "" {
+		t.Fatalf("unexpected instructions: %q", instructions)
 	}
 	if prompt.Text != "describe" {
 		t.Fatalf("unexpected prompt text %q", prompt.Text)
