@@ -242,3 +242,14 @@ go vet ./...
 ```
 
 Live Copilot integration checks should be gated by `COPILOT_API_LIVE_TESTS=1` and are not part of the default test suite.
+
+The Deno + AI SDK integration suite is also gated by default. Start a local server, then enable it explicitly:
+
+```sh
+COPILOT_API_AI_SDK_DENO_TESTS=1 \
+COPILOT_API_BASE_URL=http://127.0.0.1:8080/v1 \
+COPILOT_API_KEY=local-secret \
+deno task test:ai-sdk
+```
+
+The suite covers Chat Completions, Responses, reasoning effort, multi-turn history, MCP-backed client tools, and image inputs. See [`tests/ai-sdk-deno/README.md`](tests/ai-sdk-deno/README.md) for configuration options.

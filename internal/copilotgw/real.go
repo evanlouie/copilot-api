@@ -543,10 +543,14 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		if err != nil {
 			return nil, openai.InvalidRequest("unknown or expired function_call_output call_id", "input")
 		}
-		if batch.ResponseID != "" && req.PreviousResponseID != batch.ResponseID {
+		previousResponseID := req.PreviousResponseID
+		if previousResponseID == "" {
+			previousResponseID = batch.ResponseID
+		}
+		if batch.ResponseID != "" && previousResponseID != batch.ResponseID {
 			return nil, openai.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
 		}
-		previousRecord, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
+		previousRecord, err := g.store.LoadResponseForContinuation(previousResponseID)
 		if err != nil {
 			return nil, openai.NotFound("previous_response_id not found", "not_found")
 		}
@@ -558,7 +562,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		if !req.StoreSet {
 			storeVisible = previousRecord.Stored
 		}
-		previous := req.PreviousResponseID
+		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
 		runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible)
 		runner.onResult = func(turn *TurnResult) {
@@ -643,10 +647,14 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	if err != nil {
 		return nil, openai.InvalidRequest("unknown or expired function_call_output call_id", "input")
 	}
-	if batch.ResponseID != "" && req.PreviousResponseID != batch.ResponseID {
+	previousResponseID := req.PreviousResponseID
+	if previousResponseID == "" {
+		previousResponseID = batch.ResponseID
+	}
+	if batch.ResponseID != "" && previousResponseID != batch.ResponseID {
 		return nil, openai.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
 	}
-	previousRecord, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
+	previousRecord, err := g.store.LoadResponseForContinuation(previousResponseID)
 	if err != nil {
 		return nil, openai.NotFound("previous_response_id not found", "not_found")
 	}
@@ -668,7 +676,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		if turn.PendingBatchID != "" && runner != nil {
 			g.rememberRunner(turn.PendingBatchID, runner)
 		}
-		previous := req.PreviousResponseID
+		previous := previousResponseID
 		storeVisible := req.Store
 		if !req.StoreSet {
 			storeVisible = previousRecord.Stored

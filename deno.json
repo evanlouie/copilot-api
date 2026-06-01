@@ -1,0 +1,19 @@
+{
+  "lock": "deno.lock",
+  "imports": {
+    "@ai-sdk/mcp": "npm:@ai-sdk/mcp@1.0.45",
+    "@ai-sdk/mcp/mcp-stdio": "npm:@ai-sdk/mcp@1.0.45/mcp-stdio",
+    "@ai-sdk/openai": "npm:@ai-sdk/openai@3.0.67",
+    "@modelcontextprotocol/sdk/server/index.js": "npm:@modelcontextprotocol/sdk@1.29.0/server/index.js",
+    "@modelcontextprotocol/sdk/server/stdio.js": "npm:@modelcontextprotocol/sdk@1.29.0/server/stdio.js",
+    "@modelcontextprotocol/sdk/types.js": "npm:@modelcontextprotocol/sdk@1.29.0/types.js",
+    "@std/assert": "jsr:@std/assert@1.0.15",
+    "ai": "npm:ai@6.0.193"
+  },
+  "tasks": {
+    "test:ai-sdk": "deno check tests/ai-sdk-deno/mcp_server.ts && deno test --allow-env --allow-net --allow-run=deno --allow-sys=hostname tests/ai-sdk-deno"
+  },
+  "fmt": {
+    "include": ["tests/ai-sdk-deno"]
+  }
+}

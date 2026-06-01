@@ -467,8 +467,22 @@ type ResponseOutputItem struct {
 }
 
 type ResponseText struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	Annotations []any  `json:"annotations"`
+}
+
+func (t ResponseText) MarshalJSON() ([]byte, error) {
+	type responseText struct {
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		Annotations []any  `json:"annotations"`
+	}
+	annotations := t.Annotations
+	if annotations == nil {
+		annotations = []any{}
+	}
+	return json.Marshal(responseText{Type: t.Type, Text: t.Text, Annotations: annotations})
 }
 
 type ResponseInputItem struct {

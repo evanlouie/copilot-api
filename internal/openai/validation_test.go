@@ -6,6 +6,16 @@ import (
 	"testing"
 )
 
+func TestResponseTextMarshalsEmptyAnnotationsArray(t *testing.T) {
+	data, err := json.Marshal(ResponseText{Type: "output_text", Text: "ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), `{"type":"output_text","text":"ok","annotations":[]}`; got != want {
+		t.Fatalf("ResponseText JSON = %s, want %s", got, want)
+	}
+}
+
 func TestFoldChatInstructionsRejectsMidConversation(t *testing.T) {
 	msgs := []ChatMessage{
 		{Role: "system", Content: NewTextContent("sys")},

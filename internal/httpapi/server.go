@@ -435,9 +435,12 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return openai.PromptContent{}, nil, "", openai.InvalidRequest("input must be a string or an array of response input items", "input")
 	}
-	if responsesInputIsToolContinuation(items) {
+	if responsesInputHasFunctionOutputs(items) {
 		outputs := map[string]string{}
 		for i, item := range items {
+			if item.Type != "function_call_output" {
+				continue
+			}
 			out, err := parseFunctionOutputItem(item, i)
 			if err != nil {
 				return openai.PromptContent{}, nil, "", err
@@ -513,16 +516,13 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 	return prompt, nil, strings.Join(instructions, "\n\n"), nil
 }
 
-func responsesInputIsToolContinuation(items []openai.ResponseInputItem) bool {
-	if len(items) == 0 {
-		return false
-	}
+func responsesInputHasFunctionOutputs(items []openai.ResponseInputItem) bool {
 	for _, item := range items {
-		if item.Type != "function_call_output" {
-			return false
+		if item.Type == "function_call_output" {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func responsesInputNeedsTranscript(items []openai.ResponseInputItem) bool {
