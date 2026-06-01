@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -786,7 +787,7 @@ func recoverMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if v := recover(); v != nil {
-				observability.Logger(r.Context(), log).Error("panic in HTTP handler", "panic", v)
+				observability.Logger(r.Context(), log).Error("panic in HTTP handler", "panic", v, "stack", string(debug.Stack()))
 				openai.WriteError(w, openai.Internal("internal server error"))
 			}
 		}()

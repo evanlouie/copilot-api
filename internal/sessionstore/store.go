@@ -65,6 +65,7 @@ type ResponseRecord struct {
 	Status             string                      `json:"status"`
 	Stored             bool                        `json:"stored"`
 	Deleted            bool                        `json:"deleted"`
+	InputText          string                      `json:"input_text,omitempty"`
 	Output             []openai.ResponseOutputItem `json:"output"`
 	OutputText         string                      `json:"output_text"`
 	Usage              *openai.ResponseUsage       `json:"usage,omitempty"`

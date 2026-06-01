@@ -2,7 +2,13 @@ import { createMCPClient } from "@ai-sdk/mcp";
 import { Experimental_StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
 import { createOpenAI } from "@ai-sdk/openai";
 import { assert, assertEquals } from "@std/assert";
-import { generateText, stepCountIs, streamText } from "ai";
+import {
+  generateText,
+  stepCountIs,
+  streamText,
+  type TextStreamPart,
+  type ToolSet,
+} from "ai";
 
 const ENABLED = env("COPILOT_API_AI_SDK_DENO_TESTS") === "1";
 const DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1";
@@ -196,6 +202,87 @@ function assertNonEmptyText(text: string, label: string) {
   assert(text.trim().length > 0, `${label} returned empty text`);
 }
 
+type UsageShape = {
+  inputTokens?: number | undefined;
+  outputTokens?: number | undefined;
+  totalTokens?: number | undefined;
+};
+
+function assertUsage(usage: UsageShape | undefined, label: string) {
+  assert(usage != null, `${label} did not return a usage object`);
+  const input = usage.inputTokens ?? 0;
+  const output = usage.outputTokens ?? 0;
+  const total = usage.totalTokens ?? 0;
+  assert(
+    total > 0 || input > 0 || output > 0,
+    `${label} usage had no positive token counts: ${JSON.stringify(usage)}`,
+  );
+}
+
+function responseIdFromMetadata(meta: unknown): string | undefined {
+  if (meta == null || typeof meta !== "object") return undefined;
+  const openai = (meta as Record<string, unknown>).openai;
+  if (openai == null || typeof openai !== "object") return undefined;
+  const id = (openai as Record<string, unknown>).responseId;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function mentionsAny(text: string, needles: string[]): boolean {
+  const lower = text.toLowerCase();
+  return needles.some((needle) => lower.includes(needle.toLowerCase()));
+}
+
+type CollectedStream = {
+  text: string;
+  toolCalls: Array<{
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+  }>;
+  toolInputStarts: Array<{ id: string; toolName: string }>;
+  toolInputDeltas: number;
+  finishParts: number;
+};
+
+async function collectFullStream(
+  stream: AsyncIterable<TextStreamPart<ToolSet>>,
+): Promise<CollectedStream> {
+  const collected: CollectedStream = {
+    text: "",
+    toolCalls: [],
+    toolInputStarts: [],
+    toolInputDeltas: 0,
+    finishParts: 0,
+  };
+  for await (const part of stream) {
+    switch (part.type) {
+      case "text-delta":
+        collected.text += part.text;
+        break;
+      case "tool-call":
+        collected.toolCalls.push({
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          input: part.input,
+        });
+        break;
+      case "tool-input-start":
+        collected.toolInputStarts.push({
+          id: part.id,
+          toolName: part.toolName,
+        });
+        break;
+      case "tool-input-delta":
+        collected.toolInputDeltas += 1;
+        break;
+      case "finish":
+        collected.finishParts += 1;
+        break;
+    }
+  }
+  return collected;
+}
+
 function testPngBytes(): Uint8Array {
   return Uint8Array.from(atob(TEST_PNG_BASE64), (char) => char.charCodeAt(0));
 }
@@ -253,13 +340,23 @@ function integrationTest(
 }
 
 integrationTest(
-  "copilot-api exposes health and models endpoints",
+  "copilot-api exposes health, readiness, and models endpoints",
   async (config) => {
     const health = await fetchJSON<Record<string, unknown>>(
       config,
       `${config.serviceBaseURL}/healthz`,
     );
     assertEquals(health.status, "ok");
+
+    const ready = await fetchJSON<Record<string, unknown>>(
+      config,
+      `${config.serviceBaseURL}/readyz`,
+    );
+    assertEquals(
+      ready.status,
+      "ready",
+      `GET /readyz returned ${JSON.stringify(ready)}`,
+    );
 
     const models = await listedModels(config);
     assertEquals(models.object, "list");
@@ -291,7 +388,7 @@ integrationTest(
 );
 
 integrationTest(
-  "AI SDK chat streamText works against /v1/chat/completions",
+  "AI SDK chat streamText emits usage and a stop finish reason",
   async (config) => {
     const model = await selectedModel(config);
     const result = streamText({
@@ -307,10 +404,15 @@ integrationTest(
     }
 
     assertNonEmptyText(text, "chat streamText");
-    assert(
-      await result.finishReason != null,
-      "chat streamText did not report a finish reason",
+    const finishReason = await result.finishReason;
+    assertEquals(
+      finishReason,
+      "stop",
+      `chat streamText finishReason = ${finishReason}, want stop`,
     );
+    // Verifies the AI SDK can parse the proxy's stream_options.include_usage
+    // terminal chunk shape; only a real client + real upstream can catch this.
+    assertUsage(await result.usage, "chat streamText");
   },
 );
 
@@ -334,7 +436,7 @@ integrationTest(
 );
 
 integrationTest(
-  "AI SDK responses streamText works against /v1/responses",
+  "AI SDK responses streamText emits usage, finish reason, and SSE events",
   async (config) => {
     const model = await selectedModel(config);
     const result = streamText({
@@ -344,12 +446,22 @@ integrationTest(
         "Reply with one short sentence confirming that Responses streaming works.",
     });
 
-    let text = "";
-    for await (const delta of result.textStream) {
-      text += delta;
-    }
-
-    assertNonEmptyText(text, "responses streamText");
+    // Consuming fullStream forces the AI SDK Responses parser to accept the
+    // entire response.created -> response.output_text.delta ->
+    // response.completed event sequence, not just the text payload.
+    const collected = await collectFullStream(result.fullStream);
+    assertNonEmptyText(collected.text, "responses streamText");
+    assert(
+      collected.finishParts >= 1,
+      "responses streamText did not surface a finish part",
+    );
+    const finishReason = await result.finishReason;
+    assertEquals(
+      finishReason,
+      "stop",
+      `responses streamText finishReason = ${finishReason}, want stop`,
+    );
+    assertUsage(await result.usage, "responses streamText");
   },
 );
 
@@ -384,6 +496,68 @@ integrationTest(
     assert(
       result.finishReason != null,
       "reasoning effort generateText did not report a finish reason",
+    );
+    // Reasoning models should expose reasoning output through one of:
+    // (a) AI SDK reasoning parts, (b) reasoningText, or (c) usage.reasoningTokens.
+    // Failing all three indicates the proxy dropped the upstream reasoning signal.
+    const reasoningText = (result as { reasoningText?: string }).reasoningText;
+    const reasoningParts =
+      (result as { reasoning?: Array<unknown> }).reasoning ?? [];
+    const reasoningTokens =
+      (result.usage as { reasoningTokens?: number } | undefined)
+        ?.reasoningTokens ?? 0;
+    assert(
+      (reasoningText != null && reasoningText.length > 0) ||
+        reasoningParts.length > 0 ||
+        reasoningTokens > 0,
+      `reasoning effort generateText surfaced no reasoning signal (reasoningText=${
+        JSON.stringify(reasoningText)
+      }, reasoningParts=${reasoningParts.length}, reasoningTokens=${reasoningTokens}, usage=${
+        JSON.stringify(result.usage)
+      })`,
+    );
+  },
+);
+
+integrationTest(
+  "AI SDK Responses API continues conversations through previous_response_id",
+  async (config) => {
+    const model = await selectedModel(config);
+    const codeword = uniqueCodeword("resp-prev");
+
+    const first = await generateText({
+      abortSignal: AbortSignal.timeout(config.timeoutMs),
+      model: config.openai.responses(model),
+      prompt:
+        `Remember this exact codeword for the next turn: ${codeword}. Reply with one short sentence acknowledging it.`,
+      providerOptions: { openai: { store: true } },
+    });
+    assertNonEmptyText(first.text, "previous_response_id first turn");
+
+    const responseId = responseIdFromMetadata(first.providerMetadata) ??
+      first.response?.id;
+    assert(
+      typeof responseId === "string" && responseId.length > 0,
+      `first turn did not surface a Responses API id (providerMetadata=${
+        JSON.stringify(first.providerMetadata)
+      }, response=${JSON.stringify(first.response)})`,
+    );
+
+    const second = await generateText({
+      abortSignal: AbortSignal.timeout(config.timeoutMs),
+      model: config.openai.responses(model),
+      prompt:
+        "Reply with only the exact codeword from my previous message, no other text.",
+      providerOptions: {
+        openai: { previousResponseId: responseId, store: false },
+      },
+    });
+
+    assert(
+      second.text.includes(codeword),
+      `previous_response_id continuation lost the codeword: text=${
+        JSON.stringify(second.text)
+      }, providerMetadata=${JSON.stringify(second.providerMetadata)}`,
     );
   },
 );
@@ -468,14 +642,35 @@ integrationTest(
           `Use the echo_codeword tool with codeword ${codeword}. After the tool runs, reply with only the tool result text.`,
       });
 
-      let text = "";
-      for await (const delta of result.textStream) {
-        text += delta;
-      }
+      // Consume fullStream so the AI SDK has to reassemble streamed tool-call
+      // argument deltas into a complete tool-call part; the proxy's chat
+      // tool-call delta format is only exercised on this path.
+      const collected = await collectFullStream(result.fullStream);
       assert(
-        text.includes(codeword),
+        collected.toolCalls.length >= 1,
+        `streaming chat MCP did not surface any reassembled tool calls: ${
+          JSON.stringify(collected)
+        }`,
+      );
+      const echoCall = collected.toolCalls.find((call) =>
+        call.toolName === "echo_codeword"
+      );
+      assert(
+        echoCall != null,
+        `streaming chat MCP did not call echo_codeword: ${
+          JSON.stringify(collected.toolCalls)
+        }`,
+      );
+      const args = echoCall.input as { codeword?: unknown } | undefined;
+      assertEquals(
+        args?.codeword,
+        codeword,
+        `reassembled tool call args were wrong: ${JSON.stringify(echoCall)}`,
+      );
+      assert(
+        collected.text.includes(codeword),
         `streaming MCP final text ${
-          JSON.stringify(text)
+          JSON.stringify(collected.text)
         } did not include ${codeword}`,
       );
     });
@@ -527,15 +722,71 @@ integrationTest(
           `Use the echo_codeword tool with codeword ${codeword}. After the tool runs, reply with only the tool result text.`,
       });
 
-      let text = "";
-      for await (const delta of result.textStream) {
-        text += delta;
-      }
+      // Same reasoning as the streaming chat MCP test: fullStream proves the
+      // AI SDK Responses parser can assemble response.function_call_arguments.*
+      // events into a structured tool-call part.
+      const collected = await collectFullStream(result.fullStream);
       assert(
-        text.includes(codeword),
+        collected.toolCalls.length >= 1,
+        `streaming Responses MCP did not surface any reassembled tool calls: ${
+          JSON.stringify(collected)
+        }`,
+      );
+      const echoCall = collected.toolCalls.find((call) =>
+        call.toolName === "echo_codeword"
+      );
+      assert(
+        echoCall != null,
+        `streaming Responses MCP did not call echo_codeword: ${
+          JSON.stringify(collected.toolCalls)
+        }`,
+      );
+      const args = echoCall.input as { codeword?: unknown } | undefined;
+      assertEquals(
+        args?.codeword,
+        codeword,
+        `reassembled tool call args were wrong: ${JSON.stringify(echoCall)}`,
+      );
+      assert(
+        collected.text.includes(codeword),
         `streaming Responses MCP final text ${
-          JSON.stringify(text)
+          JSON.stringify(collected.text)
         } did not include ${codeword}`,
+      );
+    });
+  },
+);
+
+integrationTest(
+  "AI SDK tool_choice=none prevents the model from invoking registered tools",
+  async (config) => {
+    const model = await selectedModel(config);
+    await withMCPTools(async (tools) => {
+      const codeword = uniqueCodeword("tool-choice-none");
+      const result = await generateText({
+        abortSignal: AbortSignal.timeout(config.timeoutMs),
+        model: config.openai.chat(model),
+        tools,
+        toolChoice: "none",
+        stopWhen: stepCountIs(2),
+        prompt:
+          `An MCP tool called echo_codeword is registered. Do NOT call it. Instead, reply with one short sentence that mentions the codeword ${codeword} verbatim.`,
+      });
+
+      const allToolCalls = result.steps.flatMap((step) => step.toolCalls);
+      assertEquals(
+        allToolCalls.length,
+        0,
+        `tool_choice=none was not honored; tool calls observed: ${
+          JSON.stringify(allToolCalls)
+        }`,
+      );
+      assertNonEmptyText(result.text, "tool_choice=none generateText");
+      assert(
+        result.text.includes(codeword),
+        `tool_choice=none response should still address the prompt: ${
+          JSON.stringify(result.text)
+        }`,
       );
     });
   },
@@ -562,7 +813,7 @@ integrationTest(
             {
               type: "text",
               text:
-                "This message includes a 128 by 128 PNG image with colored regions. Reply with one concise sentence confirming that an image was attached.",
+                "The attached 128x128 PNG has four colored quadrants and two black diagonal lines forming an X. In one short sentence, name at least one color you see or mention the diagonal lines.",
             },
             {
               type: "image",
@@ -576,6 +827,35 @@ integrationTest(
     });
 
     assertNonEmptyText(result.text, "chat image input generateText");
+    // A model that never actually received the image tends to either refuse
+    // or give a generic "I see an image" answer. Requiring at least one
+    // color or shape word forces real vision pipeline coverage.
+    const visionKeywords = [
+      "red",
+      "green",
+      "blue",
+      "yellow",
+      "orange",
+      "purple",
+      "magenta",
+      "cyan",
+      "pink",
+      "black",
+      "white",
+      "diagonal",
+      "cross",
+      "quadrant",
+      "square",
+      "x ",
+      "x-shaped",
+      "lines",
+    ];
+    assert(
+      mentionsAny(result.text, visionKeywords),
+      `chat vision response did not mention any color or shape from the fixture: ${
+        JSON.stringify(result.text)
+      }`,
+    );
   },
 );
 
@@ -600,7 +880,7 @@ integrationTest(
             {
               type: "text",
               text:
-                "This message includes a 128 by 128 PNG image with colored regions. Reply with one concise sentence confirming that an image was attached.",
+                "The attached 128x128 PNG has four colored quadrants and two black diagonal lines forming an X. In one short sentence, name at least one color you see or mention the diagonal lines.",
             },
             {
               type: "image",
@@ -618,6 +898,75 @@ integrationTest(
       result.finishReason != null,
       "Responses image input did not report a finish reason",
     );
+    const visionKeywords = [
+      "red",
+      "green",
+      "blue",
+      "yellow",
+      "orange",
+      "purple",
+      "magenta",
+      "cyan",
+      "pink",
+      "black",
+      "white",
+      "diagonal",
+      "cross",
+      "quadrant",
+      "square",
+      "x ",
+      "x-shaped",
+      "lines",
+    ];
+    assert(
+      mentionsAny(result.text, visionKeywords),
+      `Responses vision response did not mention any color or shape from the fixture: ${
+        JSON.stringify(result.text)
+      }`,
+    );
+  },
+);
+
+integrationTest(
+  "AI SDK mid-stream abort lets the server accept a follow-up request",
+  async (config) => {
+    const model = await selectedModel(config);
+    const controller = new AbortController();
+    const stream = streamText({
+      abortSignal: controller.signal,
+      model: config.openai.chat(model),
+      prompt:
+        "Slowly count from 1 to 60. Put each number on its own line. Do not stop early.",
+    });
+
+    let observed = 0;
+    try {
+      for await (const _ of stream.textStream) {
+        observed += 1;
+        if (observed >= 1) {
+          controller.abort();
+          break;
+        }
+      }
+    } catch {
+      // The AI SDK surfaces aborts as a thrown error from the iterator; that is
+      // exactly the path we want to exercise to prove the server cleans up.
+    }
+    // Drain any rejected promises hanging off the stream so resources release.
+    await Promise.allSettled([
+      stream.text,
+      stream.finishReason,
+      stream.usage,
+    ]);
+
+    // The proxy must still service new requests after the cancelled stream;
+    // a deadlocked tool-call park or leaked SDK session would manifest here.
+    const followup = await generateText({
+      abortSignal: AbortSignal.timeout(config.timeoutMs),
+      model: config.openai.chat(model),
+      prompt: "Reply with the single word READY and nothing else.",
+    });
+    assertNonEmptyText(followup.text, "follow-up after mid-stream abort");
   },
 );
 

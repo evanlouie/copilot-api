@@ -16,6 +16,16 @@ func TestResponseTextMarshalsEmptyAnnotationsArray(t *testing.T) {
 	}
 }
 
+func TestInstructionCandidatesAvoidEmptySystemMessage(t *testing.T) {
+	got := InstructionCandidates("")
+	if len(got) == 0 || got[0] == "" {
+		t.Fatalf("InstructionCandidates(empty) = %#v, want first candidate to be non-empty", got)
+	}
+	if got[0] != " " {
+		t.Fatalf("InstructionCandidates(empty)[0] = %q, want single-space replacement", got[0])
+	}
+}
+
 func TestFoldChatInstructionsRejectsMidConversation(t *testing.T) {
 	msgs := []ChatMessage{
 		{Role: "system", Content: NewTextContent("sys")},

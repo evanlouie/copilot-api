@@ -1,19 +1,40 @@
 # AI SDK + Deno integration tests
 
-This suite exercises `copilot-api` through the Vercel AI SDK running on Deno. It
-covers:
+This suite exercises `copilot-api` through the Vercel AI SDK running on Deno.
+Its unique value over the Go unit tests is that it pairs the **real Vercel AI
+SDK parser** with **real Copilot upstream**, so it catches wire-format
+incompatibilities and behaviors that depend on a live model. Anything that can
+be asserted with a fake gateway in Go belongs in a Go test, not here.
 
-- `/v1/models` discovery
+Coverage:
+
+- `GET /healthz`, `GET /readyz`, and `GET /v1/models` discovery
 - Chat Completions `generateText`
-- Chat Completions `streamText`
+- Chat Completions `streamText` with assertions on `usage` (validates the
+  `stream_options.include_usage` terminal chunk reaches the AI SDK) and the
+  `stop` finish reason
 - Responses API `generateText`
-- Responses API `streamText`
-- Responses API reasoning effort via AI SDK provider options
+- Responses API `streamText` consumed via `fullStream` so the AI SDK Responses
+  parser has to accept the full `response.created` → `output_text.delta` →
+  `response.completed` event sequence; asserts `usage` and `finishReason`
+- Responses API reasoning effort via AI SDK provider options, with an assertion
+  that the AI SDK surfaces reasoning output via `reasoningText`, reasoning
+  parts, or `usage.reasoningTokens`
+- Responses API `previous_response_id` continuation across two turns (proves
+  storage + retrieval + real-model context handoff)
 - Multi-turn Chat Completions history
 - MCP tools converted by the AI SDK MCP client into client-owned function tool
-  calls for Chat and Responses, both non-streaming and streaming
+  calls for Chat and Responses, both non-streaming and streaming. Streaming
+  variants iterate `fullStream` and assert the AI SDK reassembled streamed
+  tool-call argument deltas into a structured `tool-call` part with the right
+  `toolName` and parsed `input`
+- `tool_choice: "none"` with a real model and registered tools (proves the proxy
+  forwards the choice and the model honors it)
 - Image inputs uploaded by the AI SDK as OpenAI-compatible image parts for Chat
-  and Responses
+  and Responses, with assertions that the model mentions a color or shape from
+  the fixture (not just "I see an image")
+- Mid-stream abort followed by a fresh request (proves the proxy releases the
+  cancelled upstream session and tool-call park, then serves new traffic)
 
 The tests are gated so they are safe to run in normal development without a live
 Copilot-backed server.

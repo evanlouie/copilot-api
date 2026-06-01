@@ -553,7 +553,7 @@
               <ul>
                 <li>Always pass <span class="kbd">SystemMessageConfig{Mode: "replace"}</span>. Never pass <span class="kbd">nil</span>, append, or customize mode.</li>
                 <li>Leading Chat <span class="kbd">system</span>/<span class="kbd">developer</span> messages and Responses <span class="kbd">instructions</span> are combined into the replacement prompt. Mid-conversation system/developer messages are rejected.</li>
-                <li>If no caller instructions exist, try empty replacement, then single-space replacement, then exact minimal fallback: <span class="kbd">You are a chat completion model.</span></li>
+                <li>If no caller instructions exist, use a single-space replacement, then exact minimal fallback if needed: <span class="kbd">You are a chat completion model.</span>. Avoid persisted empty <span class="kbd">system.message</span> events because the SDK rejects them on resume.</li>
                 <li>Use the SDK-bundled/matched Copilot CLI by default. <span class="kbd">COPILOT_CLI_PATH</span> is an explicit advanced override.</li>
                 <li>SDK/CLI upgrades are blocked unless hydration, tool, prompt-isolation, and provider-shape tests pass.</li>
               </ul>

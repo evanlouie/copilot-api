@@ -390,7 +390,7 @@ func InstructionCandidates(s string) []string {
 	if s != "" {
 		return []string{s}
 	}
-	return []string{"", " ", "You are a chat completion model."}
+	return []string{" ", "You are a chat completion model."}
 }
 
 func EffectiveInstructions(s string) string {

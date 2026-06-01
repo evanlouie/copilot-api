@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -504,12 +505,21 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		sessionID = record.SDKSessionID
 		previous = &req.PreviousResponseID
 		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, false, events)
+		if err != nil || session == nil {
+			g.log.Warn("falling back to synthetic Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
+			prompt = g.responseContinuationPrompt(record, prompt)
+			sessionID = "resp_sdk_" + uuid.NewString()
+			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, false, events)
+		}
 	} else {
 		sessionID = "resp_sdk_" + uuid.NewString()
 		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, false, events)
 	}
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
+	}
+	if session == nil {
+		return nil, openai.Upstream("copilot SDK returned nil session")
 	}
 	retained := g.fs.SessionRoot(sessionID)
 	runner := g.newTurnRunner(req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
@@ -526,6 +536,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	}
 	resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, storeVisible, turn)
 	record := recordFromResponse(resp, sessionID, retained)
+	record.InputText = req.Input.Text
 	record.PendingBatchID = turn.PendingBatchID
 	if err := g.store.SaveResponse(record); err != nil {
 		return nil, openai.Internal(err.Error())
@@ -610,12 +621,21 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		sessionID = record.SDKSessionID
 		previous = &req.PreviousResponseID
 		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, true, events)
+		if err != nil || session == nil {
+			g.log.Warn("falling back to synthetic streaming Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
+			prompt = g.responseContinuationPrompt(record, prompt)
+			sessionID = "resp_sdk_" + uuid.NewString()
+			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, true, events)
+		}
 	} else {
 		sessionID = "resp_sdk_" + uuid.NewString()
 		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, true, events)
 	}
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
+	}
+	if session == nil {
+		return nil, openai.Upstream("copilot SDK returned nil session")
 	}
 	retained := g.fs.SessionRoot(sessionID)
 	ch := make(chan ResponseStreamEvent, 32)
@@ -627,6 +647,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, req.Store, turn)
 		record := recordFromResponse(resp, sessionID, retained)
+		record.InputText = req.Input.Text
 		record.PendingBatchID = turn.PendingBatchID
 		_ = g.store.SaveResponse(record)
 	}
@@ -636,6 +657,49 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	}
 	go runner.discardInitial()
 	return ch, nil
+}
+
+func (g *RealGateway) responseContinuationPrompt(previous sessionstore.ResponseRecord, current resolvedPrompt) resolvedPrompt {
+	records := []sessionstore.ResponseRecord{previous}
+	seen := map[string]struct{}{previous.ID: {}}
+	for id := previous.PreviousResponseID; id != "" && len(records) < 20; {
+		if _, ok := seen[id]; ok {
+			break
+		}
+		seen[id] = struct{}{}
+		record, err := g.store.LoadResponseForContinuation(id)
+		if err != nil || record.Deleted {
+			break
+		}
+		records = append(records, record)
+		id = record.PreviousResponseID
+	}
+	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
+		records[i], records[j] = records[j], records[i]
+	}
+
+	var b strings.Builder
+	b.WriteString("Conversation so far from previous_response_id context:\n\n")
+	for _, record := range records {
+		if text := strings.TrimSpace(record.InputText); text != "" {
+			b.WriteString("User:\n")
+			b.WriteString(text)
+			b.WriteString("\n\n")
+		}
+		if text := strings.TrimSpace(record.OutputText); text != "" {
+			b.WriteString("Assistant:\n")
+			b.WriteString(text)
+			b.WriteString("\n\n")
+		}
+	}
+	if text := strings.TrimSpace(current.Text); text != "" {
+		b.WriteString("Current user request:\n")
+		b.WriteString(text)
+	} else {
+		b.WriteString("Current user request:")
+	}
+	current.Text = b.String()
+	return current
 }
 
 func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error) {
