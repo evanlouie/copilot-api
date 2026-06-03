@@ -28,9 +28,23 @@ func TestStrictCompatEnvOverrideTrue(t *testing.T) {
 	}
 }
 
+func TestDefaultReasoningEffortEnvOverride(t *testing.T) {
+	setLoadEnv(t)
+	t.Setenv("COPILOT_DEFAULT_REASONING_EFFORT", " HIGH ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultReasoningEffort != "high" {
+		t.Fatalf("DefaultReasoningEffort = %q, want high", cfg.DefaultReasoningEffort)
+	}
+}
+
 func setLoadEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
+		"COPILOT_DEFAULT_REASONING_EFFORT",
 		"COPILOT_MODELS_CACHE_TTL",
 		"COPILOT_TOOL_CALL_TTL",
 		"COPILOT_REQUEST_TIMEOUT",

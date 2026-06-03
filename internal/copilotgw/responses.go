@@ -16,6 +16,10 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
+	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
+	if err != nil {
+		return nil, err
+	}
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
 	}
@@ -51,16 +55,16 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		}
 		sessionID = record.SDKSessionID
 		previous = &req.PreviousResponseID
-		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, false, events)
+		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
 		if err != nil || session == nil {
 			g.log.Warn("falling back to synthetic Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
 			prompt = g.responseContinuationPrompt(record, prompt)
 			sessionID = "resp_sdk_" + uuid.NewString()
-			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, false, events)
+			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
 		}
 	} else {
 		sessionID = "resp_sdk_" + uuid.NewString()
-		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, false, events)
+		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
 	}
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
@@ -93,6 +97,10 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 }
 func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (<-chan ResponseStreamEvent, error) {
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
+		return nil, err
+	}
+	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
+	if err != nil {
 		return nil, err
 	}
 	if len(req.FunctionOutputs) > 0 {
@@ -173,16 +181,16 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		sessionID = record.SDKSessionID
 		previous = &req.PreviousResponseID
-		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, true, events)
+		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 		if err != nil || session == nil {
 			g.log.Warn("falling back to synthetic streaming Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
 			prompt = g.responseContinuationPrompt(record, prompt)
 			sessionID = "resp_sdk_" + uuid.NewString()
-			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, true, events)
+			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 		}
 	} else {
 		sessionID = "resp_sdk_" + uuid.NewString()
-		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, true, events)
+		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 	}
 	if err != nil {
 		return nil, openai.Upstream(err.Error())

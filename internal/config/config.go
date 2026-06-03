@@ -20,33 +20,35 @@ const (
 )
 
 type Config struct {
-	Addr                string
-	APIKey              string
-	GitHubToken         string
-	CLIPath             string
-	ModelsCacheTTL      time.Duration
-	ToolCallTTL         time.Duration
-	RequestTimeout      time.Duration
-	MaxRequestBodyBytes int64
-	DataDir             string
-	StateDir            string
-	CacheDir            string
-	ConfigDir           string
-	StrictCompat        bool
-	LogContent          bool
-	LogLevel            slog.Level
+	Addr                   string
+	APIKey                 string
+	GitHubToken            string
+	CLIPath                string
+	DefaultReasoningEffort string
+	ModelsCacheTTL         time.Duration
+	ToolCallTTL            time.Duration
+	RequestTimeout         time.Duration
+	MaxRequestBodyBytes    int64
+	DataDir                string
+	StateDir               string
+	CacheDir               string
+	ConfigDir              string
+	StrictCompat           bool
+	LogContent             bool
+	LogLevel               slog.Level
 }
 
 func Load() (Config, error) {
 	var err error
 	cfg := Config{
-		Addr:           getenv("COPILOT_API_ADDR", DefaultAddr),
-		APIKey:         os.Getenv("COPILOT_API_KEY"),
-		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
-		CLIPath:        os.Getenv("COPILOT_CLI_PATH"),
-		StrictCompat:   false,
-		ModelsCacheTTL: DefaultModelsCacheTTL,
-		ToolCallTTL:    DefaultToolCallTTL,
+		Addr:                   getenv("COPILOT_API_ADDR", DefaultAddr),
+		APIKey:                 os.Getenv("COPILOT_API_KEY"),
+		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
+		CLIPath:                os.Getenv("COPILOT_CLI_PATH"),
+		DefaultReasoningEffort: strings.ToLower(strings.TrimSpace(os.Getenv("COPILOT_DEFAULT_REASONING_EFFORT"))),
+		StrictCompat:           false,
+		ModelsCacheTTL:         DefaultModelsCacheTTL,
+		ToolCallTTL:            DefaultToolCallTTL,
 	}
 
 	if cfg.ModelsCacheTTL, err = parseDurationEnv("COPILOT_MODELS_CACHE_TTL", DefaultModelsCacheTTL); err != nil {

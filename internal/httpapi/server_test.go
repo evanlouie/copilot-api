@@ -302,6 +302,28 @@ func TestChatRequestPassesReasoningHistoryAndImageInput(t *testing.T) {
 	}
 }
 
+func TestChatRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
+	gw := &captureChatGateway{}
+	s := New(config.Config{DefaultReasoningEffort: "medium"}, gw, slog.Default())
+	body := strings.NewReader(`{
+		"model":"gpt-5",
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gw.got.ReasoningEffort != "" {
+		t.Fatalf("ReasoningEffort = %q, want explicit request effort empty", gw.got.ReasoningEffort)
+	}
+	if gw.got.DefaultReasoningEffort != "medium" {
+		t.Fatalf("DefaultReasoningEffort = %q, want medium", gw.got.DefaultReasoningEffort)
+	}
+}
+
 func TestChatStreamWithToolCallAndIncludeUsageUsesOpenAIChunkShape(t *testing.T) {
 	gw := &streamChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
@@ -366,6 +388,28 @@ func TestResponsesRequestPassesNestedReasoningImageInputAndIgnoresMCPTool(t *tes
 	}
 	if len(gw.got.Input.Images) != 1 || gw.got.Input.Images[0].URL != "data:image/png;base64,AAAA" || gw.got.Input.Images[0].Detail != "high" {
 		t.Fatalf("Input.Images = %#v, want one high-detail data image", gw.got.Input.Images)
+	}
+}
+
+func TestResponsesRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
+	gw := &captureResponseGateway{}
+	s := New(config.Config{DefaultReasoningEffort: "high"}, gw, slog.Default())
+	body := strings.NewReader(`{
+		"model":"gpt-5",
+		"input":"hi"
+	}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gw.got.ReasoningEffort != "" {
+		t.Fatalf("ReasoningEffort = %q, want explicit request effort empty", gw.got.ReasoningEffort)
+	}
+	if gw.got.DefaultReasoningEffort != "high" {
+		t.Fatalf("DefaultReasoningEffort = %q, want high", gw.got.DefaultReasoningEffort)
 	}
 }
 

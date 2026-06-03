@@ -18,6 +18,10 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
+	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
+	if err != nil {
+		return nil, err
+	}
 	finalPrompt, err := req.FinalUser.Prompt()
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "messages")
@@ -44,7 +48,7 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
 	events := make(chan copilot.SessionEvent, 256)
-	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, false, events)
+	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
 	}
@@ -68,6 +72,10 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
+	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
+	if err != nil {
+		return nil, err
+	}
 	finalPrompt, err := req.FinalUser.Prompt()
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "messages")
@@ -94,7 +102,7 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
 	events := make(chan copilot.SessionEvent, 256)
-	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, req.ReasoningEffort, rt, true, events)
+	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
 	}

@@ -45,7 +45,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | Feature | Behavior |
 | --- | --- |
 | Models | `model` is required for every generation request. Unknown models are rejected as `model_not_found` after a forced model-cache refresh. Model metadata may include token limits such as `max_context_window_tokens`, `max_prompt_tokens`, and `max_output_tokens`, plus `supports_vision` and `vision` limits. |
-| Reasoning effort | Send top-level `reasoning_effort` on Chat Completions or Responses requests. Responses `reasoning.effort` is also accepted in permissive mode for Codex CLI compatibility. The value is forwarded to Copilot when supplied; omit it to use the model default. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. Other Responses `reasoning` controls are ignored or rejected as unsafe. |
+| Reasoning effort | Send top-level `reasoning_effort` on Chat Completions or Responses requests. Responses `reasoning.effort` is also accepted in permissive mode for Codex CLI compatibility. The value is forwarded to Copilot when supplied; omitted request values can use `COPILOT_DEFAULT_REASONING_EFFORT`, adjusted to the closest model-supported effort when metadata is available. If the model does not support reasoning efforts, the default is omitted. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. Other Responses `reasoning` controls are ignored or rejected as unsafe. |
 | Chat history | Leading `system`/`developer` messages become replacement system instructions. Prior non-final messages are converted to Copilot SDK `events.jsonl`; only the final user turn is sent. Mid-conversation `system`/`developer` messages are rejected. SDK infinite-session auto-compaction is disabled. |
 | Prompt isolation | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions use a single-space replacement, then fall back to `You are a chat completion model.` if needed. This avoids SDK resume failures caused by persisted empty `system.message` events. |
 | SDK tools | The SDK client runs in `ModeEmpty`. Built-in file/shell/MCP/memory/skill/repository tools are not exposed. `AvailableTools` is either request-scoped aliases or an impossible sentinel. Permissions reject everything except exact request-scoped custom tools. |
@@ -66,6 +66,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | `COPILOT_API_KEY` | unset | Optional proxy bearer token. |
 | `GITHUB_TOKEN` | unset | Optional process-wide GitHub token for Copilot SDK auth. |
 | `COPILOT_CLI_PATH` | embedded matched CLI when bundled, else SDK fallback | Advanced override for the Copilot CLI binary. |
+| `COPILOT_DEFAULT_REASONING_EFFORT` | unset | Optional reasoning effort to use when a Chat Completions or Responses request omits `reasoning_effort`. When model metadata advertises supported efforts, unsupported defaults are rounded to the closest supported level; models without reasoning-effort support omit it. |
 | `COPILOT_MODELS_CACHE_TTL` | `10m` | Successful model-list cache TTL. |
 | `COPILOT_TOOL_CALL_TTL` | `5m` | Liveness guard for parked tool-call continuations. |
 | `COPILOT_REQUEST_TIMEOUT` | `0` | Optional generation timeout; `0` disables proxy-imposed timeouts. |
@@ -117,7 +118,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 
 ### Reasoning effort
 
-Reasoning effort is a top-level request field. Values are model-dependent; inspect `GET /v1/models` for `supported_reasoning_efforts` and `default_reasoning_effort` metadata when the Copilot SDK provides it. For Responses requests, use `reasoning_effort` instead of a nested `reasoning` object.
+Reasoning effort is a top-level request field. Values are model-dependent; inspect `GET /v1/models` for `supported_reasoning_efforts` and `default_reasoning_effort` metadata when the Copilot SDK provides it. For clients that cannot send a request effort, set `COPILOT_DEFAULT_REASONING_EFFORT`; explicit request values still take precedence. For Responses requests, use `reasoning_effort` instead of a nested `reasoning` object.
 
 Chat Completions:
 

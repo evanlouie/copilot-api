@@ -52,7 +52,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, openai.InvalidRequest("ordinary Chat Completions requests must end with a user message", "messages"))
 		return
 	}
-	chatReq := copilotgw.ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: req.Model, Instructions: instructions, History: messages[:len(messages)-1], FinalUser: messages[len(messages)-1], Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), ReasoningEffort: req.ReasoningEffort, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
+	chatReq := copilotgw.ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: req.Model, Instructions: instructions, History: messages[:len(messages)-1], FinalUser: messages[len(messages)-1], Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), ReasoningEffort: req.ReasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
 	if req.Stream {
 		s.streamChat(w, r, chatReq)
 		return

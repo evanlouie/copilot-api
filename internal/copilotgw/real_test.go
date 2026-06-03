@@ -1,6 +1,7 @@
 package copilotgw
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -87,6 +88,93 @@ func TestSDKTokenLimits(t *testing.T) {
 	}
 	if limits.MaxOutputTokens != nil {
 		t.Fatalf("MaxOutputTokens = %d, want nil", *limits.MaxOutputTokens)
+	}
+}
+
+func TestEffectiveReasoningEffortUsesExplicitRequest(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID:                        "gpt-5",
+		ReasoningEffortKnown:      true,
+		SupportsReasoningEffort:   false,
+		SupportedReasoningEfforts: []string{"low", "medium"},
+	})
+	gw.cfg = config.Config{DefaultReasoningEffort: "low"}
+
+	got, err := gw.effectiveReasoningEffort(context.Background(), "gpt-5", " HIGH ", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "high" {
+		t.Fatalf("effective reasoning effort = %q, want explicit high", got)
+	}
+}
+
+func TestEffectiveReasoningEffortUsesClosestSupportedDefault(t *testing.T) {
+	tests := []struct {
+		name      string
+		def       string
+		supported []string
+		want      string
+	}{
+		{name: "same effort", def: "medium", supported: []string{"low", "medium", "high"}, want: "medium"},
+		{name: "rounds high down", def: "high", supported: []string{"low", "medium"}, want: "medium"},
+		{name: "rounds low up", def: "low", supported: []string{"medium", "high"}, want: "medium"},
+		{name: "tie uses lower effort", def: "medium", supported: []string{"low", "high"}, want: "low"},
+		{name: "xhigh rounds down", def: "xhigh", supported: []string{"medium", "high"}, want: "high"},
+		{name: "minimal rounds up", def: "minimal", supported: []string{"low", "medium"}, want: "low"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gw := cachedModelGateway(Model{
+				ID:                        "gpt-5",
+				ReasoningEffortKnown:      true,
+				SupportsReasoningEffort:   true,
+				SupportedReasoningEfforts: tc.supported,
+			})
+			gw.cfg = config.Config{DefaultReasoningEffort: tc.def}
+
+			got, err := gw.effectiveReasoningEffort(context.Background(), "gpt-5", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("effective reasoning effort = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveReasoningEffortOmitsDefaultWhenUnsupported(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID:                      "gpt-4.1",
+		ReasoningEffortKnown:    true,
+		SupportsReasoningEffort: false,
+	})
+	gw.cfg = config.Config{DefaultReasoningEffort: "high"}
+
+	got, err := gw.effectiveReasoningEffort(context.Background(), "gpt-4.1", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("effective reasoning effort = %q, want omitted", got)
+	}
+}
+
+func TestEffectiveReasoningEffortUsesDefaultWhenSupportKnownWithoutEffortList(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID:                      "gpt-5",
+		ReasoningEffortKnown:    true,
+		SupportsReasoningEffort: true,
+	})
+	gw.cfg = config.Config{DefaultReasoningEffort: "high"}
+
+	got, err := gw.effectiveReasoningEffort(context.Background(), "gpt-5", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "high" {
+		t.Fatalf("effective reasoning effort = %q, want high", got)
 	}
 }
 
