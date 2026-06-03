@@ -13,9 +13,10 @@ import (
 const AppName = "copilot-api"
 
 const (
-	DefaultAddr           = "127.0.0.1:8080"
-	DefaultModelsCacheTTL = 10 * time.Minute
-	DefaultToolCallTTL    = 5 * time.Minute
+	DefaultAddr                = "127.0.0.1:8080"
+	DefaultModelsCacheTTL      = 10 * time.Minute
+	DefaultToolCallTTL         = 5 * time.Minute
+	DefaultMaxRequestBodyBytes = 100 << 20
 )
 
 type Config struct {
@@ -57,7 +58,7 @@ func Load() (Config, error) {
 	if cfg.RequestTimeout, err = parseDurationEnv("COPILOT_REQUEST_TIMEOUT", 0); err != nil {
 		return Config{}, err
 	}
-	if cfg.MaxRequestBodyBytes, err = parseBytesEnv("COPILOT_MAX_REQUEST_BODY_BYTES", 0); err != nil {
+	if cfg.MaxRequestBodyBytes, err = parseBytesEnv("COPILOT_MAX_REQUEST_BODY_BYTES", DefaultMaxRequestBodyBytes); err != nil {
 		return Config{}, err
 	}
 	if cfg.StrictCompat, err = parseBoolEnv("COPILOT_STRICT_COMPAT", false); err != nil {

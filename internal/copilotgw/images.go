@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"strings"
@@ -19,7 +21,101 @@ import (
 
 const maxImageBytes = 50 << 20
 
-var imageHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var imageHTTPClient = &http.Client{
+	Timeout:       30 * time.Second,
+	Transport:     safeImageTransport(),
+	CheckRedirect: safeImageRedirect,
+}
+
+func safeImageTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = safeImageDialContext
+	return transport
+}
+
+func safeImageRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 image_url redirects")
+	}
+	return validateRemoteImageURL(req.URL)
+}
+
+func validateRemoteImageURL(u *url.URL) error {
+	if u == nil {
+		return fmt.Errorf("image_url is invalid")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("image_url redirect scheme must remain http or https")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("image_url host is required")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !publicIP(ip) {
+			return fmt.Errorf("image_url host resolves to a non-public address")
+		}
+	}
+	return nil
+}
+
+func safeImageDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := resolvePublicIPs(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	for _, ip := range ips {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("image_url host resolves to no public addresses")
+}
+
+func resolvePublicIPs(ctx context.Context, host string) ([]net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if !publicIP(ip) {
+			return nil, fmt.Errorf("image_url host resolves to a non-public address")
+		}
+		return []net.IP{ip}, nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		if publicIP(addr.IP) {
+			ips = append(ips, addr.IP)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("image_url host resolves to no public addresses")
+	}
+	return ips, nil
+}
+
+func publicIP(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsGlobalUnicast() && !addr.IsPrivate() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() && !addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified()
+}
 
 type resolvedPrompt struct {
 	Text        string
@@ -34,7 +130,7 @@ func (g *RealGateway) resolvePrompt(ctx context.Context, model string, prompt op
 	if err != nil {
 		return resolvedPrompt{}, err
 	}
-	if modelInfo.VisionKnown && !modelInfo.SupportsVision {
+	if !modelInfo.VisionKnown || !modelInfo.SupportsVision {
 		return resolvedPrompt{}, openai.InvalidRequest("model does not support image inputs: "+model, param)
 	}
 	if modelInfo.Vision != nil && modelInfo.Vision.MaxPromptImages > 0 && int64(len(prompt.Images)) > modelInfo.Vision.MaxPromptImages {
@@ -65,6 +161,9 @@ func resolveImageAttachment(ctx context.Context, image openai.ImageInput, index 
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
+		if err := validateRemoteImageURL(u); err != nil {
+			return nil, openai.InvalidRequest(err.Error(), param)
+		}
 		return remoteImageAttachment(ctx, u, index, limits, param)
 	default:
 		return nil, openai.InvalidRequest("image_url scheme must be http, https, or data", param)

@@ -26,6 +26,7 @@ type turnRunner struct {
 	created    int64
 	batch      *toolproxy.Batch
 	updates    chan toolproxy.TurnFinalResult
+	closed     chan struct{}
 
 	chatStream     chan<- StreamEvent
 	mu             sync.Mutex
@@ -50,13 +51,46 @@ func (g *RealGateway) newTurnRunner(id, model string, session *copilot.Session, 
 			id = openai.NewID("chatcmpl_")
 		}
 	}
-	r := &turnRunner{id: id, model: model, session: session, rt: rt, events: events, retained: retained, kind: kind, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), created: openai.UnixNow()}
+	r := &turnRunner{id: id, model: model, session: session, rt: rt, events: events, retained: retained, kind: kind, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), created: openai.UnixNow()}
 	go r.loop(g)
 	return r
 }
 
 func (r *turnRunner) discardInitial() {
 	<-r.updates
+}
+
+func (r *turnRunner) watchContext(ctx context.Context) {
+	go func() {
+		select {
+		case <-ctx.Done():
+			r.abort()
+		case <-r.closed:
+		}
+	}()
+}
+
+func (r *turnRunner) abort() {
+	_ = r.session.Abort(context.Background())
+	_ = r.session.Disconnect()
+}
+
+func (r *turnRunner) setBatch(batch *toolproxy.Batch) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.batch = batch
+}
+
+func (r *turnRunner) currentBatch() *toolproxy.Batch {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.batch
+}
+
+func (r *turnRunner) setOnResult(fn func(*TurnResult)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onResult = fn
 }
 
 func (r *turnRunner) waitInitial(ctx context.Context) (*TurnResult, error) {
@@ -93,6 +127,7 @@ func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, respons
 }
 
 func (r *turnRunner) loop(g *RealGateway) {
+	defer close(r.closed)
 	defer r.closeStreams()
 	var text string
 	var reasoning string
@@ -108,8 +143,8 @@ func (r *turnRunner) loop(g *RealGateway) {
 		case *copilot.AssistantMessageData:
 			if len(d.ToolRequests) > 0 {
 				text = d.Content
-				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.responseID, r.kind, r.updates, func() { _ = r.session.Abort(context.Background()); _ = r.session.Disconnect() })
-				r.batch = batch
+				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.responseID, r.kind, r.model, r.updates, r.abort)
+				r.setBatch(batch)
 				res := r.result(text, reasoning, usage, "tool_calls")
 				res.ToolCalls = calls
 				res.PendingBatchID = batch.ID
@@ -148,8 +183,11 @@ func (r *turnRunner) emitDelta(delta string) {
 }
 
 func (r *turnRunner) emitResult(res *TurnResult) {
-	if r.onResult != nil {
-		r.onResult(res)
+	r.mu.Lock()
+	onResult := r.onResult
+	r.mu.Unlock()
+	if onResult != nil {
+		onResult(res)
 	}
 	r.updates <- toolproxy.TurnFinalResult{Value: res}
 	r.mu.Lock()

@@ -72,7 +72,7 @@ func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", make(chan TurnFinalResult, 1), nil)
+	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if err := batch.Complete(map[string]string{"call_1": "ok"}); err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +96,25 @@ func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
 	if err := next.Complete(map[string]string{"call_2": "ok"}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
+	broker := NewBroker(10 * time.Millisecond)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	if batch.Model != "gpt-test" {
+		t.Fatalf("batch model = %q", batch.Model)
+	}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if _, err := broker.FindByCallIDs([]string{"call_1"}); err == ErrNotFound {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expired batch remained registered")
 }
 
 func TestBatchCompleteUnblocksHandler(t *testing.T) {

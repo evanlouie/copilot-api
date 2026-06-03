@@ -38,6 +38,10 @@ func NewBroker(ttl time.Duration) *Broker {
 }
 
 func (b *Broker) Register(batch *Batch) {
+	batch.OnExpire(func(expired *Batch) { b.Remove(expired) })
+	if !batch.isOpen() {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.batches[batch.ID] = batch
@@ -48,19 +52,25 @@ func (b *Broker) Register(batch *Batch) {
 
 func (b *Broker) FindByCallIDs(ids []string) (*Batch, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	var found *Batch
 	for _, id := range ids {
 		batch := b.byCall[id]
 		if batch == nil {
+			b.mu.Unlock()
 			return nil, ErrNotFound
 		}
 		if found != nil && found.ID != batch.ID {
+			b.mu.Unlock()
 			return nil, fmt.Errorf("tool_call_ids belong to different pending batches")
 		}
 		found = batch
 	}
+	b.mu.Unlock()
 	if found == nil {
+		return nil, ErrNotFound
+	}
+	if !found.isOpen() {
+		b.Remove(found)
 		return nil, ErrNotFound
 	}
 	return found, nil
@@ -162,13 +172,13 @@ func permissionToolName(request copilot.PermissionRequest) (string, bool) {
 	}
 }
 
-func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolRequest, responseID string, kind string, done <-chan TurnFinalResult, abort func()) (*Batch, []openai.ChatToolCall) {
+func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolRequest, responseID string, kind string, model string, done <-chan TurnFinalResult, abort func()) (*Batch, []openai.ChatToolCall) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.batch == nil || !rt.batch.isOpen() {
-		rt.batch = newBatch(rt.broker.ttl, responseID, kind, done, abort)
+		rt.batch = newBatch(rt.broker.ttl, responseID, kind, model, done, abort)
 	} else {
-		rt.batch.configure(responseID, kind, done, abort)
+		rt.batch.configure(responseID, kind, model, done, abort)
 	}
 	calls := make([]openai.ChatToolCall, 0, len(reqs))
 	for _, req := range reqs {
@@ -187,7 +197,7 @@ func (rt *RequestTools) handleInvocation(inv copilot.ToolInvocation) (copilot.To
 	args := rawArgs(inv.Arguments)
 	rt.mu.Lock()
 	if rt.batch == nil || !rt.batch.isOpen() {
-		rt.batch = newBatch(rt.broker.ttl, "", "", nil, nil)
+		rt.batch = newBatch(rt.broker.ttl, "", "", "", nil, nil)
 	}
 	call := rt.batch.ensureCall(inv.ToolCallID, public, inv.ToolName, args)
 	rt.broker.Register(rt.batch)
@@ -207,23 +217,25 @@ type TurnFinalResult struct {
 }
 
 type Batch struct {
-	ID         string
-	Kind       string
-	ResponseID string
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	Calls      map[string]*Call
-	Done       <-chan TurnFinalResult
-	abort      func()
-	mu         sync.Mutex
-	expired    bool
-	completed  bool
-	timer      *time.Timer
+	ID          string
+	Kind        string
+	Model       string
+	ResponseID  string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+	Calls       map[string]*Call
+	Done        <-chan TurnFinalResult
+	abort       func()
+	mu          sync.Mutex
+	expired     bool
+	completed   bool
+	timer       *time.Timer
+	expireHooks []func(*Batch)
 }
 
-func newBatch(ttl time.Duration, responseID string, kind string, done <-chan TurnFinalResult, abort func()) *Batch {
+func newBatch(ttl time.Duration, responseID string, kind string, model string, done <-chan TurnFinalResult, abort func()) *Batch {
 	now := time.Now().UTC()
-	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), Calls: map[string]*Call{}, Done: done, abort: abort}
+	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, Model: model, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), Calls: map[string]*Call{}, Done: done, abort: abort}
 }
 
 func (b *Batch) isOpen() bool {
@@ -232,7 +244,21 @@ func (b *Batch) isOpen() bool {
 	return !b.expired && !b.completed
 }
 
-func (b *Batch) configure(responseID, kind string, done <-chan TurnFinalResult, abort func()) {
+func (b *Batch) OnExpire(hook func(*Batch)) {
+	if hook == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.expired {
+		b.mu.Unlock()
+		hook(b)
+		return
+	}
+	b.expireHooks = append(b.expireHooks, hook)
+	b.mu.Unlock()
+}
+
+func (b *Batch) configure(responseID, kind string, model string, done <-chan TurnFinalResult, abort func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if responseID != "" {
@@ -240,6 +266,9 @@ func (b *Batch) configure(responseID, kind string, done <-chan TurnFinalResult, 
 	}
 	if kind != "" {
 		b.Kind = kind
+	}
+	if model != "" {
+		b.Model = model
 	}
 	if done != nil {
 		b.Done = done
@@ -292,6 +321,7 @@ func (b *Batch) expire() {
 		calls = append(calls, call)
 	}
 	abort := b.abort
+	hooks := append([]func(*Batch){}, b.expireHooks...)
 	b.mu.Unlock()
 	for _, call := range calls {
 		call.fail(ErrExpired)
@@ -299,9 +329,16 @@ func (b *Batch) expire() {
 	if abort != nil {
 		abort()
 	}
+	for _, hook := range hooks {
+		hook(b)
+	}
 }
 
 func (b *Batch) Complete(outputs map[string]string) error {
+	return b.CompleteWithSetup(outputs, nil)
+}
+
+func (b *Batch) CompleteWithSetup(outputs map[string]string, setup func()) error {
 	b.mu.Lock()
 	if b.expired || time.Now().After(b.ExpiresAt) {
 		b.expired = true
@@ -331,6 +368,9 @@ func (b *Batch) Complete(outputs map[string]string) error {
 		b.timer.Stop()
 	}
 	b.mu.Unlock()
+	if setup != nil {
+		setup()
+	}
 	for _, call := range calls {
 		call.deliver(call.output)
 	}

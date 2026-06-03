@@ -307,6 +307,7 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 		return nil, openai.Upstream(err.Error())
 	}
 	runner := g.newTurnRunner(req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
+	runner.watchContext(ctx)
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
@@ -323,6 +324,9 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 }
 
 func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, model string, outputs map[string]string) (*TurnResult, error) {
+	if err := g.ValidateModel(ctx, model); err != nil {
+		return nil, err
+	}
 	ids := make([]string, 0, len(outputs))
 	for id := range outputs {
 		ids = append(ids, id)
@@ -333,6 +337,9 @@ func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, model string, o
 	}
 	if batch.Kind != "chat" {
 		return nil, openai.InvalidRequest("tool_call_id does not belong to a Chat Completions pending batch", "messages")
+	}
+	if err := validateContinuationModel(model, batch, "model"); err != nil {
+		return nil, err
 	}
 	runner := g.runnerForBatch(batch.ID)
 	if err := batch.Complete(outputs); err != nil {
@@ -359,6 +366,9 @@ func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, model string, o
 }
 
 func (g *RealGateway) StreamContinueChatToolCalls(ctx context.Context, model string, outputs map[string]string) (<-chan StreamEvent, error) {
+	if err := g.ValidateModel(ctx, model); err != nil {
+		return nil, err
+	}
 	ids := make([]string, 0, len(outputs))
 	for id := range outputs {
 		ids = append(ids, id)
@@ -370,20 +380,23 @@ func (g *RealGateway) StreamContinueChatToolCalls(ctx context.Context, model str
 	if batch.Kind != "chat" {
 		return nil, openai.InvalidRequest("tool_call_id does not belong to a Chat Completions pending batch", "messages")
 	}
+	if err := validateContinuationModel(model, batch, "model"); err != nil {
+		return nil, err
+	}
 	runner := g.runnerForBatch(batch.ID)
 	if runner == nil {
 		return nil, openai.InvalidRequest("pending tool_call_id is not attached to a live streamable turn", "messages")
 	}
 	ch := make(chan StreamEvent, 32)
-	runner.enableChatStream(ch)
-	runner.onResult = func(result *TurnResult) {
-		if result.PendingBatchID != "" {
-			g.rememberRunner(result.PendingBatchID, runner)
-		}
-		_ = g.store.SaveSessionMetadata(runner.session.SessionID, sessionstore.SessionMetadata{ID: runner.session.SessionID, Kind: "chat", OpenAIID: result.ID, SDKSessionID: runner.session.SessionID, Model: runner.model, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), RetainedPath: runner.retained, FinishReason: result.FinishReason, PendingBatchID: result.PendingBatchID})
-	}
-	if err := batch.Complete(outputs); err != nil {
-		runner.enableChatStream(nil)
+	if err := batch.CompleteWithSetup(outputs, func() {
+		runner.enableChatStream(ch)
+		runner.setOnResult(func(result *TurnResult) {
+			if result.PendingBatchID != "" {
+				g.rememberRunner(result.PendingBatchID, runner)
+			}
+			_ = g.store.SaveSessionMetadata(runner.session.SessionID, sessionstore.SessionMetadata{ID: runner.session.SessionID, Kind: "chat", OpenAIID: result.ID, SDKSessionID: runner.session.SessionID, Model: runner.model, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), RetainedPath: runner.retained, FinishReason: result.FinishReason, PendingBatchID: result.PendingBatchID})
+		})
+	}); err != nil {
 		close(ch)
 		return nil, openai.InvalidRequest(err.Error(), "messages")
 	}
@@ -398,8 +411,18 @@ func (g *RealGateway) rememberRunner(batchID string, runner *turnRunner) {
 		return
 	}
 	g.pendingMu.Lock()
-	defer g.pendingMu.Unlock()
 	g.pendingRunners[batchID] = runner
+	g.pendingMu.Unlock()
+	if batch := runner.currentBatch(); batch != nil && batch.ID == batchID {
+		batch.OnExpire(func(expired *toolproxy.Batch) { g.forgetRunner(expired.ID) })
+	}
+}
+
+func validateContinuationModel(model string, batch *toolproxy.Batch, param string) error {
+	if batch.Model != "" && model != batch.Model {
+		return openai.InvalidRequest("model does not match pending tool-call batch", param)
+	}
+	return nil
 }
 
 func (g *RealGateway) runnerForBatch(batchID string) *turnRunner {
@@ -450,13 +473,14 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 	}
 	ch := make(chan StreamEvent, 32)
 	runner := g.newTurnRunner(req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
+	runner.watchContext(ctx)
 	runner.enableChatStream(ch)
-	runner.onResult = func(result *TurnResult) {
+	runner.setOnResult(func(result *TurnResult) {
 		if result.PendingBatchID != "" {
 			g.rememberRunner(result.PendingBatchID, runner)
 		}
 		_ = g.store.SaveSessionMetadata(sessionID, sessionstore.SessionMetadata{ID: sessionID, Kind: "chat", OpenAIID: result.ID, SDKSessionID: sessionID, Model: req.Model, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), RetainedPath: retained, FinishReason: result.FinishReason, PendingBatchID: result.PendingBatchID})
-	}
+	})
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
@@ -523,6 +547,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	}
 	retained := g.fs.SessionRoot(sessionID)
 	runner := g.newTurnRunner(req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
+	runner.watchContext(ctx)
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
@@ -545,6 +570,9 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 }
 
 func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (<-chan ResponseStreamEvent, error) {
+	if err := g.ValidateModel(ctx, req.Model); err != nil {
+		return nil, err
+	}
 	if len(req.FunctionOutputs) > 0 {
 		ids := make([]string, 0, len(req.FunctionOutputs))
 		for id := range req.FunctionOutputs {
@@ -557,6 +585,12 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		previousResponseID := req.PreviousResponseID
 		if previousResponseID == "" {
 			previousResponseID = batch.ResponseID
+		}
+		if batch.Kind != "response" {
+			return nil, openai.InvalidRequest("function_call_output call_id does not belong to a Responses pending batch", "input")
+		}
+		if err := validateContinuationModel(req.Model, batch, "model"); err != nil {
+			return nil, err
 		}
 		if batch.ResponseID != "" && previousResponseID != batch.ResponseID {
 			return nil, openai.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
@@ -575,18 +609,18 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
-		runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible)
-		runner.onResult = func(turn *TurnResult) {
-			if turn.PendingBatchID != "" {
-				g.rememberRunner(turn.PendingBatchID, runner)
-			}
-			resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn)
-			record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
-			record.PendingBatchID = turn.PendingBatchID
-			_ = g.store.SaveResponse(record)
-		}
-		if err := batch.Complete(req.FunctionOutputs); err != nil {
-			runner.enableResponseStream(nil, "", "", "", nil, false)
+		if err := batch.CompleteWithSetup(req.FunctionOutputs, func() {
+			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible)
+			runner.setOnResult(func(turn *TurnResult) {
+				if turn.PendingBatchID != "" {
+					g.rememberRunner(turn.PendingBatchID, runner)
+				}
+				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn)
+				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
+				record.PendingBatchID = turn.PendingBatchID
+				_ = g.store.SaveResponse(record)
+			})
+		}); err != nil {
 			close(ch)
 			return nil, openai.InvalidRequest(err.Error(), "input")
 		}
@@ -594,9 +628,6 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		g.forgetRunner(batch.ID)
 		go runner.discardInitial()
 		return ch, nil
-	}
-	if err := g.ValidateModel(ctx, req.Model); err != nil {
-		return nil, err
 	}
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
@@ -640,8 +671,9 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	retained := g.fs.SessionRoot(sessionID)
 	ch := make(chan ResponseStreamEvent, 32)
 	runner := g.newTurnRunner(req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
+	runner.watchContext(ctx)
 	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, previous, req.Store)
-	runner.onResult = func(turn *TurnResult) {
+	runner.setOnResult(func(turn *TurnResult) {
 		if turn.PendingBatchID != "" {
 			g.rememberRunner(turn.PendingBatchID, runner)
 		}
@@ -650,7 +682,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record.InputText = req.Input.Text
 		record.PendingBatchID = turn.PendingBatchID
 		_ = g.store.SaveResponse(record)
-	}
+	})
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Upstream(err.Error())
@@ -714,6 +746,12 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	previousResponseID := req.PreviousResponseID
 	if previousResponseID == "" {
 		previousResponseID = batch.ResponseID
+	}
+	if batch.Kind != "response" {
+		return nil, openai.InvalidRequest("function_call_output call_id does not belong to a Responses pending batch", "input")
+	}
+	if err := validateContinuationModel(req.Model, batch, "model"); err != nil {
+		return nil, err
 	}
 	if batch.ResponseID != "" && previousResponseID != batch.ResponseID {
 		return nil, openai.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
@@ -963,8 +1001,5 @@ func (d sessionRuntimeDefaults) applyResume(cfg *copilot.ResumeSessionConfig) {
 }
 
 func sendEvent(ch chan<- copilot.SessionEvent, e copilot.SessionEvent) {
-	select {
-	case ch <- e:
-	default:
-	}
+	ch <- e
 }

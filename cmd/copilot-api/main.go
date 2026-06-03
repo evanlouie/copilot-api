@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -60,6 +61,9 @@ func serve(args []string) error {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	if cfg.APIKey == "" {
+		if !isLoopbackListenAddr(cfg.Addr) {
+			return fmt.Errorf("COPILOT_API_KEY must be set when binding to non-loopback address %q", cfg.Addr)
+		}
 		logger.Warn("COPILOT_API_KEY is unset; /v1 endpoints are unauthenticated. Keep the default loopback bind or set COPILOT_API_KEY before exposing the service.")
 	}
 	if cfg.LogContent {
@@ -83,7 +87,14 @@ func serve(args []string) error {
 	}
 	defer gw.Stop()
 
-	srv := &http.Server{Addr: cfg.Addr, Handler: httpapi.New(cfg, gw, logger).Handler()}
+	srv := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           httpapi.New(cfg, gw, logger).Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "addr", cfg.Addr, "data_dir", cfg.DataDir, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir)
@@ -121,6 +132,21 @@ func errChIfReady(ch <-chan error) <-chan error {
 		}
 	}()
 	return out
+}
+
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func usage() {

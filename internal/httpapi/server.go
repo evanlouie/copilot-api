@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,21 +146,29 @@ func (s *Server) streamChatContinuation(w http.ResponseWriter, r *http.Request, 
 	defer cancel()
 	ch, err := s.gw.StreamContinueChatToolCalls(ctx, model, outputs)
 	if err != nil {
-		_ = writer.Data(openai.ErrorEnvelope{Error: openai.ErrorObject{Message: err.Error(), Type: "invalid_request_error"}})
+		_ = writer.Data(openai.ErrorEnvelope{Error: errorObject(err)})
 		_ = writer.Done()
 		return
 	}
 	streamID := openai.NewID("chatcmpl_")
 	created := openai.UnixNow()
-	_ = writer.Data(openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}})
+	if err := writer.Data(openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}}); err != nil {
+		return
+	}
 	for ev := range ch {
 		switch ev.Kind {
 		case "delta":
-			_ = writer.Data(openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}})
+			if err := writer.Data(openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}}); err != nil {
+				return
+			}
 		case "result":
-			s.writeChatTerminalWithID(writer, streamID, created, model, ev.Result, includeUsage)
+			if err := s.writeChatTerminalWithID(writer, streamID, created, model, ev.Result, includeUsage); err != nil {
+				return
+			}
 		case "error":
-			_ = writer.Data(openai.ErrorEnvelope{Error: openai.ErrorObject{Message: ev.Error.Error(), Type: "server_error"}})
+			if err := writer.Data(openai.ErrorEnvelope{Error: errorObject(ev.Error)}); err != nil {
+				return
+			}
 		}
 	}
 	_ = writer.Done()
@@ -174,51 +184,72 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req copilotg
 	defer cancel()
 	ch, err := s.gw.StreamChat(ctx, req)
 	if err != nil {
-		_ = writer.Data(openai.ErrorEnvelope{Error: openai.ErrorObject{Message: err.Error(), Type: "server_error"}})
+		_ = writer.Data(openai.ErrorEnvelope{Error: errorObject(err)})
 		_ = writer.Done()
 		return
 	}
 	created := openai.UnixNow()
-	_ = writer.Data(openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}})
+	if err := writer.Data(openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}}); err != nil {
+		return
+	}
 	for ev := range ch {
 		switch ev.Kind {
 		case "delta":
-			_ = writer.Data(openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}})
+			if err := writer.Data(openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}}); err != nil {
+				return
+			}
 		case "result":
-			s.writeChatTerminal(writer, ev.Result, req.IncludeUsageChunk)
+			if err := s.writeChatTerminal(writer, ev.Result, req.IncludeUsageChunk); err != nil {
+				return
+			}
 		case "error":
-			_ = writer.Data(openai.ErrorEnvelope{Error: openai.ErrorObject{Message: ev.Error.Error(), Type: "server_error"}})
+			if err := writer.Data(openai.ErrorEnvelope{Error: errorObject(ev.Error)}); err != nil {
+				return
+			}
 		}
 	}
 	_ = writer.Done()
 }
 
-func (s *Server) writeChatStreamFromTurn(writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) {
-	_ = writer.Data(openai.ChatCompletionChunk{ID: turn.ID, Object: openai.ObjectChatChunk, Created: turn.Created, Model: turn.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}})
-	if turn.Text != "" {
-		_ = writer.Data(openai.ChatCompletionChunk{ID: turn.ID, Object: openai.ObjectChatChunk, Created: turn.Created, Model: turn.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: turn.Text}}}})
+func (s *Server) writeChatStreamFromTurn(writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) error {
+	if err := writer.Data(openai.ChatCompletionChunk{ID: turn.ID, Object: openai.ObjectChatChunk, Created: turn.Created, Model: turn.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}}); err != nil {
+		return err
 	}
-	s.writeChatTerminal(writer, turn, includeUsage)
-	_ = writer.Done()
+	if turn.Text != "" {
+		if err := writer.Data(openai.ChatCompletionChunk{ID: turn.ID, Object: openai.ObjectChatChunk, Created: turn.Created, Model: turn.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: turn.Text}}}}); err != nil {
+			return err
+		}
+	}
+	if err := s.writeChatTerminal(writer, turn, includeUsage); err != nil {
+		return err
+	}
+	return writer.Done()
 }
 
-func (s *Server) writeChatTerminal(writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) {
-	s.writeChatTerminalWithID(writer, turn.ID, turn.Created, turn.Model, turn, includeUsage)
+func (s *Server) writeChatTerminal(writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) error {
+	return s.writeChatTerminalWithID(writer, turn.ID, turn.Created, turn.Model, turn, includeUsage)
 }
 
-func (s *Server) writeChatTerminalWithID(writer *openai.SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) {
+func (s *Server) writeChatTerminalWithID(writer *openai.SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) error {
 	finish := turn.FinishReason
 	if len(turn.ToolCalls) > 0 {
 		deltas := make([]openai.ToolCallDelta, 0, len(turn.ToolCalls))
 		for i, tc := range turn.ToolCalls {
 			deltas = append(deltas, openai.ToolCallDelta{Index: i, ID: tc.ID, Type: "function", Function: &openai.ToolCallDeltaFunction{Name: tc.Function.Name, Arguments: tc.Function.Arguments}})
 		}
-		_ = writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ToolCalls: deltas}}}})
+		if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ToolCalls: deltas}}}}); err != nil {
+			return err
+		}
 	}
-	_ = writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{}, FinishReason: &finish}}})
+	if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{}, FinishReason: &finish}}}); err != nil {
+		return err
+	}
 	if includeUsage && turn.Usage != nil {
-		_ = writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{}, Usage: turn.Usage})
+		if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{}, Usage: turn.Usage}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
@@ -269,7 +300,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	defer cancel()
 	ch, err := s.gw.StreamResponse(ctx, req)
 	if err != nil {
-		_ = writer.Event("error", openai.ResponseStreamEvent{Type: "error", Error: &openai.ErrorObject{Message: err.Error(), Type: "server_error"}})
+		_ = s.writeResponseFailed(writer, req, err)
 		_ = writer.Done()
 		return
 	}
@@ -277,9 +308,17 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	if req.PreviousResponseID != "" {
 		previous = &req.PreviousResponseID
 	}
-	_ = writer.Event("response.created", openai.ResponseStreamEvent{Type: "response.created", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "in_progress", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}})
+	created := openai.UnixNow()
+	initial := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: created, Status: "in_progress", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
+	if err := writer.Event("response.created", openai.ResponseStreamEvent{Type: "response.created", Response: initial}); err != nil {
+		return
+	}
+	if err := writer.Event("response.in_progress", openai.ResponseStreamEvent{Type: "response.in_progress", Response: initial}); err != nil {
+		return
+	}
 	messageID := openai.NewID("msg_")
 	messageStarted := false
+	messageDone := false
 	var messageText strings.Builder
 	for ev := range ch {
 		switch ev.Kind {
@@ -287,21 +326,45 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 			zero := 0
 			if !messageStarted {
 				item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "in_progress", Role: "assistant", Content: []openai.ResponseText{}}
-				_ = writer.Event("response.output_item.added", openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &zero, Item: &item})
+				if err := writer.Event("response.output_item.added", openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &zero, Item: &item}); err != nil {
+					return
+				}
 				messageStarted = true
 			}
 			messageText.WriteString(ev.Delta)
-			_ = writer.Event("response.output_text.delta", openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Delta: ev.Delta})
+			if err := writer.Event("response.output_text.delta", openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Delta: ev.Delta}); err != nil {
+				return
+			}
 		case "response":
 			if messageStarted {
-				if item, idx := streamedMessageItem(ev.Response, messageID, messageText.String()); item != nil {
-					_ = writer.Event("response.output_item.done", openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: item})
+				text := messageText.String()
+				zero := 0
+				if err := writer.Event("response.output_text.done", openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: text}); err != nil {
+					return
+				}
+				messageDone = true
+				if item, idx := streamedMessageItem(ev.Response, messageID, text); item != nil {
+					if err := writer.Event("response.output_item.done", openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: item}); err != nil {
+						return
+					}
 				}
 			}
-			s.writeResponseOutputEvents(writer, ev.Response)
-			_ = writer.Event("response.completed", openai.ResponseStreamEvent{Type: "response.completed", Response: ev.Response})
+			if err := s.writeResponseOutputEvents(writer, ev.Response); err != nil {
+				return
+			}
+			if err := writer.Event("response.completed", openai.ResponseStreamEvent{Type: "response.completed", Response: ev.Response}); err != nil {
+				return
+			}
 		case "error":
-			_ = writer.Event("error", openai.ResponseStreamEvent{Type: "error", Error: &openai.ErrorObject{Message: ev.Error.Error(), Type: "server_error"}})
+			if messageStarted && !messageDone {
+				zero := 0
+				if err := writer.Event("response.output_text.done", openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: messageText.String()}); err != nil {
+					return
+				}
+			}
+			if err := s.writeResponseFailed(writer, req, ev.Error); err != nil {
+				return
+			}
 		}
 	}
 	_ = writer.Done()
@@ -331,9 +394,9 @@ func streamedMessageItem(resp *openai.Response, id, text string) (*openai.Respon
 	return &resp.Output[0], 0
 }
 
-func (s *Server) writeResponseOutputEvents(writer *openai.SSEWriter, resp *openai.Response) {
+func (s *Server) writeResponseOutputEvents(writer *openai.SSEWriter, resp *openai.Response) error {
 	if resp == nil {
-		return
+		return nil
 	}
 	for i := range resp.Output {
 		item := resp.Output[i]
@@ -341,13 +404,32 @@ func (s *Server) writeResponseOutputEvents(writer *openai.SSEWriter, resp *opena
 			continue
 		}
 		idx := i
-		_ = writer.Event("response.output_item.added", openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item})
-		if item.Arguments != "" {
-			_ = writer.Event("response.function_call_arguments.delta", openai.ResponseStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: &idx, ItemID: item.ID, Delta: item.Arguments})
+		if err := writer.Event("response.output_item.added", openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item}); err != nil {
+			return err
 		}
-		_ = writer.Event("response.function_call_arguments.done", openai.ResponseStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: &idx, ItemID: item.ID, Arguments: item.Arguments})
-		_ = writer.Event("response.output_item.done", openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item})
+		if item.Arguments != "" {
+			if err := writer.Event("response.function_call_arguments.delta", openai.ResponseStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: &idx, ItemID: item.ID, Delta: item.Arguments}); err != nil {
+				return err
+			}
+		}
+		if err := writer.Event("response.function_call_arguments.done", openai.ResponseStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: &idx, ItemID: item.ID, Arguments: item.Arguments}); err != nil {
+			return err
+		}
+		if err := writer.Event("response.output_item.done", openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item}); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func (s *Server) writeResponseFailed(writer *openai.SSEWriter, req copilotgw.ResponseRequest, err error) error {
+	obj := errorObject(err)
+	var previous *string
+	if req.PreviousResponseID != "" {
+		previous = &req.PreviousResponseID
+	}
+	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "failed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: obj, IncompleteDetails: nil}
+	return writer.Event("response.failed", openai.ResponseStreamEvent{Type: "response.failed", Response: resp, Error: &obj})
 }
 
 func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +522,7 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 		outputs := map[string]string{}
 		for i, item := range items {
 			if item.Type != "function_call_output" {
-				continue
+				return openai.PromptContent{}, nil, "", openai.InvalidRequest("function_call_output continuation input cannot be mixed with other input item types", fmt.Sprintf("input.%d.type", i))
 			}
 			out, err := parseFunctionOutputItem(item, i)
 			if err != nil {
@@ -644,13 +726,26 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		expected := "Bearer " + s.cfg.APIKey
-		if r.Header.Get("Authorization") != expected {
+		if !validBearerToken(r.Header.Values("Authorization"), s.cfg.APIKey) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="copilot-api"`)
 			openai.WriteError(w, openai.Unauthorized("invalid bearer token"))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func validBearerToken(values []string, apiKey string) bool {
+	if len(values) != 1 {
+		return false
+	}
+	parts := strings.Fields(values[0])
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return false
+	}
+	supplied := sha256.Sum256([]byte(parts[1]))
+	expected := sha256.Sum256([]byte(apiKey))
+	return subtle.ConstantTimeCompare(supplied[:], expected[:]) == 1
 }
 
 type requestLogMetadata struct {
@@ -801,4 +896,9 @@ func asAPIError(err error) *openai.APIError {
 		return api
 	}
 	return openai.Internal(err.Error())
+}
+
+func errorObject(err error) openai.ErrorObject {
+	api := asAPIError(err)
+	return openai.ErrorObject{Message: api.Message, Type: api.Type, Param: api.Param, Code: api.Code}
 }

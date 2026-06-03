@@ -26,7 +26,7 @@ If `COPILOT_API_KEY` is set, `/v1/*` endpoints require:
 Authorization: Bearer local-secret
 ```
 
-If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warning. Keep the default `127.0.0.1:8080` bind unless you enable auth.
+If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warning. The server refuses to bind to non-loopback addresses without `COPILOT_API_KEY`; keep the default `127.0.0.1:8080` bind unless you enable auth.
 
 ## Endpoints
 
@@ -55,7 +55,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | `parallel_tool_calls` | Chat accepts omitted/`false` and rejects `true`. Responses accepts omitted/`true` and rejects `false`. Internal pending batches support multiple calls. |
 | Streaming | SSE streams are OpenAI-shaped. SDK streaming deltas are forwarded as text deltas; tool calls are buffered and emitted complete; streams terminate with `[DONE]`. |
 | Usage | SDK input/output/reasoning token events are mapped when available; unavailable fields are omitted. |
-| Multimodal | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; selected models must support vision. Image `file_id` inputs and binary/multimodal tool outputs are deferred. JSON object/array tool outputs are serialized to JSON text. |
+| Multimodal | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; remote image fetches reject loopback, private, link-local, multicast, and otherwise non-public hosts to avoid SSRF; selected models must advertise vision support. Image `file_id` inputs and binary/multimodal tool outputs are deferred. JSON object/array tool outputs are serialized to JSON text. |
 | Unsupported fields | Strict compatibility defaults to disabled, so harmless unsupported client knobs such as `temperature` are ignored. For Codex CLI compatibility, Responses `include: ["reasoning.encrypted_content"]` and `text.verbosity` are accepted as no-ops in permissive mode. Unsupported semantics that would mislead clients still fail closed with OpenAI-shaped `invalid_request_error` responses. |
 
 ## Configuration
@@ -69,13 +69,13 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | `COPILOT_MODELS_CACHE_TTL` | `10m` | Successful model-list cache TTL. |
 | `COPILOT_TOOL_CALL_TTL` | `5m` | Liveness guard for parked tool-call continuations. |
 | `COPILOT_REQUEST_TIMEOUT` | `0` | Optional generation timeout; `0` disables proxy-imposed timeouts. |
-| `COPILOT_MAX_REQUEST_BODY_BYTES` | `0` | Optional HTTP body cap; `0` means no proxy-specific cap. |
+| `COPILOT_MAX_REQUEST_BODY_BYTES` | `104857600` | Optional HTTP body cap; `0` disables the proxy-specific cap. Default is 100 MiB to leave room for base64-encoded image data while bounding memory use. |
 | `COPILOT_API_DATA_DIR` | `$XDG_DATA_HOME/copilot-api` | Retained SDK session files and synthetic Chat histories. |
 | `COPILOT_API_STATE_DIR` | `$XDG_STATE_HOME/copilot-api` | Lock file, response records, and pending metadata. |
 | `COPILOT_API_CACHE_DIR` | `$XDG_CACHE_HOME/copilot-api` | Model cache and transient cache files. |
 | `COPILOT_API_CONFIG_DIR` | `$XDG_CONFIG_HOME/copilot-api` | Isolated Copilot SDK config dir. |
 | `COPILOT_STRICT_COMPAT` | `false` | Reject harmless unsupported OpenAI fields that permissive mode normally ignores; useful for debugging client conformance. Unsafe unsupported semantics are always rejected. |
-| `COPILOT_LOG_CONTENT` | `false` | Enables content logging; use with care. |
+| `COPILOT_LOG_CONTENT` | `false` | Reserved for future guarded content logging. The current server still avoids logging prompts, responses, tool arguments, tool outputs, auth headers, and image data by default. |
 | `COPILOT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. Request metadata is logged at this level; 4xx responses log at warn and 5xx responses at error. Generation request logs include the requested `model` field and `reasoning_effort` when supplied. |
 
 Durations accept Go duration strings like `5m`, or seconds as a number.

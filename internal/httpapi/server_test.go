@@ -392,8 +392,6 @@ func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *test
 		"previous_response_id":"resp_previous",
 		"store":false,
 		"input":[
-			{"role":"user","content":[{"type":"input_text","text":"original prompt replayed by client"}]},
-			{"type":"item_reference","id":"fc_1"},
 			{"type":"function_call_output","call_id":"call_1","output":{"answer":42}}
 		]
 	}`)

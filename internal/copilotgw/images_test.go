@@ -1,10 +1,11 @@
 package copilotgw
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -14,6 +15,10 @@ import (
 )
 
 const tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func cachedModelGateway(model Model) *RealGateway {
 	return &RealGateway{
@@ -78,11 +83,17 @@ func TestResolvePromptFetchesRemoteImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/png")
-		_, _ = w.Write(pngBytes)
-	}))
-	defer srv.Close()
+	oldClient := imageHTTPClient
+	imageHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        http.Header{"Content-Type": []string{"image/png"}},
+			Body:          io.NopCloser(bytes.NewReader(pngBytes)),
+			ContentLength: int64(len(pngBytes)),
+			Request:       req,
+		}, nil
+	})}
+	defer func() { imageHTTPClient = oldClient }()
 	gw := cachedModelGateway(Model{
 		ID:             "vision",
 		VisionKnown:    true,
@@ -90,7 +101,7 @@ func TestResolvePromptFetchesRemoteImage(t *testing.T) {
 		Vision:         &VisionLimits{SupportedMediaTypes: []string{"image/png"}},
 	})
 	got, err := gw.resolvePrompt(context.Background(), "vision", openai.PromptContent{
-		Images: []openai.ImageInput{{URL: srv.URL + "/shot.png"}},
+		Images: []openai.ImageInput{{URL: "http://93.184.216.34/shot.png"}},
 	}, "input")
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +115,26 @@ func TestResolvePromptFetchesRemoteImage(t *testing.T) {
 	}
 	if attachment.Data != tinyPNG {
 		t.Fatalf("unexpected data %#v", attachment.Data)
+	}
+}
+
+func TestResolvePromptRejectsUnknownVisionSupport(t *testing.T) {
+	gw := cachedModelGateway(Model{ID: "unknown", VisionKnown: false})
+	_, err := gw.resolvePrompt(context.Background(), "unknown", openai.PromptContent{
+		Images: []openai.ImageInput{{URL: "data:image/png;base64," + tinyPNG}},
+	}, "input")
+	if err == nil {
+		t.Fatal("expected unknown vision capability rejection")
+	}
+}
+
+func TestResolvePromptRejectsPrivateRemoteImageHost(t *testing.T) {
+	gw := cachedModelGateway(Model{ID: "vision", VisionKnown: true, SupportsVision: true})
+	_, err := gw.resolvePrompt(context.Background(), "vision", openai.PromptContent{
+		Images: []openai.ImageInput{{URL: "http://127.0.0.1/image.png"}},
+	}, "input")
+	if err == nil {
+		t.Fatal("expected private image_url host rejection")
 	}
 }
 

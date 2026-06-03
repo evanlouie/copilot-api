@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 )
 
@@ -47,8 +48,8 @@ func Internal(message string) *APIError {
 }
 
 func WriteError(w http.ResponseWriter, err error) {
-	apiErr, ok := err.(*APIError)
-	if !ok {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
 		apiErr = Internal(err.Error())
 	}
 	w.Header().Set("Content-Type", "application/json")
