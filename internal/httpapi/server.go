@@ -27,7 +27,7 @@ func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
 	h = s.authMiddleware(h)
 	h = recoverMiddleware(s.log, h)
-	h = requestLoggingMiddleware(s.log, h)
+	h = requestLoggingMiddleware(s.log, s.cfg.LogContent, h)
 	h = observability.RequestIDMiddleware(h)
 	return h
 }

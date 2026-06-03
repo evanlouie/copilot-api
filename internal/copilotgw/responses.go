@@ -16,10 +16,6 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
-	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
-	if err != nil {
-		return nil, err
-	}
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
 	}
@@ -31,6 +27,10 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 
 	if len(req.FunctionOutputs) > 0 {
 		return g.continueToolResponse(ctx, req)
+	}
+	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
+	if err != nil {
+		return nil, err
 	}
 	prompt, err := g.resolvePrompt(ctx, req.Model, req.Input, "input")
 	if err != nil {
@@ -99,10 +99,6 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
-	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
-	if err != nil {
-		return nil, err
-	}
 	if len(req.FunctionOutputs) > 0 {
 		ids := make([]string, 0, len(req.FunctionOutputs))
 		for id := range req.FunctionOutputs {
@@ -158,6 +154,10 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		g.forgetRunner(batch.ID)
 		go runner.discardInitial()
 		return ch, nil
+	}
+	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
+	if err != nil {
+		return nil, err
 	}
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")

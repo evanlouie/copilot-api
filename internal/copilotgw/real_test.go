@@ -178,6 +178,42 @@ func TestEffectiveReasoningEffortUsesDefaultWhenSupportKnownWithoutEffortList(t 
 	}
 }
 
+func TestEffectiveReasoningEffortUsesModelDefaultWhenSupportListMissing(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID:                      "claude-opus-4.8",
+		ReasoningEffortKnown:    true,
+		SupportsReasoningEffort: true,
+		DefaultReasoningEffort:  "medium",
+	})
+	gw.cfg = config.Config{DefaultReasoningEffort: "minimal"}
+
+	got, err := gw.effectiveReasoningEffort(context.Background(), "claude-opus-4.8", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "medium" {
+		t.Fatalf("effective reasoning effort = %q, want medium", got)
+	}
+}
+
+func TestEffectiveReasoningEffortNoneOmitsModelDefaultWhenSupportListMissing(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID:                      "claude-opus-4.8",
+		ReasoningEffortKnown:    true,
+		SupportsReasoningEffort: true,
+		DefaultReasoningEffort:  "medium",
+	})
+	gw.cfg = config.Config{DefaultReasoningEffort: "none"}
+
+	got, err := gw.effectiveReasoningEffort(context.Background(), "claude-opus-4.8", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("effective reasoning effort = %q, want omitted", got)
+	}
+}
+
 func TestRealClientOptionsUseV1ModeEmpty(t *testing.T) {
 	cfg := config.Config{
 		CLIPath:     "/tmp/copilot",

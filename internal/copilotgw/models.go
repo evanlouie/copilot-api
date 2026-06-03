@@ -221,6 +221,17 @@ var reasoningEffortRanks = map[string]int{
 	"xhigh":   5,
 }
 
+func (g *RealGateway) ResolveReasoningEffort(ctx context.Context, model, requestedEffort, defaultEffort string) (string, error) {
+	return g.effectiveReasoningEffort(ctx, model, requestedEffort, defaultEffort)
+}
+
+func (g *RealGateway) requestReasoningEffort(ctx context.Context, model, requestedEffort, defaultEffort, resolvedEffort string, resolved bool) (string, error) {
+	if resolved {
+		return cleanReasoningEffort(resolvedEffort), nil
+	}
+	return g.effectiveReasoningEffort(ctx, model, requestedEffort, defaultEffort)
+}
+
 func (g *RealGateway) effectiveReasoningEffort(ctx context.Context, model, requestedEffort, defaultEffort string) (string, error) {
 	requestedEffort = cleanReasoningEffort(requestedEffort)
 	if requestedEffort != "" {
@@ -279,10 +290,13 @@ func closestReasoningEffort(defaultEffort string, model Model) string {
 	if model.ReasoningEffortKnown && !model.SupportsReasoningEffort {
 		return ""
 	}
-	if model.ReasoningEffortKnown && model.SupportsReasoningEffort {
-		return defaultEffort
+	if defaultEffort == "none" {
+		return ""
 	}
 	if model.DefaultReasoningEffort != "" {
+		return cleanReasoningEffort(model.DefaultReasoningEffort)
+	}
+	if model.ReasoningEffortKnown && model.SupportsReasoningEffort {
 		return defaultEffort
 	}
 	return ""

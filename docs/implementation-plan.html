@@ -649,7 +649,7 @@ internal/observability/          # request correlation and redaction helpers</co
               <tr><td><span class="kbd">COPILOT_API_STATE_DIR</span></td><td>XDG state override for lock, pending records, and diagnostics.</td><td><span class="kbd">$XDG_STATE_HOME/copilot-api</span>.</td></tr>
               <tr><td><span class="kbd">COPILOT_API_CACHE_DIR</span></td><td>XDG cache override for model cache and transient cache files.</td><td><span class="kbd">$XDG_CACHE_HOME/copilot-api</span>.</td></tr>
               <tr><td><span class="kbd">COPILOT_STRICT_COMPAT</span></td><td>Reject harmless unsupported OpenAI fields that permissive mode normally ignores. Unsafe unsupported semantics are always rejected.</td><td>false.</td></tr>
-              <tr><td><span class="kbd">COPILOT_LOG_CONTENT</span></td><td>Reserved for future guarded content logging. Current server logs continue to omit prompt, response, image, and tool content even when this is set.</td><td>false.</td></tr>
+              <tr><td><span class="kbd">COPILOT_LOG_CONTENT</span></td><td>Opt-in request/response body logging. Completed request logs include capped prompt, response, image, and tool content fields with truncation flags; auth headers remain omitted.</td><td>false.</td></tr>
             </tbody>
           </table>
         </section>
@@ -1113,7 +1113,7 @@ copilot-api purge --dry-run</code></pre>
                 <li>HTTP connection/header/body handling has practical limits: read-header/read/idle timeouts and a default 100 MiB request-body cap.</li>
                 <li>Startup/readiness and model-refresh operations may have practical timeouts because startup cannot hang forever.</li>
                 <li>Use embedded/matched CLI by default; fail startup/readiness on SDK/CLI incompatibility or model-list failure.</li>
-                <li>Logs omit prompts, responses, tool arguments, tool outputs, image data, auth headers, and tokens by default. <span class="kbd">COPILOT_LOG_CONTENT</span> is currently reserved and does not enable content logging.</li>
+                <li>Logs omit prompts, responses, tool arguments, tool outputs, image data, auth headers, and tokens by default. <span class="kbd">COPILOT_LOG_CONTENT</span> opt-in body logging captures capped request/response bodies and remains unsuitable for shared or untrusted log sinks.</li>
                 <li>Every HTTP response includes <span class="kbd">X-Request-ID</span>; client-supplied request IDs are metadata only.</li>
               </ul>
             </div>

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,35 @@ type captureChatGateway struct {
 func (g *captureChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest) (*copilotgw.TurnResult, error) {
 	g.got = req
 	return &copilotgw.TurnResult{ID: req.OpenAIID, Created: openai.UnixNow(), Model: req.Model, Text: "ok", FinishReason: "stop"}, nil
+}
+
+type resolvingChatGateway struct {
+	copilotgw.Gateway
+	got              copilotgw.ChatRequest
+	resolveCalls     int
+	resolveModel     string
+	resolveRequested string
+	resolveDefault   string
+	resolvedEffort   string
+	continueCalled   bool
+}
+
+func (g *resolvingChatGateway) ResolveReasoningEffort(_ context.Context, model, requestedEffort, defaultEffort string) (string, error) {
+	g.resolveCalls++
+	g.resolveModel = model
+	g.resolveRequested = requestedEffort
+	g.resolveDefault = defaultEffort
+	return g.resolvedEffort, nil
+}
+
+func (g *resolvingChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest) (*copilotgw.TurnResult, error) {
+	g.got = req
+	return &copilotgw.TurnResult{ID: req.OpenAIID, Created: openai.UnixNow(), Model: req.Model, Text: "ok", FinishReason: "stop"}, nil
+}
+
+func (g *resolvingChatGateway) ContinueChatToolCalls(_ context.Context, model string, outputs map[string]string) (*copilotgw.TurnResult, error) {
+	g.continueCalled = true
+	return &copilotgw.TurnResult{Model: model, Text: outputs["call_1"], FinishReason: "stop"}, nil
 }
 
 type streamChatGateway struct {
@@ -235,7 +265,7 @@ func TestModelsEndpointIncludesReasoningAndVisionMetadata(t *testing.T) {
 func TestRequestLoggingMiddlewareLogsMetadata(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setRequestLogModel(r, "gpt-5")
 		setRequestLogReasoningEffort(r, "high")
 		w.WriteHeader(http.StatusCreated)
@@ -255,6 +285,142 @@ func TestRequestLoggingMiddlewareLogsMetadata(t *testing.T) {
 	}
 	if strings.Contains(logLine, "not-logged") {
 		t.Fatalf("request logging should not include query strings: %s", logLine)
+	}
+}
+
+func TestRequestLoggingMiddlewareContentLoggingDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte("response-secret"))
+	})))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("request-secret"))
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	logLines := buf.String()
+	for _, secret := range []string{"request-secret", "response-secret", "request_body", "response_body"} {
+		if strings.Contains(logLines, secret) {
+			t.Fatalf("content logging disabled but log contains %q: %s", secret, logLines)
+		}
+	}
+}
+
+func TestRequestLoggingMiddlewareContentLoggingEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(body) != "request-secret" {
+			t.Fatalf("request body = %q, want request-secret", body)
+		}
+		_, _ = w.Write([]byte("response-secret"))
+	})))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("request-secret"))
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	logLines := buf.String()
+	for _, want := range []string{`"request_body":"request-secret"`, `"response_body":"response-secret"`} {
+		if !strings.Contains(logLines, want) {
+			t.Fatalf("content log missing %s: %s", want, logLines)
+		}
+	}
+}
+
+func TestRequestLoggingMiddlewareContentLoggingTruncates(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	requestBody := strings.Repeat("a", maxLoggedBodyBytes+1)
+	responseBody := strings.Repeat("b", maxLoggedBodyBytes+1)
+	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(responseBody))
+	})))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(requestBody))
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected log lines")
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &entry); err != nil {
+		t.Fatalf("decode completed log: %v", err)
+	}
+	if got := len(entry["request_body"].(string)); got != maxLoggedBodyBytes {
+		t.Fatalf("request_body length = %d, want %d", got, maxLoggedBodyBytes)
+	}
+	if got := len(entry["response_body"].(string)); got != maxLoggedBodyBytes {
+		t.Fatalf("response_body length = %d, want %d", got, maxLoggedBodyBytes)
+	}
+	if entry["request_body_truncated"] != true || entry["response_body_truncated"] != true {
+		t.Fatalf("truncation flags = request:%#v response:%#v", entry["request_body_truncated"], entry["response_body_truncated"])
+	}
+}
+
+func TestGenerationLoggingUsesGatewayResolvedReasoningEffort(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	gw := &resolvingChatGateway{resolvedEffort: "medium"}
+	s := New(config.Config{DefaultReasoningEffort: "minimal"}, gw, logger)
+	body := strings.NewReader(`{"model":"claude-opus-4.8","messages":[{"role":"user","content":"hi"}]}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gw.resolveCalls != 1 || gw.resolveModel != "claude-opus-4.8" || gw.resolveRequested != "" || gw.resolveDefault != "minimal" {
+		t.Fatalf("ResolveReasoningEffort called %d times with model=%q requested=%q default=%q", gw.resolveCalls, gw.resolveModel, gw.resolveRequested, gw.resolveDefault)
+	}
+	if !gw.got.ReasoningEffortResolved || gw.got.ResolvedReasoningEffort != "medium" {
+		t.Fatalf("gateway request resolved effort = (%t, %q), want (true, medium)", gw.got.ReasoningEffortResolved, gw.got.ResolvedReasoningEffort)
+	}
+	logLines := buf.String()
+	for _, want := range []string{`"msg":"generation request"`, `"model":"claude-opus-4.8"`, `"reasoning_effort":""`, `"reasoning_effort_resolved":"medium"`, `"msg":"request completed"`} {
+		if !strings.Contains(logLines, want) {
+			t.Fatalf("log lines missing %s: %s", want, logLines)
+		}
+	}
+	if got := strings.Count(logLines, `"reasoning_effort_resolved":"medium"`); got != 2 {
+		t.Fatalf("reasoning_effort_resolved log count = %d, want 2: %s", got, logLines)
+	}
+}
+
+func TestChatContinuationLoggingDoesNotResolveReasoningEffort(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	gw := &resolvingChatGateway{resolvedEffort: "medium"}
+	s := New(config.Config{DefaultReasoningEffort: "minimal"}, gw, logger)
+	body := strings.NewReader(`{"model":"gpt-5","reasoning_effort":"high","messages":[{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gw.resolveCalls != 0 {
+		t.Fatalf("ResolveReasoningEffort calls = %d, want 0 for tool continuations", gw.resolveCalls)
+	}
+	if !gw.continueCalled {
+		t.Fatal("expected ContinueChatToolCalls to be called")
+	}
+	logLines := buf.String()
+	for _, want := range []string{`"msg":"generation request"`, `"continuation":true`, `"reasoning_effort":"high"`} {
+		if !strings.Contains(logLines, want) {
+			t.Fatalf("log lines missing %s: %s", want, logLines)
+		}
+	}
+	if strings.Contains(logLines, "reasoning_effort_resolved") {
+		t.Fatalf("continuation log should not include resolved reasoning effort: %s", logLines)
 	}
 }
 

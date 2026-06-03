@@ -14,9 +14,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
-	setRequestLogModel(r, req.Model)
 	reasoningEffort := openai.ResponsesReasoningEffort(&req)
-	setRequestLogReasoningEffort(r, reasoningEffort)
 	if err := openai.ValidateResponsesRequest(&req, s.cfg.StrictCompat); err != nil {
 		openai.WriteError(w, err)
 		return
@@ -31,13 +29,25 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if req.Store != nil {
 		store = *req.Store
 	}
-	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: combineInstructions(req.Instructions, inputInstructions), Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: openai.SupportedTools(req.Tools), ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: reasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort}
+	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+	continuation := len(outputs) > 0
+	resolvedEffort := ""
+	resolved := false
+	if !continuation {
+		var err error
+		resolvedEffort, resolved, err = s.resolveGenerationReasoningEffort(ctx, req.Model, reasoningEffort)
+		if err != nil {
+			openai.WriteError(w, err)
+			return
+		}
+	}
+	s.logGenerationRequest(r, "responses", req.Model, reasoningEffort, resolvedEffort, resolved, continuation)
+	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: combineInstructions(req.Instructions, inputInstructions), Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: openai.SupportedTools(req.Tools), ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: reasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved}
 	if req.Stream {
 		s.streamResponses(w, r, gwReq)
 		return
 	}
-	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
-	defer cancel()
 	res, err := s.gw.CreateResponse(ctx, gwReq)
 	if err != nil {
 		openai.WriteError(w, err)

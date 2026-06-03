@@ -74,22 +74,53 @@ func validBearerToken(values []string, apiKey string) bool {
 }
 
 type requestLogMetadata struct {
-	mu              sync.Mutex
-	model           string
-	reasoningEffort string
+	mu                      sync.Mutex
+	model                   string
+	reasoningEffort         string
+	resolvedReasoningEffort string
 }
 type requestLogMetadataKey struct{}
 
-func requestLoggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
+type reasoningEffortResolver interface {
+	ResolveReasoningEffort(ctx context.Context, model, requestedEffort, defaultEffort string) (string, error)
+}
+
+// maxLoggedBodyBytes caps how much of a request or response body is captured
+// for content logging. Streaming responses (SSE) can be very large; we keep
+// only the head to bound memory and log volume.
+const maxLoggedBodyBytes = 64 << 10
+
+func requestLoggingMiddleware(log *slog.Logger, logContent bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		meta := &requestLogMetadata{}
 		r = r.WithContext(context.WithValue(r.Context(), requestLogMetadataKey{}, meta))
+
+		var reqCapture *bodyCapture
+		if logContent && r.Body != nil && r.Body != http.NoBody {
+			reqCapture = newBodyCapture(maxLoggedBodyBytes)
+			r.Body = &teeReadCloser{rc: r.Body, buf: reqCapture, captureActive: true}
+		}
+
+		logger := observability.Logger(r.Context(), log)
+		startAttrs := []any{
+			"method", r.Method,
+			"path", r.URL.EscapedPath(),
+			"remote_ip", remoteIP(r.RemoteAddr),
+		}
+		if ua := r.UserAgent(); ua != "" {
+			startAttrs = append(startAttrs, "user_agent", ua)
+		}
+		logger.Info("request received", startAttrs...)
+
 		recorder := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		if logContent {
+			recorder.capture = newBodyCapture(maxLoggedBodyBytes)
+			recorder.captureActive = true
+		}
 		next.ServeHTTP(recorder, r)
 
 		duration := time.Since(start)
-		logger := observability.Logger(r.Context(), log)
 		attrs := []any{
 			"method", r.Method,
 			"path", r.URL.EscapedPath(),
@@ -102,8 +133,25 @@ func requestLoggingMiddleware(log *slog.Logger, next http.Handler) http.Handler 
 		if reasoningEffort := meta.ReasoningEffort(); reasoningEffort != "" {
 			attrs = append(attrs, "reasoning_effort", reasoningEffort)
 		}
+		if resolvedEffort := meta.ResolvedReasoningEffort(); resolvedEffort != "" && resolvedEffort != meta.ReasoningEffort() {
+			attrs = append(attrs, "reasoning_effort_resolved", resolvedEffort)
+		}
 		if ua := r.UserAgent(); ua != "" {
 			attrs = append(attrs, "user_agent", ua)
+		}
+		if logContent {
+			if reqCapture != nil {
+				attrs = append(attrs, "request_body", reqCapture.String())
+				if reqCapture.Truncated() {
+					attrs = append(attrs, "request_body_truncated", true)
+				}
+			}
+			if recorder.capture != nil {
+				attrs = append(attrs, "response_body", recorder.capture.String())
+				if recorder.capture.Truncated() {
+					attrs = append(attrs, "response_body_truncated", true)
+				}
+			}
 		}
 		switch {
 		case recorder.status >= 500:
@@ -129,6 +177,49 @@ func setRequestLogReasoningEffort(r *http.Request, reasoningEffort string) {
 	}
 	meta.SetReasoningEffort(reasoningEffort)
 }
+func setRequestLogResolvedReasoningEffort(r *http.Request, reasoningEffort string) {
+	meta, ok := r.Context().Value(requestLogMetadataKey{}).(*requestLogMetadata)
+	if !ok || meta == nil {
+		return
+	}
+	meta.SetResolvedReasoningEffort(reasoningEffort)
+}
+
+func (s *Server) resolveGenerationReasoningEffort(ctx context.Context, model, requestedEffort string) (string, bool, error) {
+	resolver, ok := s.gw.(reasoningEffortResolver)
+	if !ok {
+		return "", false, nil
+	}
+	resolvedEffort, err := resolver.ResolveReasoningEffort(ctx, model, requestedEffort, s.cfg.DefaultReasoningEffort)
+	if err != nil {
+		return "", true, err
+	}
+	return resolvedEffort, true, nil
+}
+
+// logGenerationRequest emits a dedicated log line for generation endpoints once
+// the request body has been parsed and validated. Resolved reasoning effort is
+// passed in from the normal request preparation path so logging does not perform
+// model lookups or other gateway work by itself.
+func (s *Server) logGenerationRequest(r *http.Request, endpoint, model, requestedEffort, resolvedEffort string, resolved, continuation bool) {
+	setRequestLogModel(r, model)
+	setRequestLogReasoningEffort(r, requestedEffort)
+	attrs := []any{
+		"endpoint", endpoint,
+		"model", model,
+		"reasoning_effort", requestedEffort,
+	}
+	if continuation {
+		attrs = append(attrs, "continuation", true)
+	}
+	if resolved {
+		setRequestLogResolvedReasoningEffort(r, resolvedEffort)
+		if resolvedEffort != requestedEffort {
+			attrs = append(attrs, "reasoning_effort_resolved", resolvedEffort)
+		}
+	}
+	observability.Logger(r.Context(), s.log).Info("generation request", attrs...)
+}
 func (m *requestLogMetadata) SetModel(model string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -138,6 +229,11 @@ func (m *requestLogMetadata) SetReasoningEffort(reasoningEffort string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reasoningEffort = reasoningEffort
+}
+func (m *requestLogMetadata) SetResolvedReasoningEffort(reasoningEffort string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolvedReasoningEffort = reasoningEffort
 }
 func (m *requestLogMetadata) Model() string {
 	m.mu.Lock()
@@ -149,12 +245,19 @@ func (m *requestLogMetadata) ReasoningEffort() string {
 	defer m.mu.Unlock()
 	return m.reasoningEffort
 }
+func (m *requestLogMetadata) ResolvedReasoningEffort() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.resolvedReasoningEffort
+}
 
 type loggingResponseWriter struct {
 	http.ResponseWriter
-	status int
-	bytes  int
-	wrote  bool
+	status        int
+	bytes         int
+	wrote         bool
+	capture       *bodyCapture
+	captureActive bool
 }
 
 func (w *loggingResponseWriter) WriteHeader(status int) {
@@ -171,8 +274,72 @@ func (w *loggingResponseWriter) Write(b []byte) (int, error) {
 	}
 	n, err := w.ResponseWriter.Write(b)
 	w.bytes += n
+	if w.captureActive && w.capture != nil && n > 0 {
+		w.captureActive = !w.capture.Capture(b[:n])
+	}
 	return n, err
 }
+
+// bodyCapture buffers up to max bytes of a stream for logging, marking
+// truncated when more data was discarded.
+type bodyCapture struct {
+	mu        sync.Mutex
+	buf       []byte
+	max       int
+	truncated bool
+}
+
+func newBodyCapture(max int) *bodyCapture {
+	return &bodyCapture{max: max, buf: make([]byte, 0, 1024)}
+}
+
+// Capture stores as much of p as fits. It returns true once input has been
+// discarded and no further captures are needed.
+func (b *bodyCapture) Capture(p []byte) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := b.max - len(b.buf)
+	if remaining <= 0 {
+		b.truncated = true
+		return true
+	}
+	if len(p) > remaining {
+		b.buf = append(b.buf, p[:remaining]...)
+		b.truncated = true
+		return true
+	}
+	b.buf = append(b.buf, p...)
+	return false
+}
+
+func (b *bodyCapture) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
+
+func (b *bodyCapture) Truncated() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.truncated
+}
+
+// teeReadCloser copies bytes read from rc into buf, preserving Close semantics.
+type teeReadCloser struct {
+	rc            io.ReadCloser
+	buf           *bodyCapture
+	captureActive bool
+}
+
+func (t *teeReadCloser) Read(p []byte) (int, error) {
+	n, err := t.rc.Read(p)
+	if t.captureActive && n > 0 {
+		t.captureActive = !t.buf.Capture(p[:n])
+	}
+	return n, err
+}
+
+func (t *teeReadCloser) Close() error { return t.rc.Close() }
 func (w *loggingResponseWriter) Flush() {
 	if !w.wrote {
 		w.WriteHeader(http.StatusOK)

@@ -50,16 +50,18 @@ type Gateway interface {
 }
 
 type ChatRequest struct {
-	OpenAIID               string
-	Model                  string
-	Instructions           string
-	History                []openai.ChatMessage
-	FinalUser              openai.ChatMessage
-	Tools                  []openai.Tool
-	ToolChoiceNone         bool
-	ReasoningEffort        string
-	DefaultReasoningEffort string
-	IncludeUsageChunk      bool
+	OpenAIID                string
+	Model                   string
+	Instructions            string
+	History                 []openai.ChatMessage
+	FinalUser               openai.ChatMessage
+	Tools                   []openai.Tool
+	ToolChoiceNone          bool
+	ReasoningEffort         string
+	DefaultReasoningEffort  string
+	ResolvedReasoningEffort string
+	ReasoningEffortResolved bool
+	IncludeUsageChunk       bool
 }
 
 type TurnResult struct {
@@ -84,18 +86,20 @@ type StreamEvent struct {
 }
 
 type ResponseRequest struct {
-	ResponseID             string
-	Model                  string
-	Instructions           string
-	Input                  openai.PromptContent
-	FunctionOutputs        map[string]string
-	PreviousResponseID     string
-	Tools                  []openai.Tool
-	ToolChoiceNone         bool
-	Store                  bool
-	StoreSet               bool
-	ReasoningEffort        string
-	DefaultReasoningEffort string
+	ResponseID              string
+	Model                   string
+	Instructions            string
+	Input                   openai.PromptContent
+	FunctionOutputs         map[string]string
+	PreviousResponseID      string
+	Tools                   []openai.Tool
+	ToolChoiceNone          bool
+	Store                   bool
+	StoreSet                bool
+	ReasoningEffort         string
+	DefaultReasoningEffort  string
+	ResolvedReasoningEffort string
+	ReasoningEffortResolved bool
 }
 
 type ResponseResult struct {

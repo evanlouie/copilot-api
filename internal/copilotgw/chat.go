@@ -18,7 +18,7 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
-	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
+	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
-	reasoningEffort, err := g.effectiveReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort)
+	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
 	if err != nil {
 		return nil, err
 	}
