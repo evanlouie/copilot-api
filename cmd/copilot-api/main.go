@@ -67,7 +67,7 @@ func serve(args []string) error {
 		logger.Warn("COPILOT_API_KEY is unset; /v1 endpoints are unauthenticated. Keep the default loopback bind or set COPILOT_API_KEY before exposing the service.")
 	}
 	if cfg.LogContent {
-		logger.Warn("COPILOT_LOG_CONTENT=true; prompts, responses, tool arguments, and tool outputs may be logged")
+		logger.Warn("COPILOT_LOG_CONTENT=true is reserved; content logging is not implemented and prompt/response/tool content remains omitted from server logs")
 	}
 	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
 	if err := store.Ensure(); err != nil {

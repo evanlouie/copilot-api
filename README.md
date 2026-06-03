@@ -50,10 +50,10 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | Prompt isolation | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions use a single-space replacement, then fall back to `You are a chat completion model.` if needed. This avoids SDK resume failures caused by persisted empty `system.message` events. |
 | SDK tools | The SDK client runs in `ModeEmpty`. Built-in file/shell/MCP/memory/skill/repository tools are not exposed. `AvailableTools` is either request-scoped aliases or an impossible sentinel. Permissions reject everything except exact request-scoped custom tools. |
 | OpenAI function tools | `type: "function"` tools are accepted using either Chat's nested `function` shape or Responses' top-level `name`/`parameters` shape. Public names are mapped to opaque SDK aliases. Tool calls are returned to clients; the proxy never executes business logic. Non-function Responses tools emitted by clients such as Codex CLI are ignored in permissive mode and rejected in strict mode. |
-| Tool continuations | Chat clients append `role: "tool"` messages. Responses clients send `function_call_output` items with `previous_response_id`. The proxy validates one output per pending call before unblocking the parked SDK handlers. |
+| Tool continuations | Chat clients append `role: "tool"` messages. Responses clients send only `function_call_output` items with `previous_response_id` for continuation turns; mixed prompt/function-output arrays are rejected. The proxy validates batch ownership, endpoint kind, requested model, and exactly one output per pending call before unblocking the parked SDK handlers. |
 | `tool_choice` | Omitted/`auto` and `none` are supported. Forced function and `required` are rejected because the current SDK/runtime does not expose OpenAI-compatible enforcement for them. |
 | `parallel_tool_calls` | Chat accepts omitted/`false` and rejects `true`. Responses accepts omitted/`true` and rejects `false`. Internal pending batches support multiple calls. |
-| Streaming | SSE streams are OpenAI-shaped. SDK streaming deltas are forwarded as text deltas; tool calls are buffered and emitted complete; streams terminate with `[DONE]`. |
+| Streaming | SSE streams are OpenAI-shaped. Chat streams forward SDK text deltas, buffer tool calls, emit complete tool-call deltas, and terminate with `[DONE]`. Responses streams emit lifecycle events such as `response.created`, `response.in_progress`, `response.output_text.delta`, `response.output_text.done`, function-call argument events, `response.completed`, or `response.failed`, then `[DONE]`. |
 | Usage | SDK input/output/reasoning token events are mapped when available; unavailable fields are omitted. |
 | Multimodal | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; remote image fetches reject loopback, private, link-local, multicast, and otherwise non-public hosts to avoid SSRF; selected models must advertise vision support. Image `file_id` inputs and binary/multimodal tool outputs are deferred. JSON object/array tool outputs are serialized to JSON text. |
 | Unsupported fields | Strict compatibility defaults to disabled, so harmless unsupported client knobs such as `temperature` are ignored. For Codex CLI compatibility, Responses `include: ["reasoning.encrypted_content"]` and `text.verbosity` are accepted as no-ops in permissive mode. Unsupported semantics that would mislead clients still fail closed with OpenAI-shaped `invalid_request_error` responses. |
@@ -63,13 +63,13 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `COPILOT_API_ADDR` | `127.0.0.1:8080` | HTTP listen address. |
-| `COPILOT_API_KEY` | unset | Optional proxy bearer token. |
+| `COPILOT_API_KEY` | unset | Optional proxy bearer token. Required when binding to a non-loopback address. |
 | `GITHUB_TOKEN` | unset | Optional process-wide GitHub token for Copilot SDK auth. |
 | `COPILOT_CLI_PATH` | embedded matched CLI when bundled, else SDK fallback | Advanced override for the Copilot CLI binary. |
 | `COPILOT_DEFAULT_REASONING_EFFORT` | unset | Optional reasoning effort to use when a Chat Completions or Responses request omits `reasoning_effort`. When model metadata advertises supported efforts, unsupported defaults are rounded to the closest supported level; models without reasoning-effort support omit it. |
 | `COPILOT_MODELS_CACHE_TTL` | `10m` | Successful model-list cache TTL. |
 | `COPILOT_TOOL_CALL_TTL` | `5m` | Liveness guard for parked tool-call continuations. |
-| `COPILOT_REQUEST_TIMEOUT` | `0` | Optional generation timeout; `0` disables proxy-imposed timeouts. |
+| `COPILOT_REQUEST_TIMEOUT` | `0` | Optional generation timeout; `0` disables proxy-imposed generation timeouts. Client disconnects and configured timeouts abort/disconnect the upstream SDK session. |
 | `COPILOT_MAX_REQUEST_BODY_BYTES` | `104857600` | Optional HTTP body cap; `0` disables the proxy-specific cap. Default is 100 MiB to leave room for base64-encoded image data while bounding memory use. |
 | `COPILOT_API_DATA_DIR` | `$XDG_DATA_HOME/copilot-api` | Retained SDK session files and synthetic Chat histories. |
 | `COPILOT_API_STATE_DIR` | `$XDG_STATE_HOME/copilot-api` | Lock file, response records, and pending metadata. |

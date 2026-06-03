@@ -15,7 +15,8 @@ Coverage:
   `stop` finish reason
 - Responses API `generateText`
 - Responses API `streamText` consumed via `fullStream` so the AI SDK Responses
-  parser has to accept the full `response.created` → `output_text.delta` →
+  parser has to accept the full `response.created` → `response.in_progress` →
+  `response.output_text.delta` → `response.output_text.done` →
   `response.completed` event sequence; asserts `usage` and `finishReason`
 - Responses API reasoning effort via AI SDK provider options, with an assertion
   that the AI SDK surfaces reasoning output via `reasoningText`, reasoning
@@ -41,7 +42,7 @@ Copilot-backed server.
 
 ## Run
 
-Start `copilot-api` in another shell first:
+Start `copilot-api` in another shell first. The example uses an API key because non-loopback binds require one and using a key also exercises the bearer-auth path:
 
 ```sh
 COPILOT_API_KEY=local-secret ./copilot-api serve
