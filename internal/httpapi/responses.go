@@ -42,7 +42,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.logGenerationRequest(r, "responses", req.Model, reasoningEffort, resolvedEffort, resolved, continuation)
+	s.logGenerationStarted(r, "responses", req.Model, reasoningEffort, resolvedEffort, resolved, continuation)
 	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: combineInstructions(req.Instructions, inputInstructions), Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: openai.SupportedTools(req.Tools), ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: reasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved}
 	if req.Stream {
 		s.streamResponses(w, r, gwReq)

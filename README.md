@@ -77,7 +77,7 @@ If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a warn
 | `COPILOT_API_CONFIG_DIR` | `$XDG_CONFIG_HOME/copilot-api` | Isolated Copilot SDK config dir. |
 | `COPILOT_STRICT_COMPAT` | `false` | Reject harmless unsupported OpenAI fields that permissive mode normally ignores; useful for debugging client conformance. Unsafe unsupported semantics are always rejected. |
 | `COPILOT_LOG_CONTENT` | `false` | Opt-in request/response body logging. When `true`, completed request logs include up to 64 KiB each of `request_body` and `response_body`, plus truncation flags when capped. This can include prompts, responses, tool arguments, tool outputs, and image data; auth headers are not logged. |
-| `COPILOT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. Request metadata is logged at this level; 4xx responses log at warn and 5xx responses at error. Generation request logs include `model`, requested `reasoning_effort`, and `reasoning_effort_resolved` when a default is applied. |
+| `COPILOT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. Generation start metadata is logged at info; completed requests log at info/warn/error based on status and include accumulated generation fields. Generic request-received logs are debug-only. |
 
 Durations accept Go duration strings like `5m`, or seconds as a number.
 

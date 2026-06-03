@@ -75,10 +75,21 @@ func validBearerToken(values []string, apiKey string) bool {
 
 type requestLogMetadata struct {
 	mu                      sync.Mutex
+	endpoint                string
 	model                   string
 	reasoningEffort         string
 	resolvedReasoningEffort string
+	continuation            bool
 }
+
+type requestLogFields struct {
+	Endpoint                string
+	Model                   string
+	ReasoningEffort         string
+	ResolvedReasoningEffort string
+	Continuation            bool
+}
+
 type requestLogMetadataKey struct{}
 
 type reasoningEffortResolver interface {
@@ -111,7 +122,7 @@ func requestLoggingMiddleware(log *slog.Logger, logContent bool, next http.Handl
 		if ua := r.UserAgent(); ua != "" {
 			startAttrs = append(startAttrs, "user_agent", ua)
 		}
-		logger.Info("request received", startAttrs...)
+		logger.Debug("request received", startAttrs...)
 
 		recorder := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
 		if logContent {
@@ -121,20 +132,29 @@ func requestLoggingMiddleware(log *slog.Logger, logContent bool, next http.Handl
 		next.ServeHTTP(recorder, r)
 
 		duration := time.Since(start)
+		fields := meta.Fields()
 		attrs := []any{
 			"method", r.Method,
 			"path", r.URL.EscapedPath(),
-			"model", meta.Model(),
 			"status", recorder.status,
 			"bytes", recorder.bytes,
 			"duration_ms", float64(duration.Microseconds()) / 1000.0,
 			"remote_ip", remoteIP(r.RemoteAddr),
 		}
-		if reasoningEffort := meta.ReasoningEffort(); reasoningEffort != "" {
-			attrs = append(attrs, "reasoning_effort", reasoningEffort)
+		if fields.Endpoint != "" {
+			attrs = append(attrs, "endpoint", fields.Endpoint)
 		}
-		if resolvedEffort := meta.ResolvedReasoningEffort(); resolvedEffort != "" && resolvedEffort != meta.ReasoningEffort() {
-			attrs = append(attrs, "reasoning_effort_resolved", resolvedEffort)
+		if fields.Model != "" {
+			attrs = append(attrs, "model", fields.Model)
+		}
+		if fields.Endpoint != "" || fields.ReasoningEffort != "" {
+			attrs = append(attrs, "reasoning_effort", fields.ReasoningEffort)
+		}
+		if fields.ResolvedReasoningEffort != "" && fields.ResolvedReasoningEffort != fields.ReasoningEffort {
+			attrs = append(attrs, "reasoning_effort_resolved", fields.ResolvedReasoningEffort)
+		}
+		if fields.Continuation {
+			attrs = append(attrs, "continuation", true)
 		}
 		if ua := r.UserAgent(); ua != "" {
 			attrs = append(attrs, "user_agent", ua)
@@ -177,14 +197,6 @@ func setRequestLogReasoningEffort(r *http.Request, reasoningEffort string) {
 	}
 	meta.SetReasoningEffort(reasoningEffort)
 }
-func setRequestLogResolvedReasoningEffort(r *http.Request, reasoningEffort string) {
-	meta, ok := r.Context().Value(requestLogMetadataKey{}).(*requestLogMetadata)
-	if !ok || meta == nil {
-		return
-	}
-	meta.SetResolvedReasoningEffort(reasoningEffort)
-}
-
 func (s *Server) resolveGenerationReasoningEffort(ctx context.Context, model, requestedEffort string) (string, bool, error) {
 	resolver, ok := s.gw.(reasoningEffortResolver)
 	if !ok {
@@ -197,13 +209,15 @@ func (s *Server) resolveGenerationReasoningEffort(ctx context.Context, model, re
 	return resolvedEffort, true, nil
 }
 
-// logGenerationRequest emits a dedicated log line for generation endpoints once
+// logGenerationStarted emits a dedicated log line for generation endpoints once
 // the request body has been parsed and validated. Resolved reasoning effort is
 // passed in from the normal request preparation path so logging does not perform
 // model lookups or other gateway work by itself.
-func (s *Server) logGenerationRequest(r *http.Request, endpoint, model, requestedEffort, resolvedEffort string, resolved, continuation bool) {
-	setRequestLogModel(r, model)
-	setRequestLogReasoningEffort(r, requestedEffort)
+func (s *Server) logGenerationStarted(r *http.Request, endpoint, model, requestedEffort, resolvedEffort string, resolved, continuation bool) {
+	meta, ok := r.Context().Value(requestLogMetadataKey{}).(*requestLogMetadata)
+	if ok && meta != nil {
+		meta.SetGeneration(endpoint, model, requestedEffort, resolvedEffort, resolved, continuation)
+	}
 	attrs := []any{
 		"endpoint", endpoint,
 		"model", model,
@@ -212,13 +226,10 @@ func (s *Server) logGenerationRequest(r *http.Request, endpoint, model, requeste
 	if continuation {
 		attrs = append(attrs, "continuation", true)
 	}
-	if resolved {
-		setRequestLogResolvedReasoningEffort(r, resolvedEffort)
-		if resolvedEffort != requestedEffort {
-			attrs = append(attrs, "reasoning_effort_resolved", resolvedEffort)
-		}
+	if resolved && resolvedEffort != requestedEffort {
+		attrs = append(attrs, "reasoning_effort_resolved", resolvedEffort)
 	}
-	observability.Logger(r.Context(), s.log).Info("generation request", attrs...)
+	observability.Logger(r.Context(), s.log).Info("generation started", attrs...)
 }
 func (m *requestLogMetadata) SetModel(model string) {
 	m.mu.Lock()
@@ -230,25 +241,27 @@ func (m *requestLogMetadata) SetReasoningEffort(reasoningEffort string) {
 	defer m.mu.Unlock()
 	m.reasoningEffort = reasoningEffort
 }
-func (m *requestLogMetadata) SetResolvedReasoningEffort(reasoningEffort string) {
+func (m *requestLogMetadata) SetGeneration(endpoint, model, requestedEffort, resolvedEffort string, resolved bool, continuation bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.resolvedReasoningEffort = reasoningEffort
+	m.endpoint = endpoint
+	m.model = model
+	m.reasoningEffort = requestedEffort
+	m.continuation = continuation
+	if resolved {
+		m.resolvedReasoningEffort = resolvedEffort
+	}
 }
-func (m *requestLogMetadata) Model() string {
+func (m *requestLogMetadata) Fields() requestLogFields {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.model
-}
-func (m *requestLogMetadata) ReasoningEffort() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.reasoningEffort
-}
-func (m *requestLogMetadata) ResolvedReasoningEffort() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.resolvedReasoningEffort
+	return requestLogFields{
+		Endpoint:                m.endpoint,
+		Model:                   m.model,
+		ReasoningEffort:         m.reasoningEffort,
+		ResolvedReasoningEffort: m.resolvedReasoningEffort,
+		Continuation:            m.continuation,
+	}
 }
 
 type loggingResponseWriter struct {

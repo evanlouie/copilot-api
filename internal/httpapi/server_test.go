@@ -384,13 +384,16 @@ func TestGenerationLoggingUsesGatewayResolvedReasoningEffort(t *testing.T) {
 		t.Fatalf("gateway request resolved effort = (%t, %q), want (true, medium)", gw.got.ReasoningEffortResolved, gw.got.ResolvedReasoningEffort)
 	}
 	logLines := buf.String()
-	for _, want := range []string{`"msg":"generation request"`, `"model":"claude-opus-4.8"`, `"reasoning_effort":""`, `"reasoning_effort_resolved":"medium"`, `"msg":"request completed"`} {
+	for _, want := range []string{`"msg":"generation started"`, `"endpoint":"chat.completions"`, `"model":"claude-opus-4.8"`, `"reasoning_effort":""`, `"reasoning_effort_resolved":"medium"`, `"msg":"request completed"`} {
 		if !strings.Contains(logLines, want) {
 			t.Fatalf("log lines missing %s: %s", want, logLines)
 		}
 	}
 	if got := strings.Count(logLines, `"reasoning_effort_resolved":"medium"`); got != 2 {
 		t.Fatalf("reasoning_effort_resolved log count = %d, want 2: %s", got, logLines)
+	}
+	if got := strings.Count(logLines, `"endpoint":"chat.completions"`); got != 2 {
+		t.Fatalf("endpoint log count = %d, want 2: %s", got, logLines)
 	}
 }
 
@@ -414,13 +417,16 @@ func TestChatContinuationLoggingDoesNotResolveReasoningEffort(t *testing.T) {
 		t.Fatal("expected ContinueChatToolCalls to be called")
 	}
 	logLines := buf.String()
-	for _, want := range []string{`"msg":"generation request"`, `"continuation":true`, `"reasoning_effort":"high"`} {
+	for _, want := range []string{`"msg":"generation started"`, `"endpoint":"chat.completions"`, `"continuation":true`, `"reasoning_effort":"high"`} {
 		if !strings.Contains(logLines, want) {
 			t.Fatalf("log lines missing %s: %s", want, logLines)
 		}
 	}
 	if strings.Contains(logLines, "reasoning_effort_resolved") {
 		t.Fatalf("continuation log should not include resolved reasoning effort: %s", logLines)
+	}
+	if got := strings.Count(logLines, `"continuation":true`); got != 2 {
+		t.Fatalf("continuation log count = %d, want 2: %s", got, logLines)
 	}
 }
 

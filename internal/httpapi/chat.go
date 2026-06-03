@@ -27,7 +27,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 	if isToolContinuation(messages) {
-		s.logGenerationRequest(r, "chat.completions", req.Model, req.ReasoningEffort, "", false, true)
+		s.logGenerationStarted(r, "chat.completions", req.Model, req.ReasoningEffort, "", false, true)
 		outputs, err := trailingToolOutputs(messages)
 		if err != nil {
 			openai.WriteError(w, err)
@@ -56,7 +56,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
-	s.logGenerationRequest(r, "chat.completions", req.Model, req.ReasoningEffort, resolvedEffort, resolved, false)
+	s.logGenerationStarted(r, "chat.completions", req.Model, req.ReasoningEffort, resolvedEffort, resolved, false)
 	chatReq := copilotgw.ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: req.Model, Instructions: instructions, History: messages[:len(messages)-1], FinalUser: messages[len(messages)-1], Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), ReasoningEffort: req.ReasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
 	if req.Stream {
 		s.streamChat(w, r, chatReq)
