@@ -117,11 +117,13 @@ func TestEffectiveReasoningEffortUsesClosestSupportedDefault(t *testing.T) {
 		want      string
 	}{
 		{name: "same effort", def: "medium", supported: []string{"low", "medium", "high"}, want: "medium"},
+		{name: "none exact supported", def: "none", supported: []string{"none", "low", "medium", "high"}, want: "none"},
 		{name: "rounds high down", def: "high", supported: []string{"low", "medium"}, want: "medium"},
 		{name: "rounds low up", def: "low", supported: []string{"medium", "high"}, want: "medium"},
 		{name: "tie uses lower effort", def: "medium", supported: []string{"low", "high"}, want: "low"},
 		{name: "xhigh rounds down", def: "xhigh", supported: []string{"medium", "high"}, want: "high"},
 		{name: "minimal rounds up", def: "minimal", supported: []string{"low", "medium"}, want: "low"},
+		{name: "none rounds up when unsupported", def: "none", supported: []string{"low", "medium", "high"}, want: "low"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

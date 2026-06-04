@@ -35,6 +35,22 @@ func TestWarmResponseSessionUseInheritsWarmRequestState(t *testing.T) {
 	}
 }
 
+func TestWarmResponseSessionUseAcceptsEquivalentExplicitReasoningEffort(t *testing.T) {
+	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", reasoningEffort: "low"}
+	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", ReasoningEffort: " LOW "}
+	if _, _, _, _, _, ok := warm.use(&req); !ok {
+		t.Fatal("warm session was not used for equivalent explicit reasoning effort")
+	}
+}
+
+func TestWarmResponseSessionUseRejectsMismatchedReasoningEffort(t *testing.T) {
+	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", reasoningEffort: "low"}
+	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", ReasoningEffort: "high"}
+	if _, _, _, _, _, ok := warm.use(&req); ok {
+		t.Fatal("warm session used despite mismatched reasoning effort")
+	}
+}
+
 func TestWarmResponseSessionUseRejectsMismatchedInstructions(t *testing.T) {
 	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", instructions: "original"}
 	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Instructions: "changed"}

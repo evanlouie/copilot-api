@@ -70,9 +70,10 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (*copilot.Session, *tool
 	} else if req.Instructions != w.instructions {
 		return nil, nil, nil, "", nil, false
 	}
-	if req.ReasoningEffort == "" {
+	requestReasoningEffort := cleanReasoningEffort(req.ReasoningEffort)
+	if requestReasoningEffort == "" {
 		req.ReasoningEffort = w.reasoningEffort
-	} else if req.ReasoningEffort != w.reasoningEffort {
+	} else if requestReasoningEffort != w.reasoningEffort {
 		return nil, nil, nil, "", nil, false
 	}
 	if len(req.Tools) == 0 {
@@ -159,6 +160,6 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		_ = session.Disconnect()
 		return nil, openai.Internal(err.Error())
 	}
-	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: req.ReasoningEffort, tools: openai.SupportedTools(req.Tools), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: openai.SupportedTools(req.Tools), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
 	return &WarmResponseResult{Response: resp, WarmSession: warm}, nil
 }

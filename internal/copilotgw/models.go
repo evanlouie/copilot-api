@@ -262,9 +262,6 @@ func closestReasoningEffort(defaultEffort string, model Model) string {
 				return cleanReasoningEffort(effort)
 			}
 		}
-		if defaultEffort == "none" {
-			return ""
-		}
 		defaultRank, ok := reasoningEffortRanks[defaultEffort]
 		if !ok {
 			return ""
