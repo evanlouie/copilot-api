@@ -91,13 +91,13 @@ func (p *Provider) Exists(path string) (bool, error) {
 	return false, err
 }
 
-func (p *Provider) Stat(path string) (*copilot.SessionFsFileInfo, error) {
+func (p *Provider) Stat(path string) (*copilot.SessionFSFileInfo, error) {
 	info, err := os.Stat(p.fullPath(path))
 	if err != nil {
 		return nil, err
 	}
 	ts := info.ModTime().UTC()
-	return &copilot.SessionFsFileInfo{IsFile: !info.IsDir(), IsDirectory: info.IsDir(), Size: info.Size(), Mtime: ts, Birthtime: ts}, nil
+	return &copilot.SessionFSFileInfo{IsFile: !info.IsDir(), IsDirectory: info.IsDir(), Size: info.Size(), Mtime: ts, Birthtime: ts}, nil
 }
 
 func (p *Provider) MakeDirectory(path string, recursive bool, mode *int) error {
@@ -126,18 +126,18 @@ func (p *Provider) ReadDirectory(path string) ([]string, error) {
 	return names, nil
 }
 
-func (p *Provider) ReadDirectoryWithTypes(path string) ([]rpc.SessionFsReaddirWithTypesEntry, error) {
+func (p *Provider) ReadDirectoryWithTypes(path string) ([]rpc.SessionFSReaddirWithTypesEntry, error) {
 	entries, err := os.ReadDir(p.fullPath(path))
 	if err != nil {
 		return nil, err
 	}
-	result := make([]rpc.SessionFsReaddirWithTypesEntry, 0, len(entries))
+	result := make([]rpc.SessionFSReaddirWithTypesEntry, 0, len(entries))
 	for _, entry := range entries {
-		entryType := rpc.SessionFsReaddirWithTypesEntryTypeFile
+		entryType := rpc.SessionFSReaddirWithTypesEntryTypeFile
 		if entry.IsDir() {
-			entryType = rpc.SessionFsReaddirWithTypesEntryTypeDirectory
+			entryType = rpc.SessionFSReaddirWithTypesEntryTypeDirectory
 		}
-		result = append(result, rpc.SessionFsReaddirWithTypesEntry{Name: entry.Name(), Type: entryType})
+		result = append(result, rpc.SessionFSReaddirWithTypesEntry{Name: entry.Name(), Type: entryType})
 	}
 	return result, nil
 }

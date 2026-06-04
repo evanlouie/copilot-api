@@ -179,7 +179,7 @@ func dataURLAttachment(raw string, index int, limits *VisionLimits, param string
 		return nil, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
 	}
 	displayName := imageDisplayName(index, mediaType, "")
-	return copilot.UserMessageAttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
+	return copilot.AttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
 }
 
 func remoteImageAttachment(ctx context.Context, u *url.URL, index int, limits *VisionLimits, param string) (copilot.Attachment, error) {
@@ -214,7 +214,7 @@ func remoteImageAttachment(ctx context.Context, u *url.URL, index int, limits *V
 	}
 	data := base64.StdEncoding.EncodeToString(body)
 	displayName := imageDisplayName(index, mediaType, path.Base(u.Path))
-	return copilot.UserMessageAttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
+	return copilot.AttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
 }
 
 func parseImageDataURL(raw string) (string, string, error) {

@@ -74,7 +74,7 @@ func TestSDKTokenLimits(t *testing.T) {
 	prompt := 120000
 
 	limits := sdkTokenLimits(copilot.ModelLimits{
-		MaxContextWindowTokens: 128000,
+		MaxContextWindowTokens: copilot.Int(128000),
 		MaxPromptTokens:        &prompt,
 	})
 	if limits == nil {
@@ -88,6 +88,43 @@ func TestSDKTokenLimits(t *testing.T) {
 	}
 	if limits.MaxOutputTokens != nil {
 		t.Fatalf("MaxOutputTokens = %d, want nil", *limits.MaxOutputTokens)
+	}
+}
+
+func TestSDKTokenLimitsNilContextWindow(t *testing.T) {
+	prompt := 8192
+
+	limits := sdkTokenLimits(copilot.ModelLimits{
+		MaxContextWindowTokens: nil,
+		MaxPromptTokens:        &prompt,
+	})
+	if limits == nil {
+		t.Fatal("expected token limits when MaxPromptTokens is set")
+	}
+	if limits.MaxContextWindowTokens != nil {
+		t.Fatalf("MaxContextWindowTokens = %d, want nil", *limits.MaxContextWindowTokens)
+	}
+	if limits.MaxPromptTokens == nil || *limits.MaxPromptTokens != int64(prompt) {
+		t.Fatalf("MaxPromptTokens = %v, want %d", limits.MaxPromptTokens, prompt)
+	}
+}
+
+func TestSDKTokenLimitsZeroContextWindowSuppressed(t *testing.T) {
+	// A pointer to zero must be treated as "unknown" for context-window
+	// limits, matching the pre-v1.0.0 SDK semantics where the field was a
+	// plain int and v <= 0 was suppressed.
+	limits := sdkTokenLimits(copilot.ModelLimits{
+		MaxContextWindowTokens: copilot.Int(0),
+		MaxPromptTokens:        nil,
+	})
+	if limits != nil {
+		t.Fatalf("expected nil token limits, got %#v", limits)
+	}
+}
+
+func TestSDKTokenLimitsAllNil(t *testing.T) {
+	if got := sdkTokenLimits(copilot.ModelLimits{}); got != nil {
+		t.Fatalf("expected nil token limits when all fields are nil, got %#v", got)
 	}
 }
 
@@ -240,8 +277,8 @@ func TestRealClientOptionsUseV1ModeEmpty(t *testing.T) {
 	if opts.BaseDirectory != cfg.ConfigDir {
 		t.Fatalf("BaseDirectory = %q, want %q", opts.BaseDirectory, cfg.ConfigDir)
 	}
-	if opts.SessionFs == nil {
-		t.Fatal("SessionFs is nil")
+	if opts.SessionFS == nil {
+		t.Fatal("SessionFS is nil")
 	}
 }
 
@@ -285,9 +322,7 @@ func assertCreateSessionHardening(t *testing.T, cfg *copilot.SessionConfig) {
 	if cfg.ConfigDirectory != "/tmp/config" {
 		t.Fatalf("ConfigDirectory = %q, want /tmp/config", cfg.ConfigDirectory)
 	}
-	if cfg.EnableConfigDiscovery {
-		t.Fatal("EnableConfigDiscovery = true, want false")
-	}
+	assertFalsePtr(t, "EnableConfigDiscovery", cfg.EnableConfigDiscovery)
 	if cfg.MCPServers == nil || len(cfg.MCPServers) != 0 {
 		t.Fatalf("MCPServers = %#v, want non-nil empty map", cfg.MCPServers)
 	}
@@ -307,8 +342,8 @@ func assertCreateSessionHardening(t *testing.T, cfg *copilot.SessionConfig) {
 	if cfg.OnEvent == nil {
 		t.Fatal("OnEvent is nil")
 	}
-	if cfg.CreateSessionFsProvider == nil {
-		t.Fatal("CreateSessionFsProvider is nil")
+	if cfg.CreateSessionFSProvider == nil {
+		t.Fatal("CreateSessionFSProvider is nil")
 	}
 }
 
@@ -323,9 +358,7 @@ func assertResumeSessionHardening(t *testing.T, cfg *copilot.ResumeSessionConfig
 	if cfg.ConfigDirectory != "/tmp/config" {
 		t.Fatalf("ConfigDirectory = %q, want /tmp/config", cfg.ConfigDirectory)
 	}
-	if cfg.EnableConfigDiscovery {
-		t.Fatal("EnableConfigDiscovery = true, want false")
-	}
+	assertFalsePtr(t, "EnableConfigDiscovery", cfg.EnableConfigDiscovery)
 	if cfg.MCPServers == nil || len(cfg.MCPServers) != 0 {
 		t.Fatalf("MCPServers = %#v, want non-nil empty map", cfg.MCPServers)
 	}
@@ -345,8 +378,8 @@ func assertResumeSessionHardening(t *testing.T, cfg *copilot.ResumeSessionConfig
 	if cfg.OnEvent == nil {
 		t.Fatal("OnEvent is nil")
 	}
-	if cfg.CreateSessionFsProvider == nil {
-		t.Fatal("CreateSessionFsProvider is nil")
+	if cfg.CreateSessionFSProvider == nil {
+		t.Fatal("CreateSessionFSProvider is nil")
 	}
 }
 

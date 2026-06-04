@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/coder/websocket v1.8.14
-	github.com/github/copilot-sdk/go v1.0.0-beta.10
+	github.com/github/copilot-sdk/go v1.0.0
 	github.com/google/uuid v1.6.0
 )
 

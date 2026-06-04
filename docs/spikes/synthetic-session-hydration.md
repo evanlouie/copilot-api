@@ -2,11 +2,11 @@
 
 Date: 2026-05-29
 
-Current v1 readiness note: the implementation now targets `github.com/github/copilot-sdk/go v1.0.0-beta.10`. Local module tags currently stop at beta releases, so a stable Go `v1.0.0` tag is not available locally yet. The original live experiment below was run against SDK `v0.3.0`; the compatibility lessons still apply, but code and docs should use the v1 names: `InitialWorkingDirectory`, `CreateSessionFsProvider`, `ConfigDirectory`, and `SessionFs...`.
+Current v1 readiness note: the implementation now targets `github.com/github/copilot-sdk/go v1.0.0`. The original live experiment below was run against SDK `v0.3.0`; the compatibility lessons still apply, but code and docs should use the v1 names: `InitialWorkingDirectory`, `CreateSessionFSProvider`, `ConfigDirectory`, and `SessionFS...`.
 
 ## Verdict
 
-**Feasible with caveats.** A synthetic `/session-state/events.jsonl` created through an isolated `SessionFsProvider` can be resumed by the GitHub Copilot SDK, and the resumed model uses the seeded events as conversation context, not merely UI/history. This was proven with live model calls for:
+**Feasible with caveats.** A synthetic `/session-state/events.jsonl` created through an isolated `SessionFSProvider` can be resumed by the GitHub Copilot SDK, and the resumed model uses the seeded events as conversation context, not merely UI/history. This was proven with live model calls for:
 
 - ordinary prior `user.message` + `assistant.message` turns; and
 - a synthetic prior assistant tool-call turn with `tool.execution_start` + `tool.execution_complete` result.
@@ -15,21 +15,21 @@ Recommendation: **use synthetic hydration as the preferred path for Chat Complet
 
 ## SDK source and tests inspected
 
-Current SDK path: `$(go env GOPATH)/pkg/mod/github.com/github/copilot-sdk/go@v1.0.0-beta.10`
+Current SDK path: `$(go env GOPATH)/pkg/mod/github.com/github/copilot-sdk/go@v1.0.0`
 
 Key files:
 
 - `session_fs_provider.go`
-  - Defines `SessionFsProvider` with `ReadFile`, `WriteFile`, `AppendFile`, `Exists`, `Stat`, `MakeDirectory`, `ReadDirectory`, `ReadDirectoryWithTypes`, `Remove`, `Rename`.
-  - The adapter maps Go filesystem errors to RPC `SessionFsError`s. This is the hook that lets this project own a per-session virtual filesystem and seed `/session-state/events.jsonl` before `session.resume`.
+  - Defines `SessionFSProvider` with `ReadFile`, `WriteFile`, `AppendFile`, `Exists`, `Stat`, `MakeDirectory`, `ReadDirectory`, `ReadDirectoryWithTypes`, `Remove`, `Rename`.
+  - The adapter maps Go filesystem errors to RPC `SessionFSError`s. This is the hook that lets this project own a per-session virtual filesystem and seed `/session-state/events.jsonl` before `session.resume`.
 - `client.go`
-  - `CreateSession` and `ResumeSessionWithOptions` both register the per-session `SessionFs` adapter before issuing `session.create` / `session.resume` RPCs.
-  - When `ClientOptions.SessionFs` is configured, `CreateSessionFsProvider` is required in both create and resume configs.
+  - `CreateSession` and `ResumeSessionWithOptions` both register the per-session `SessionFS` adapter before issuing `session.create` / `session.resume` RPCs.
+  - When `ClientOptions.SessionFS` is configured, `CreateSessionFSProvider` is required in both create and resume configs.
   - `ResumeSessionWithOptions` forwards `SystemMessage`, `Tools`, `AvailableTools`, `ExcludedTools`, `WorkingDirectory`, `ConfigDirectory`, `DisableResume`, etc. into the resume RPC.
 - `types.go`
-  - `SessionFsConfig` has `InitialWorkingDirectory`, `SessionStatePath`, and `Conventions`.
+  - `SessionFSConfig` has `InitialWorkingDirectory`, `SessionStatePath`, and `Conventions`.
   - `SystemMessageConfig{Mode: "replace", Content: ...}` is the SDK path for replacing, not appending to, the SDK-managed system prompt.
-  - `SessionConfig` / `ResumeSessionConfig` support `CreateSessionFsProvider`, `AvailableTools`, request-scoped `Tools`, and `OnPermissionRequest`.
+  - `SessionConfig` / `ResumeSessionConfig` support `CreateSessionFSProvider`, `AvailableTools`, request-scoped `Tools`, and `OnPermissionRequest`.
 - `rpc/zsession_events.go`
   - Defines the persisted event envelope and typed payloads for `session.start`, `session.resume`, `system.message`, `user.message`, `assistant.message`, `assistant.turn_start`, `assistant.turn_end`, `tool.execution_start`, `tool.execution_complete`, etc.
 - `internal/e2e/session_fs_e2e_test.go`
@@ -67,7 +67,7 @@ I therefore used the SDK bundler to embed the matching CLI version auto-detected
 
 Program created a real session with:
 
-- custom `SessionFsProvider` rooted at `/tmp/copilot-synth-spike/state`;
+- custom `SessionFSProvider` rooted at `/tmp/copilot-synth-spike/state`;
 - `SystemMessageConfig{Mode: "replace", Content: "You are a neutral chat completion model..."}`;
 - no custom tools and a denying permission handler;
 - `AvailableTools: []string{"__none__"}` to avoid exposing built-ins during the probe.
@@ -419,7 +419,7 @@ Parallel tool calls: the event schema allows `toolRequests: []` and one executio
 
 Update the plan from “serialize OpenAI messages into one prompt transcript” to:
 
-1. **Primary path:** synthetic session hydration via project-owned `SessionFsProvider`, then `ResumeSession` and send only the latest user/input turn.
+1. **Primary path:** synthetic session hydration via project-owned `SessionFSProvider`, then `ResumeSession` and send only the latest user/input turn.
 2. **Safety path:** always use `SystemMessageConfig{Mode:"replace"}` and tool-denying defaults; register only request-scoped client proxy tools when the request includes OpenAI tools.
 3. **Fallback path:** transcript serialization remains available when hydration fails, schema validation rejects a history shape, SDK/CLI version changes break tests, or a history feature is not yet mapped.
 
@@ -427,7 +427,7 @@ This should improve role-native history handling while preserving the hard produ
 
 ## Next concrete implementation tasks
 
-1. Add an internal `SessionFsProvider` implementation backed by a per-request/session directory or in-memory filesystem with atomic write/append and per-session locking.
+1. Add an internal `SessionFSProvider` implementation backed by a per-request/session directory or in-memory filesystem with atomic write/append and per-session locking.
 2. Define an internal OpenAI-message-to-SDK-event hydrator:
    - system/developer -> replacement `SystemMessageConfig` first; optionally `system.message` only when needed;
    - user -> `user.message`;

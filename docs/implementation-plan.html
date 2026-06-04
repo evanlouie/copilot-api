@@ -473,7 +473,7 @@
       <div class="meta-grid" aria-label="Project metadata">
         <div class="meta-card"><b>Repository</b>copilot-api</div>
         <div class="meta-card"><b>Language</b>Go 1.26.3</div>
-        <div class="meta-card"><b>SDK target</b>github/copilot-sdk/go v1.0.0-beta.10</div>
+        <div class="meta-card"><b>SDK target</b>github/copilot-sdk/go v1.0.0</div>
         <div class="meta-card"><b>Prepared</b>2026-05-29</div>
       </div>
     </header>
@@ -612,7 +612,7 @@
               <h4>Copilot integration layer</h4>
               <ul>
                 <li>Embedded/matched CLI startup, ping, readiness, model cache, and SDK client lifecycle.</li>
-                <li>Synthetic Chat hydration through a project-owned <span class="kbd">SessionFsProvider</span>.</li>
+                <li>Synthetic Chat hydration through a project-owned <span class="kbd">SessionFSProvider</span>.</li>
                 <li>Responses SDK session reuse, parked tool handlers, and event collection.</li>
               </ul>
             </div>
@@ -626,7 +626,7 @@ internal/httpapi/                # routes, middleware, Chat/Responses handlers, 
 internal/openai/                 # OpenAI request/response/SSE schemas, errors, validation, and IDs
 internal/copilotgw/              # Copilot SDK client/session gateway, models, Chat, Responses, continuations
 internal/hydration/              # versioned OpenAI messages → SDK events.jsonl generator/validator
-internal/sessionfs/              # project-owned SessionFsProvider backed by XDG data dirs
+internal/sessionfs/              # project-owned SessionFSProvider backed by XDG data dirs
 internal/toolproxy/              # client-defined tool schemas, opaque aliases, pending batches
 internal/sessionstore/           # metadata.json, response lookup, locks, purge support
 internal/observability/          # request correlation and redaction helpers</code></pre>
@@ -887,7 +887,7 @@ func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
                 <ul>
                   <li>Implement <span class="kbd">Gateway</span> interface for model listing and single-turn generation.</li>
                   <li>Manage one SDK client per process with startup, ping/readiness, model cache, and clean stop on shutdown.</li>
-                  <li>Implement project-owned <span class="kbd">SessionFsProvider</span>, metadata storage, and retained session layout under XDG data/state/cache directories.</li>
+                  <li>Implement project-owned <span class="kbd">SessionFSProvider</span>, metadata storage, and retained session layout under XDG data/state/cache directories.</li>
                   <li>Add <span class="kbd">internal/hydration</span> for versioned synthetic Chat event generation and validation.</li>
                   <li>Add <span class="kbd">internal/toolproxy</span> abstractions for request-scoped proxy tool registration, parked pending batches, and client-output continuations.</li>
                   <li>Collect assistant text, deltas, reasoning events, tool requests, usage, idle, and error events without adding proxy concurrency caps.</li>
@@ -1188,7 +1188,7 @@ copilot-api purge --dry-run</code></pre>
     </div>
 
     <p class="footer">
-      Source context: repository instructions in <span class="kbd">AGENTS.md</span>, module metadata in <span class="kbd">go.mod</span>, local GitHub Copilot SDK v1.0.0-beta.10 documentation, latest local module tags showing no stable Go <span class="kbd">v1.0.0</span> release yet, and spike reports in <span class="kbd">spikes/</span>.
+      Source context: repository instructions in <span class="kbd">AGENTS.md</span>, module metadata in <span class="kbd">go.mod</span>, local GitHub Copilot SDK v1.0.0 documentation, and spike reports in <span class="kbd">spikes/</span>.
     </p>
   </div>
 </body>

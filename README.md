@@ -11,9 +11,7 @@ replacement-mode prompts, Copilot SDK tools disabled by default, OpenAI-shaped
 errors, synthetic Chat history hydration, Responses continuity, client-owned
 function tool execution, SSE streaming, XDG storage, and manual purge.
 
-Current SDK target: `github.com/github/copilot-sdk/go v1.0.0-beta.10`. As of the
-latest locally available module tags, a stable Go `v1.0.0` tag is not available
-yet.
+Current SDK target: `github.com/github/copilot-sdk/go v1.0.0`.
 
 ## Quick start
 

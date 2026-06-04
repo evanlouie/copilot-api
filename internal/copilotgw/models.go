@@ -116,7 +116,7 @@ func sdkVisionLimits(limits *copilot.ModelVisionLimits) *VisionLimits {
 }
 func sdkTokenLimits(limits copilot.ModelLimits) *TokenLimits {
 	out := &TokenLimits{
-		MaxContextWindowTokens: positiveIntToInt64Ptr(limits.MaxContextWindowTokens),
+		MaxContextWindowTokens: positiveIntPtrToInt64Ptr(limits.MaxContextWindowTokens),
 		MaxPromptTokens:        intPtrToInt64Ptr(limits.MaxPromptTokens),
 	}
 	if out.empty() {
@@ -141,11 +141,16 @@ func intPtrToInt64Ptr(v *int) *int64 {
 	out := int64(*v)
 	return &out
 }
-func positiveIntToInt64Ptr(v int) *int64 {
-	if v <= 0 {
+
+// positiveIntPtrToInt64Ptr converts an *int to *int64, treating nil or
+// non-positive values as "unknown" (nil). It mirrors the historical
+// suppression behavior used for context-window-style limits where 0 carries
+// no meaningful signal to OpenAI clients.
+func positiveIntPtrToInt64Ptr(v *int) *int64 {
+	if v == nil || *v <= 0 {
 		return nil
 	}
-	out := int64(v)
+	out := int64(*v)
 	return &out
 }
 func modelMetadata(name string, supportsVision bool, visionKnown bool, limits *TokenLimits, vision *VisionLimits) map[string]any {

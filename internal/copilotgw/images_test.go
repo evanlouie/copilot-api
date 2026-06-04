@@ -153,18 +153,18 @@ func TestResolvePromptRejectsUnsupportedMIME(t *testing.T) {
 	}
 }
 
-func requireBlobAttachment(t *testing.T, attachment copilot.Attachment) copilot.UserMessageAttachmentBlob {
+func requireBlobAttachment(t *testing.T, attachment copilot.Attachment) copilot.AttachmentBlob {
 	t.Helper()
 	switch a := attachment.(type) {
-	case copilot.UserMessageAttachmentBlob:
+	case copilot.AttachmentBlob:
 		return a
-	case *copilot.UserMessageAttachmentBlob:
+	case *copilot.AttachmentBlob:
 		if a == nil {
 			t.Fatal("attachment is nil")
 		}
 		return *a
 	default:
 		t.Fatalf("unexpected attachment type %T", attachment)
-		return copilot.UserMessageAttachmentBlob{}
+		return copilot.AttachmentBlob{}
 	}
 }

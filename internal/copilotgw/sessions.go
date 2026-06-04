@@ -76,7 +76,7 @@ func (g *RealGateway) newResumeSessionConfig(model, instructions, reasoning stri
 type sessionRuntimeDefaults struct {
 	workingDirectory               string
 	configDirectory                string
-	enableConfigDiscovery          bool
+	enableConfigDiscovery          *bool
 	mcpServers                     map[string]copilot.MCPServerConfig
 	skillDirectories               []string
 	disabledSkills                 []string
@@ -84,7 +84,7 @@ type sessionRuntimeDefaults struct {
 	streaming                      *bool
 	includeSubAgentStreamingEvents *bool
 	onEvent                        copilot.SessionEventHandler
-	createSessionFsProvider        func(session *copilot.Session) copilot.SessionFsProvider
+	createSessionFSProvider        func(session *copilot.Session) copilot.SessionFSProvider
 	skipCustomInstructions         *bool
 	enableHostGitOperations        *bool
 	enableSessionStore             *bool
@@ -98,7 +98,7 @@ func (g *RealGateway) sessionRuntimeDefaults(streaming bool, events chan<- copil
 	return sessionRuntimeDefaults{
 		workingDirectory:               "/",
 		configDirectory:                g.cfg.ConfigDir,
-		enableConfigDiscovery:          false,
+		enableConfigDiscovery:          copilot.Bool(false),
 		mcpServers:                     map[string]copilot.MCPServerConfig{},
 		skillDirectories:               nil,
 		disabledSkills:                 []string{"*"},
@@ -106,7 +106,7 @@ func (g *RealGateway) sessionRuntimeDefaults(streaming bool, events chan<- copil
 		streaming:                      copilot.Bool(streaming),
 		includeSubAgentStreamingEvents: copilot.Bool(false),
 		onEvent:                        func(e copilot.SessionEvent) { sendEvent(events, e) },
-		createSessionFsProvider:        func(session *copilot.Session) copilot.SessionFsProvider { return g.fs.Provider(session.SessionID) },
+		createSessionFSProvider:        func(session *copilot.Session) copilot.SessionFSProvider { return g.fs.Provider(session.SessionID) },
 		skipCustomInstructions:         copilot.Bool(true),
 		enableHostGitOperations:        copilot.Bool(false),
 		enableSessionStore:             copilot.Bool(false),
@@ -127,7 +127,7 @@ func (d sessionRuntimeDefaults) applyCreate(cfg *copilot.SessionConfig) {
 	cfg.Streaming = d.streaming
 	cfg.IncludeSubAgentStreamingEvents = d.includeSubAgentStreamingEvents
 	cfg.OnEvent = d.onEvent
-	cfg.CreateSessionFsProvider = d.createSessionFsProvider
+	cfg.CreateSessionFSProvider = d.createSessionFSProvider
 	cfg.SkipCustomInstructions = d.skipCustomInstructions
 	cfg.EnableHostGitOperations = d.enableHostGitOperations
 	cfg.EnableSessionStore = d.enableSessionStore
@@ -147,7 +147,7 @@ func (d sessionRuntimeDefaults) applyResume(cfg *copilot.ResumeSessionConfig) {
 	cfg.Streaming = d.streaming
 	cfg.IncludeSubAgentStreamingEvents = d.includeSubAgentStreamingEvents
 	cfg.OnEvent = d.onEvent
-	cfg.CreateSessionFsProvider = d.createSessionFsProvider
+	cfg.CreateSessionFSProvider = d.createSessionFSProvider
 	cfg.SkipCustomInstructions = d.skipCustomInstructions
 	cfg.EnableHostGitOperations = d.enableHostGitOperations
 	cfg.EnableSessionStore = d.enableSessionStore

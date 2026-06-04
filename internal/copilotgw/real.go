@@ -48,10 +48,10 @@ func newRealClientOptions(cfg config.Config) *copilot.ClientOptions {
 		LogLevel:         "error",
 		GitHubToken:      cfg.GitHubToken,
 		Mode:             copilot.ModeEmpty,
-		SessionFs: &copilot.SessionFsConfig{
+		SessionFS: &copilot.SessionFSConfig{
 			InitialWorkingDirectory: "/",
 			SessionStatePath:        sessionfs.SessionStatePath,
-			Conventions:             rpc.SessionFsSetProviderConventionsPosix,
+			Conventions:             rpc.SessionFSSetProviderConventionsPosix,
 		},
 	}
 }

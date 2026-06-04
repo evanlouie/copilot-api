@@ -2,7 +2,7 @@
 
 Date: 2026-05-29
 
-Current v1 readiness note: the implementation now targets `github.com/github/copilot-sdk/go v1.0.0-beta.10`. Local module tags currently stop at beta releases, so a stable Go `v1.0.0` tag is not available locally yet. The v1 beta generated RPC shape includes a lower-level `RequiredTool` availability check, but the public `MessageOptions` path used by this service does not expose it, and it still is not an OpenAI-compatible way to force the model to call a function or require tool use for a turn.
+Current v1 readiness note: the implementation now targets `github.com/github/copilot-sdk/go v1.0.0`. The v1 generated RPC shape includes a lower-level `RequiredTool` availability check, but the public `MessageOptions` path used by this service does not expose it, and it still is not an OpenAI-compatible way to force the model to call a function or require tool use for a turn.
 
 ## Verdict
 
@@ -22,7 +22,7 @@ Recommended MVP stance: claim support for `auto` and `none`; treat forced specif
 
 ## SDK / RPC source findings
 
-Searched `github.com/github/copilot-sdk/go@v1.0.0-beta.10` for `tool_choice`, `toolChoice`, `function_call`, `parallel_tool`, `required`, provider request controls, and RPC structs. The original experiment was performed against `v0.3.0`; the source-level conclusion remains the same for OpenAI-compatible tool-choice semantics.
+Searched `github.com/github/copilot-sdk/go@v1.0.0` for `tool_choice`, `toolChoice`, `function_call`, `parallel_tool`, `required`, provider request controls, and RPC structs. The original experiment was performed against `v0.3.0`; the source-level conclusion remains the same for OpenAI-compatible tool-choice semantics.
 
 Findings:
 
@@ -247,4 +247,4 @@ Next steps:
 1. Implement `auto`/omitted and `none` using tool availability filtering only.
 2. Decide product/API stance for forced function and `required`: recommended fail closed with a clear unsupported error.
 3. Add regression tests around outbound provider request shape using a local provider capture: no `tool_choice`, `tools: []` for `none`, only selected alias for best-effort forced if ever enabled.
-4. Re-run this spike when upgrading beyond SDK `v1.0.0-beta.10` or when a stable Go `v1.0.0` tag becomes available.
+4. Re-run this spike when upgrading beyond SDK `v1.0.0`.
