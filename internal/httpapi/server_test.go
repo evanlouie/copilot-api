@@ -9,8 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/observability"
@@ -40,6 +44,94 @@ func (g *codexStreamGateway) StreamResponse(_ context.Context, req copilotgw.Res
 		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, OutputText: "ok", Output: []openai.ResponseOutputItem{{ID: "msg_final", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "ok"}}}}, ParallelToolCalls: true, Store: req.Store}}
 	}()
 	return ch, nil
+}
+
+type websocketStreamGateway struct {
+	copilotgw.Gateway
+	mu             sync.Mutex
+	got            []copilotgw.ResponseRequest
+	text           string
+	started        chan struct{}
+	release        <-chan struct{}
+	functionCall   bool
+	errorAfterText error
+}
+
+func (g *websocketStreamGateway) StreamResponse(ctx context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
+	g.mu.Lock()
+	g.got = append(g.got, req)
+	text := g.text
+	if text == "" {
+		text = "ok"
+	}
+	started := g.started
+	release := g.release
+	functionCall := g.functionCall
+	errorAfterText := g.errorAfterText
+	g.mu.Unlock()
+	if started != nil {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+	}
+	ch := make(chan copilotgw.ResponseStreamEvent, 2)
+	go func() {
+		defer close(ch)
+		if release != nil {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if functionCall {
+			ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, Output: []openai.ResponseOutputItem{{ID: "fc_call_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "lookup", Arguments: `{"q":"alpha"}`}}, ParallelToolCalls: true, PreviousResponseID: previousResponsePtr(req.PreviousResponseID), Store: req.Store}}
+			return
+		}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: text}
+		if errorAfterText != nil {
+			ch <- copilotgw.ResponseStreamEvent{Kind: "error", Error: errorAfterText}
+			return
+		}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, OutputText: text, Output: []openai.ResponseOutputItem{{ID: "msg_final", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: text}}}}, ParallelToolCalls: true, PreviousResponseID: previousResponsePtr(req.PreviousResponseID), Store: req.Store}}
+	}()
+	return ch, nil
+}
+
+func (g *websocketStreamGateway) WarmResponse(_ context.Context, req copilotgw.ResponseRequest) (*copilotgw.WarmResponseResult, error) {
+	g.mu.Lock()
+	g.got = append(g.got, req)
+	g.mu.Unlock()
+	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previousResponsePtr(req.PreviousResponseID), Store: req.Store}
+	return &copilotgw.WarmResponseResult{Response: resp}, nil
+}
+
+func (g *websocketStreamGateway) requests() []copilotgw.ResponseRequest {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]copilotgw.ResponseRequest, len(g.got))
+	copy(out, g.got)
+	return out
+}
+
+func previousResponsePtr(id string) *string {
+	if id == "" {
+		return nil
+	}
+	return &id
+}
+
+type errorResponseGateway struct {
+	copilotgw.Gateway
+	err error
+	got copilotgw.ResponseRequest
+}
+
+func (g *errorResponseGateway) StreamResponse(_ context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
+	g.got = req
+	return nil, g.err
 }
 
 type captureChatGateway struct {
@@ -632,6 +724,32 @@ func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *test
 	}
 }
 
+func TestResponsesRequestAllowsMixedFunctionOutputsAndNewInput(t *testing.T) {
+	gw := &captureResponseGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := strings.NewReader(`{
+		"model":"gpt-5",
+		"previous_response_id":"resp_previous",
+		"input":[
+			{"type":"function_call_output","call_id":"call_1","output":"tool result"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Now optimize it."}]}
+		]
+	}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := gw.got.FunctionOutputs["call_1"]; got != "tool result" {
+		t.Fatalf("FunctionOutputs[call_1] = %q, want tool result", got)
+	}
+	if gw.got.Input.Text != "Now optimize it." {
+		t.Fatalf("Input.Text = %q, want mixed continuation prompt", gw.got.Input.Text)
+	}
+}
+
 func TestResponsesStreamEmitsFunctionCallEventsAndCompletedResponse(t *testing.T) {
 	gw := &functionCallStreamGateway{}
 	s := New(config.Config{}, gw, slog.Default())
@@ -666,6 +784,313 @@ func TestResponsesStreamEmitsFunctionCallEventsAndCompletedResponse(t *testing.T
 			t.Fatalf("response stream missing %s:\n%s", want, out)
 		}
 	}
+}
+
+func TestResponsesWebSocketNonUpgradeRequiresUpgrade(t *testing.T) {
+	s := New(config.Config{}, &websocketStreamGateway{}, slog.Default())
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/responses", nil))
+
+	if w.Code != http.StatusUpgradeRequired {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusUpgradeRequired, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"websocket_upgrade_required"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestResponsesWebSocketStreamsResponseCreateAndAllowsLatestStoreFalseContinuation(t *testing.T) {
+	gw := &websocketStreamGateway{text: "pong"}
+	s := New(config.Config{}, gw, slog.Default())
+	hts := httptest.NewServer(s.Handler())
+	defer hts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hts.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "store": false, "stream": false, "background": true, "input": "ping"}); err != nil {
+		t.Fatal(err)
+	}
+	first := readUntilResponseCompleted(t, ctx, conn)
+	if first == nil || first.ID == "" || first.OutputText != "pong" || first.Store {
+		t.Fatalf("first response = %#v, want store:false completed pong", first)
+	}
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "store": false, "previous_response_id": first.ID, "input": "again"}); err != nil {
+		t.Fatal(err)
+	}
+	second := readUntilResponseCompleted(t, ctx, conn)
+	if second == nil || second.PreviousResponseID == nil || *second.PreviousResponseID != first.ID {
+		t.Fatalf("second response previous_response_id = %#v, want %s", second, first.ID)
+	}
+
+	requests := gw.requests()
+	if len(requests) != 2 {
+		t.Fatalf("gateway requests = %d, want 2", len(requests))
+	}
+	if requests[1].PreviousResponseID != first.ID {
+		t.Fatalf("second request previous_response_id = %q, want %s", requests[1].PreviousResponseID, first.ID)
+	}
+}
+
+func TestResponsesWebSocketSupportsNestedResponsePayloadAndMergesEnvelopeFields(t *testing.T) {
+	gw := &websocketStreamGateway{text: "nested-ok"}
+	conn, cleanup := newResponsesWebSocketConn(t, gw)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_nested", "model": "ignored-by-nested", "instructions": "from envelope", "response": map[string]any{"model": "gpt-5", "input": "hi", "store": false, "stream": true, "background": true}}); err != nil {
+		t.Fatal(err)
+	}
+	resp := readUntilResponseCompleted(t, ctx, conn)
+	if resp == nil || resp.Model != "gpt-5" || resp.Store || resp.OutputText != "nested-ok" {
+		t.Fatalf("response = %#v, want nested gpt-5 store:false", resp)
+	}
+	requests := gw.requests()
+	if len(requests) != 1 || requests[0].Model != "gpt-5" || requests[0].Input.Text != "hi" || requests[0].Instructions != "from envelope" {
+		t.Fatalf("gateway request = %#v, want merged envelope+nested fields", requests)
+	}
+}
+
+func TestResponsesWebSocketGenerateFalseWarmsSessionAndReturnsCompletedResponse(t *testing.T) {
+	gw := &websocketStreamGateway{}
+	conn, cleanup := newResponsesWebSocketConn(t, gw)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_generate", "generate": false, "response": map[string]any{"model": "gpt-5", "input": "hi", "store": false}}); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	var final *openai.Response
+	for {
+		ev := readWebSocketEvent(t, ctx, conn)
+		got = append(got, ev.Type)
+		if ev.Type == "response.completed" {
+			final = ev.Response
+			break
+		}
+	}
+	want := []string{"response.created", "response.in_progress", "response.completed"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("event order = %v, want %v", got, want)
+	}
+	if final == nil || final.ID == "" || final.OutputText != "" || len(final.Output) != 0 || final.Store {
+		t.Fatalf("warm response = %#v, want empty store:false response", final)
+	}
+	requests := gw.requests()
+	if len(requests) != 1 || requests[0].Input.Text != "hi" {
+		t.Fatalf("gateway warm request = %#v, want input hi", requests)
+	}
+}
+
+func TestResponsesWebSocketEmitsTextEventsInOrder(t *testing.T) {
+	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{text: "hello"})
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for {
+		ev := readWebSocketEvent(t, ctx, conn)
+		got = append(got, ev.Type)
+		if ev.Type == "response.completed" {
+			break
+		}
+	}
+	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.output_text.delta", "response.output_text.done", "response.output_item.done", "response.completed"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("event order = %v, want %v", got, want)
+	}
+}
+
+func TestResponsesWebSocketEmitsFunctionCallEvents(t *testing.T) {
+	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{functionCall: true})
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": "call lookup"}); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for {
+		ev := readWebSocketEvent(t, ctx, conn)
+		got = append(got, ev.Type)
+		if ev.Type == "response.completed" {
+			break
+		}
+	}
+	for _, want := range []string{"response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"} {
+		if !containsString(got, want) {
+			t.Fatalf("events %v missing %s", got, want)
+		}
+	}
+}
+
+func TestResponsesWebSocketStreamErrorClosesTextItemAndFailsResponse(t *testing.T) {
+	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{text: "partial", errorAfterText: openai.Upstream("boom")})
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for {
+		ev := readWebSocketEvent(t, ctx, conn)
+		got = append(got, ev.Type)
+		if ev.Type == "response.failed" {
+			if ev.Response == nil || ev.Response.Status != "failed" {
+				t.Fatalf("failed event = %#v", ev)
+			}
+			continue
+		}
+		if ev.Type == "error" {
+			if ev.Error == nil || ev.Error.Code != "upstream_error" {
+				t.Fatalf("terminal error event = %#v, want upstream_error", ev)
+			}
+			break
+		}
+	}
+	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.output_text.delta", "response.output_text.done", "response.output_item.done", "response.failed", "error"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("event order = %v, want %v", got, want)
+	}
+}
+
+func TestResponsesWebSocketRejectsConcurrentResponseCreate(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{started: started, release: release})
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_first", "model": "gpt-5", "input": "wait"}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_second", "model": "gpt-5", "input": "too soon"}); err != nil {
+		t.Fatal(err)
+	}
+	var ev openai.ResponseStreamEvent
+	for {
+		ev = readWebSocketEvent(t, ctx, conn)
+		if ev.Type == "error" {
+			break
+		}
+	}
+	if ev.EventID != "evt_second" || ev.Error == nil || !strings.Contains(ev.Error.Message, "only one") {
+		t.Fatalf("event = %#v, want active response error for evt_second", ev)
+	}
+	close(release)
+	_ = readUntilResponseCompleted(t, ctx, conn)
+}
+
+func TestResponsesWebSocketPreGenerationErrorsUseTopLevelError(t *testing.T) {
+	gw := &errorResponseGateway{err: openai.PreviousResponseNotFound("resp_missing")}
+	conn, cleanup := newResponsesWebSocketConn(t, gw)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_missing", "model": "gpt-5", "previous_response_id": "resp_missing", "input": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	ev := readWebSocketErrorEvent(t, ctx, conn)
+	if ev.Type != "error" || ev.EventID != "evt_missing" || ev.Status != http.StatusBadRequest || ev.Error.Code != "previous_response_not_found" || ev.Error.Param != "previous_response_id" {
+		t.Fatalf("error event = %#v, want previous_response_not_found", ev)
+	}
+}
+
+func TestResponsesWebSocketUnknownEventReturnsErrorFrame(t *testing.T) {
+	s := New(config.Config{}, &websocketStreamGateway{}, slog.Default())
+	hts := httptest.NewServer(s.Handler())
+	defer hts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hts.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "session.update", "event_id": "evt_unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	ev := readWebSocketEvent(t, ctx, conn)
+	if ev.Type != "error" || ev.EventID != "evt_unknown" || ev.Error == nil || ev.Error.Type != "invalid_request_error" {
+		t.Fatalf("event = %#v, want invalid_request_error frame", ev)
+	}
+}
+
+func newResponsesWebSocketConn(t *testing.T, gw copilotgw.Gateway) (*websocket.Conn, func()) {
+	t.Helper()
+	s := New(config.Config{}, gw, slog.Default())
+	hts := httptest.NewServer(s.Handler())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hts.URL, "http")+"/v1/responses", nil)
+	cancel()
+	if err != nil {
+		hts.Close()
+		t.Fatal(err)
+	}
+	return conn, func() {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		hts.Close()
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func readUntilResponseCompleted(t *testing.T, ctx context.Context, conn *websocket.Conn) *openai.Response {
+	t.Helper()
+	for {
+		ev := readWebSocketEvent(t, ctx, conn)
+		if ev.Type == "response.completed" {
+			return ev.Response
+		}
+		if ev.Type == "error" || ev.Type == "response.failed" {
+			t.Fatalf("unexpected error event: %#v", ev)
+		}
+	}
+}
+
+func readWebSocketErrorEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) openai.WebSocketErrorEvent {
+	t.Helper()
+	var ev openai.WebSocketErrorEvent
+	if err := wsjson.Read(ctx, conn, &ev); err != nil {
+		t.Fatal(err)
+	}
+	return ev
+}
+
+func readWebSocketEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) openai.ResponseStreamEvent {
+	t.Helper()
+	var ev openai.ResponseStreamEvent
+	if err := wsjson.Read(ctx, conn, &ev); err != nil {
+		t.Fatal(err)
+	}
+	return ev
 }
 
 func TestResponsesGetDeleteHTTPContract(t *testing.T) {

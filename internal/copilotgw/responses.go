@@ -48,10 +48,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if req.PreviousResponseID != "" {
 		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
 		if err != nil {
-			return nil, openai.NotFound("previous_response_id not found", "not_found")
-		}
-		if !record.Stored {
-			return nil, openai.NotFound("previous_response_id not found", "not_found")
+			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
 		}
 		sessionID = record.SDKSessionID
 		previous = &req.PreviousResponseID
@@ -123,7 +120,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		previousRecord, err := g.store.LoadResponseForContinuation(previousResponseID)
 		if err != nil {
-			return nil, openai.NotFound("previous_response_id not found", "not_found")
+			return nil, openai.PreviousResponseNotFound(previousResponseID)
 		}
 		runner := g.runnerForBatch(batch.ID)
 		if runner == nil {
@@ -133,10 +130,14 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		if !req.StoreSet {
 			storeVisible = previousRecord.Stored
 		}
+		outputs, err := functionOutputsWithContinuationInput(req.FunctionOutputs, req.Input)
+		if err != nil {
+			return nil, err
+		}
 		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
-		if err := batch.CompleteWithSetup(req.FunctionOutputs, func() {
-			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible)
+		if err := batch.CompleteWithSetup(outputs, func() {
+			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, ctx.Done())
 			runner.setOnResult(func(turn *TurnResult) {
 				if turn.PendingBatchID != "" {
 					g.rememberRunner(turn.PendingBatchID, runner)
@@ -162,35 +163,59 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
 	}
-	prompt, err := g.resolvePrompt(ctx, req.Model, req.Input, "input")
-	if err != nil {
-		return nil, err
-	}
-	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
-	if err != nil {
-		return nil, openai.InvalidRequest(err.Error(), "tools")
-	}
 	events := make(chan copilot.SessionEvent, 256)
 	var session *copilot.Session
 	var sessionID string
 	var previous *string
-	if req.PreviousResponseID != "" {
-		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
-		if err != nil || !record.Stored {
-			return nil, openai.NotFound("previous_response_id not found", "not_found")
+	var rt *toolproxy.RequestTools
+	var prompt resolvedPrompt
+	retained := ""
+	if warmSession, warmTools, warmEvents, warmRetained, warmPrevious, ok := req.WarmSession.use(&req); ok {
+		session = warmSession
+		rt = warmTools
+		events = warmEvents
+		retained = warmRetained
+		previous = warmPrevious
+		sessionID = session.SessionID
+	} else {
+		if req.WarmSession != nil && req.WarmSession.ResponseID() == req.PreviousResponseID {
+			req.WarmSession.Disconnect()
 		}
-		sessionID = record.SDKSessionID
-		previous = &req.PreviousResponseID
-		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
-		if err != nil || session == nil {
-			g.log.Warn("falling back to synthetic streaming Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
-			prompt = g.responseContinuationPrompt(record, prompt)
+		rt, err = toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
+		if err != nil {
+			return nil, openai.InvalidRequest(err.Error(), "tools")
+		}
+		prompt, err = g.resolvePrompt(ctx, req.Model, req.Input, "input")
+		if err != nil {
+			return nil, err
+		}
+		if req.PreviousResponseID != "" {
+			record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
+			if err != nil {
+				return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
+			}
+			sessionID = record.SDKSessionID
+			previous = &req.PreviousResponseID
+			session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+			if err != nil || session == nil {
+				if g.log != nil {
+					g.log.Warn("falling back to synthetic streaming Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
+				}
+				prompt = g.responseContinuationPrompt(record, prompt)
+				sessionID = "resp_sdk_" + uuid.NewString()
+				session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+			}
+		} else {
 			sessionID = "resp_sdk_" + uuid.NewString()
 			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 		}
-	} else {
-		sessionID = "resp_sdk_" + uuid.NewString()
-		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+	}
+	if session != nil && prompt.Text == "" && len(prompt.Attachments) == 0 {
+		prompt, err = g.resolvePrompt(ctx, req.Model, req.Input, "input")
+		if err != nil {
+			_ = session.Disconnect()
+			return nil, err
+		}
 	}
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
@@ -198,11 +223,13 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	if session == nil {
 		return nil, openai.Upstream("copilot SDK returned nil session")
 	}
-	retained := g.fs.SessionRoot(sessionID)
+	if retained == "" {
+		retained = g.fs.SessionRoot(sessionID)
+	}
 	ch := make(chan ResponseStreamEvent, 32)
 	runner := g.newTurnRunner(req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
 	runner.watchContext(ctx)
-	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, previous, req.Store)
+	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, previous, req.Store, ctx.Done())
 	runner.setOnResult(func(turn *TurnResult) {
 		if turn.PendingBatchID != "" {
 			g.rememberRunner(turn.PendingBatchID, runner)

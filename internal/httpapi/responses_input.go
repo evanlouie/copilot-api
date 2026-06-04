@@ -19,9 +19,11 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 	}
 	if responsesInputHasFunctionOutputs(items) {
 		outputs := map[string]string{}
+		remaining := make([]openai.ResponseInputItem, 0, len(items))
 		for i, item := range items {
 			if item.Type != "function_call_output" {
-				return openai.PromptContent{}, nil, "", openai.InvalidRequest("function_call_output continuation input cannot be mixed with other input item types", fmt.Sprintf("input.%d.type", i))
+				remaining = append(remaining, item)
+				continue
 			}
 			out, err := parseFunctionOutputItem(item, i)
 			if err != nil {
@@ -32,7 +34,15 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 			}
 			outputs[item.CallID] = out
 		}
-		return openai.PromptContent{}, outputs, "", nil
+		if len(remaining) == 0 {
+			return openai.PromptContent{}, outputs, "", nil
+		}
+		b, _ := json.Marshal(remaining)
+		input, _, inputInstructions, err := parseResponsesInput(b)
+		if err != nil {
+			return openai.PromptContent{}, nil, "", err
+		}
+		return input, outputs, inputInstructions, nil
 	}
 
 	transcriptMode := responsesInputNeedsTranscript(items)
@@ -78,8 +88,10 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 			default:
 				return openai.PromptContent{}, nil, "", openai.InvalidRequest("unsupported response input message role", fmt.Sprintf("input.%d.role", i))
 			}
-		case "reasoning":
-			// Reasoning items may appear in Codex history. They are not user-visible prompt content.
+		case "reasoning", "item_reference":
+			// Reasoning items may appear in Codex history. Item references may appear
+			// in AI SDK Responses tool loops to point at prior output items; the
+			// referenced function call is already represented by function_call_output.
 		case "function_call":
 			transcript = append(transcript, "Assistant function call "+item.Name+" "+item.CallID+":\n"+item.Arguments)
 		case "custom_tool_call":
@@ -107,7 +119,7 @@ func responsesInputHasFunctionOutputs(items []openai.ResponseInputItem) bool {
 }
 func responsesInputNeedsTranscript(items []openai.ResponseInputItem) bool {
 	for _, item := range items {
-		if item.Type == "function_call" || item.Type == "custom_tool_call" || item.Type == "function_call_output" {
+		if item.Type == "function_call" || item.Type == "custom_tool_call" || item.Type == "function_call_output" || item.Type == "item_reference" {
 			return true
 		}
 		if (item.Type == "message" || item.Type == "") && item.Role == "assistant" {

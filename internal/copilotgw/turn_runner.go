@@ -41,6 +41,7 @@ type responseStreamMeta struct {
 	instructions string
 	previous     *string
 	store        bool
+	done         <-chan struct{}
 }
 
 func (g *RealGateway) newTurnRunner(id, model string, session *copilot.Session, rt *toolproxy.RequestTools, events <-chan copilot.SessionEvent, retained string, kind string, responseID string) *turnRunner {
@@ -115,7 +116,7 @@ func (r *turnRunner) enableChatStream(ch chan<- StreamEvent) {
 	r.chatStream = ch
 }
 
-func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, responseID, model, instructions string, previous *string, store bool) {
+func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, responseID, model, instructions string, previous *string, store bool, done <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.responseStream = ch
@@ -123,7 +124,7 @@ func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, respons
 		r.responseMeta = nil
 		return
 	}
-	r.responseMeta = &responseStreamMeta{responseID: responseID, model: model, instructions: instructions, previous: previous, store: store}
+	r.responseMeta = &responseStreamMeta{responseID: responseID, model: model, instructions: instructions, previous: previous, store: store, done: done}
 }
 
 func (r *turnRunner) loop(g *RealGateway) {
@@ -173,12 +174,13 @@ func (r *turnRunner) emitDelta(delta string) {
 	r.mu.Lock()
 	chatStream := r.chatStream
 	responseStream := r.responseStream
+	meta := r.responseMeta
 	r.mu.Unlock()
 	if chatStream != nil {
 		chatStream <- StreamEvent{Kind: "delta", Delta: delta}
 	}
 	if responseStream != nil {
-		responseStream <- ResponseStreamEvent{Kind: "delta", Delta: delta}
+		sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "delta", Delta: delta})
 	}
 }
 
@@ -223,8 +225,8 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 			previous = meta.previous
 			store = meta.store
 		}
-		responseStream <- ResponseStreamEvent{Kind: "response", Response: responseFromTurn(responseID, model, instructions, previous, store, res)}
-		if res.FinishReason == "tool_calls" {
+		sent := sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "response", Response: responseFromTurn(responseID, model, instructions, previous, store, res)})
+		if res.FinishReason == "tool_calls" && sent {
 			close(responseStream)
 		}
 	}
@@ -235,6 +237,7 @@ func (r *turnRunner) emitError(err error) {
 	r.mu.Lock()
 	chatStream := r.chatStream
 	responseStream := r.responseStream
+	meta := r.responseMeta
 	r.chatStream = nil
 	r.responseStream = nil
 	r.responseMeta = nil
@@ -244,8 +247,22 @@ func (r *turnRunner) emitError(err error) {
 		close(chatStream)
 	}
 	if responseStream != nil {
-		responseStream <- ResponseStreamEvent{Kind: "error", Error: err}
-		close(responseStream)
+		if sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "error", Error: err}) {
+			close(responseStream)
+		}
+	}
+}
+
+func sendResponseStreamEvent(ch chan<- ResponseStreamEvent, meta *responseStreamMeta, ev ResponseStreamEvent) bool {
+	if meta == nil || meta.done == nil {
+		ch <- ev
+		return true
+	}
+	select {
+	case ch <- ev:
+		return true
+	case <-meta.done:
+		return false
 	}
 }
 

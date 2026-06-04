@@ -37,6 +37,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/models", s.models)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	s.mux.HandleFunc("POST /v1/responses", s.responses)
+	s.mux.HandleFunc("GET /v1/responses", s.responsesWebSocket)
 	s.mux.HandleFunc("GET /v1/responses/", s.getResponse)
 	s.mux.HandleFunc("DELETE /v1/responses/", s.deleteResponse)
 }

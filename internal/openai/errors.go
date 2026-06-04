@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -37,6 +38,10 @@ func Unauthorized(message string) *APIError {
 
 func NotFound(message, code string) *APIError {
 	return &APIError{Status: http.StatusNotFound, Message: message, Type: "invalid_request_error", Code: code}
+}
+
+func PreviousResponseNotFound(id string) *APIError {
+	return &APIError{Status: http.StatusBadRequest, Message: fmt.Sprintf("Previous response with id %q not found.", id), Type: "invalid_request_error", Param: "previous_response_id", Code: "previous_response_not_found"}
 }
 
 func Upstream(message string) *APIError {

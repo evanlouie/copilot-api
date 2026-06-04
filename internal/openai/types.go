@@ -487,6 +487,7 @@ func (t ResponseText) MarshalJSON() ([]byte, error) {
 
 type ResponseInputItem struct {
 	Type      string          `json:"type,omitempty"`
+	ID        string          `json:"id,omitempty"`
 	Role      string          `json:"role,omitempty"`
 	Content   Content         `json:"content,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
@@ -497,6 +498,7 @@ type ResponseInputItem struct {
 }
 
 type ResponseStreamEvent struct {
+	EventID      string              `json:"event_id,omitempty"`
 	Type         string              `json:"type"`
 	Response     *Response           `json:"response,omitempty"`
 	Item         *ResponseOutputItem `json:"item,omitempty"`

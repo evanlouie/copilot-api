@@ -44,6 +44,7 @@ type Gateway interface {
 	StreamContinueChatToolCalls(ctx context.Context, model string, outputs map[string]string) (<-chan StreamEvent, error)
 	StreamChat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
 	CreateResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error)
+	WarmResponse(ctx context.Context, req ResponseRequest) (*WarmResponseResult, error)
 	StreamResponse(ctx context.Context, req ResponseRequest) (<-chan ResponseStreamEvent, error)
 	GetResponse(ctx context.Context, id string) (*openai.Response, error)
 	DeleteResponse(ctx context.Context, id string) error
@@ -92,6 +93,7 @@ type ResponseRequest struct {
 	Input                   openai.PromptContent
 	FunctionOutputs         map[string]string
 	PreviousResponseID      string
+	WarmSession             *WarmResponseSession
 	Tools                   []openai.Tool
 	ToolChoiceNone          bool
 	Store                   bool
@@ -105,6 +107,11 @@ type ResponseRequest struct {
 type ResponseResult struct {
 	Response *openai.Response
 	Batch    *toolproxy.Batch
+}
+
+type WarmResponseResult struct {
+	Response    *openai.Response
+	WarmSession *WarmResponseSession
 }
 
 type ResponseStreamEvent struct {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -14,36 +15,14 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
-	reasoningEffort := openai.ResponsesReasoningEffort(&req)
-	if err := openai.ValidateResponsesRequest(&req, s.cfg.StrictCompat); err != nil {
-		openai.WriteError(w, err)
-		return
-	}
-	input, outputs, inputInstructions, err := parseResponsesInput(req.Input)
+	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+	gwReq, logFields, err := s.prepareResponseRequest(ctx, &req, openai.NewID("resp_"))
 	if err != nil {
 		openai.WriteError(w, err)
 		return
 	}
-	store := true
-	storeSet := req.Store != nil
-	if req.Store != nil {
-		store = *req.Store
-	}
-	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
-	defer cancel()
-	continuation := len(outputs) > 0
-	resolvedEffort := ""
-	resolved := false
-	if !continuation {
-		var err error
-		resolvedEffort, resolved, err = s.resolveGenerationReasoningEffort(ctx, req.Model, reasoningEffort)
-		if err != nil {
-			openai.WriteError(w, err)
-			return
-		}
-	}
-	s.logGenerationStarted(r, "responses", req.Model, reasoningEffort, resolvedEffort, resolved, continuation)
-	gwReq := copilotgw.ResponseRequest{ResponseID: openai.NewID("resp_"), Model: req.Model, Instructions: combineInstructions(req.Instructions, inputInstructions), Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: openai.SupportedTools(req.Tools), ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: reasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved}
+	s.logGenerationStarted(r, "responses", req.Model, logFields.reasoningEffort, logFields.resolvedEffort, logFields.resolved, logFields.continuation)
 	if req.Stream {
 		s.streamResponses(w, r, gwReq)
 		return
@@ -55,6 +34,41 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, res.Response)
 }
+
+type preparedResponseLogFields struct {
+	reasoningEffort string
+	resolvedEffort  string
+	resolved        bool
+	continuation    bool
+}
+
+func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.ResponsesRequest, responseID string) (copilotgw.ResponseRequest, preparedResponseLogFields, error) {
+	reasoningEffort := openai.ResponsesReasoningEffort(req)
+	if err := openai.ValidateResponsesRequest(req, s.cfg.StrictCompat); err != nil {
+		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+	}
+	input, outputs, inputInstructions, err := parseResponsesInput(req.Input)
+	if err != nil {
+		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+	}
+	store := true
+	storeSet := req.Store != nil
+	if req.Store != nil {
+		store = *req.Store
+	}
+	continuation := len(outputs) > 0
+	resolvedEffort := ""
+	resolved := false
+	if !continuation {
+		resolvedEffort, resolved, err = s.resolveGenerationReasoningEffort(ctx, req.Model, reasoningEffort)
+		if err != nil {
+			return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+		}
+	}
+	gwReq := copilotgw.ResponseRequest{ResponseID: responseID, Model: req.Model, Instructions: combineInstructions(req.Instructions, inputInstructions), Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: openai.SupportedTools(req.Tools), ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: reasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved}
+	return gwReq, preparedResponseLogFields{reasoningEffort: reasoningEffort, resolvedEffort: resolvedEffort, resolved: resolved, continuation: continuation}, nil
+}
+
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req copilotgw.ResponseRequest) {
 	writer, ok := openai.NewSSEWriter(w)
 	if !ok {
@@ -65,73 +79,11 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	defer cancel()
 	ch, err := s.gw.StreamResponse(ctx, req)
 	if err != nil {
-		_ = s.writeResponseFailed(writer, req, err)
+		_ = writeResponseFailedEvent(sseResponseEventWriter{writer: writer}, req, err)
 		_ = writer.Done()
 		return
 	}
-	var previous *string
-	if req.PreviousResponseID != "" {
-		previous = &req.PreviousResponseID
-	}
-	created := openai.UnixNow()
-	initial := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: created, Status: "in_progress", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
-	if err := writer.Event("response.created", openai.ResponseStreamEvent{Type: "response.created", Response: initial}); err != nil {
-		return
-	}
-	if err := writer.Event("response.in_progress", openai.ResponseStreamEvent{Type: "response.in_progress", Response: initial}); err != nil {
-		return
-	}
-	messageID := openai.NewID("msg_")
-	messageStarted := false
-	messageDone := false
-	var messageText strings.Builder
-	for ev := range ch {
-		switch ev.Kind {
-		case "delta":
-			zero := 0
-			if !messageStarted {
-				item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "in_progress", Role: "assistant", Content: []openai.ResponseText{}}
-				if err := writer.Event("response.output_item.added", openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &zero, Item: &item}); err != nil {
-					return
-				}
-				messageStarted = true
-			}
-			messageText.WriteString(ev.Delta)
-			if err := writer.Event("response.output_text.delta", openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Delta: ev.Delta}); err != nil {
-				return
-			}
-		case "response":
-			if messageStarted {
-				text := messageText.String()
-				zero := 0
-				if err := writer.Event("response.output_text.done", openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: text}); err != nil {
-					return
-				}
-				messageDone = true
-				if item, idx := streamedMessageItem(ev.Response, messageID, text); item != nil {
-					if err := writer.Event("response.output_item.done", openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: item}); err != nil {
-						return
-					}
-				}
-			}
-			if err := s.writeResponseOutputEvents(writer, ev.Response); err != nil {
-				return
-			}
-			if err := writer.Event("response.completed", openai.ResponseStreamEvent{Type: "response.completed", Response: ev.Response}); err != nil {
-				return
-			}
-		case "error":
-			if messageStarted && !messageDone {
-				zero := 0
-				if err := writer.Event("response.output_text.done", openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: messageText.String()}); err != nil {
-					return
-				}
-			}
-			if err := s.writeResponseFailed(writer, req, ev.Error); err != nil {
-				return
-			}
-		}
-	}
+	_ = writeResponseStreamEvents(ctx, sseResponseEventWriter{writer: writer}, req, ch)
 	_ = writer.Done()
 }
 func streamedMessageItem(resp *openai.Response, id, text string) (*openai.ResponseOutputItem, int) {
@@ -157,42 +109,7 @@ func streamedMessageItem(resp *openai.Response, id, text string) (*openai.Respon
 	resp.Output = append([]openai.ResponseOutputItem{item}, resp.Output...)
 	return &resp.Output[0], 0
 }
-func (s *Server) writeResponseOutputEvents(writer *openai.SSEWriter, resp *openai.Response) error {
-	if resp == nil {
-		return nil
-	}
-	for i := range resp.Output {
-		item := resp.Output[i]
-		if item.Type != "function_call" {
-			continue
-		}
-		idx := i
-		if err := writer.Event("response.output_item.added", openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item}); err != nil {
-			return err
-		}
-		if item.Arguments != "" {
-			if err := writer.Event("response.function_call_arguments.delta", openai.ResponseStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: &idx, ItemID: item.ID, Delta: item.Arguments}); err != nil {
-				return err
-			}
-		}
-		if err := writer.Event("response.function_call_arguments.done", openai.ResponseStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: &idx, ItemID: item.ID, Arguments: item.Arguments}); err != nil {
-			return err
-		}
-		if err := writer.Event("response.output_item.done", openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-func (s *Server) writeResponseFailed(writer *openai.SSEWriter, req copilotgw.ResponseRequest, err error) error {
-	obj := errorObject(err)
-	var previous *string
-	if req.PreviousResponseID != "" {
-		previous = &req.PreviousResponseID
-	}
-	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "failed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: obj, IncompleteDetails: nil}
-	return writer.Event("response.failed", openai.ResponseStreamEvent{Type: "response.failed", Response: resp, Error: &obj})
-}
+
 func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")
 	if id == "" || strings.Contains(id, "/") {

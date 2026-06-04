@@ -6,6 +6,7 @@
     "npm:@ai-sdk/mcp@1.0.45": "1.0.45_zod@4.4.3",
     "npm:@ai-sdk/openai@3.0.67": "3.0.67_zod@4.4.3",
     "npm:@modelcontextprotocol/sdk@1.29.0": "1.29.0_zod@4.4.3",
+    "npm:@vercel/ai-sdk-openai-websocket-fetch@1.0.0": "1.0.0_@ai-sdk+openai@3.0.67__zod@4.4.3",
     "npm:ai@6.0.193": "6.0.193_zod@4.4.3",
     "npm:mcp-remote@*": "0.1.38"
   },
@@ -95,6 +96,16 @@
     },
     "@standard-schema/spec@1.1.0": {
       "integrity": "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="
+    },
+    "@vercel/ai-sdk-openai-websocket-fetch@1.0.0_@ai-sdk+openai@3.0.67__zod@4.4.3": {
+      "integrity": "sha512-QTBex1bJogUTdh8lcmgxQhYkRZDVDMEdRyJjqy/Chnzv0i8UpLB2imFZvXORNUNdvu51aNPwgsclvx51F0Pc+A==",
+      "dependencies": [
+        "@ai-sdk/openai",
+        "ws"
+      ],
+      "optionalPeers": [
+        "@ai-sdk/openai"
+      ]
     },
     "@vercel/oidc@3.2.0": {
       "integrity": "sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug=="
@@ -835,6 +846,9 @@
     "wrappy@1.0.2": {
       "integrity": "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="
     },
+    "ws@8.21.0": {
+      "integrity": "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g=="
+    },
     "wsl-utils@0.1.0": {
       "integrity": "sha512-h3Fbisa2nKGPxCpm89Hk33lBLsnaGBvctQopaBSOW/uIs6FTe1ATyAnKFJrzVs9vpGdsTe73WF3V4lIsk4Gacw==",
       "dependencies": [
@@ -857,6 +871,7 @@
       "npm:@ai-sdk/mcp@1.0.45",
       "npm:@ai-sdk/openai@3.0.67",
       "npm:@modelcontextprotocol/sdk@1.29.0",
+      "npm:@vercel/ai-sdk-openai-websocket-fetch@1.0.0",
       "npm:ai@6.0.193"
     ]
   }

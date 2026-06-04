@@ -14,27 +14,29 @@ Coverage:
   `stream_options.include_usage` terminal chunk reaches the AI SDK) and the
   `stop` finish reason
 - Responses API `generateText`
-- Responses API `streamText` consumed via `fullStream` so the AI SDK Responses
-  parser has to accept the full `response.created` → `response.in_progress` →
-  `response.output_text.delta` → `response.output_text.done` →
-  `response.completed` event sequence; asserts `usage` and `finishReason`
+- Responses API `streamText` over HTTP/SSE and WebSocket transports, consumed
+  via `fullStream` so the AI SDK Responses parser has to accept the full
+  `response.created` → `response.in_progress` → `response.output_text.delta` →
+  `response.output_text.done` → `response.completed` event sequence; asserts
+  `usage` and `finishReason`
 - Responses API reasoning effort via AI SDK provider options, with an assertion
   that the AI SDK surfaces reasoning output via `reasoningText`, reasoning
   parts, or `usage.reasoningTokens`
-- Responses API `previous_response_id` continuation across two turns (proves
-  storage + retrieval + real-model context handoff)
+- Responses API `previous_response_id` continuation across two turns, including
+  `store:false` continuation through the AI SDK WebSocket transport
 - Multi-turn Chat Completions history
 - MCP tools converted by the AI SDK MCP client into client-owned function tool
-  calls for Chat and Responses, both non-streaming and streaming. Streaming
-  variants iterate `fullStream` and assert the AI SDK reassembled streamed
-  tool-call argument deltas into a structured `tool-call` part with the right
-  `toolName` and parsed `input`
+  calls for Chat and Responses, including Responses WebSocket streaming.
+  Streaming variants iterate `fullStream` and assert the AI SDK reassembled
+  streamed tool-call argument deltas into a structured `tool-call` part with the
+  right `toolName` and parsed `input`
 - `tool_choice: "none"` with a real model and registered tools (proves the proxy
   forwards the choice and the model honors it)
 - Image inputs uploaded by the AI SDK as OpenAI-compatible image parts for Chat
-  and Responses, with assertions that the model mentions a color or shape from
-  the fixture (not just "I see an image")
-- Mid-stream abort followed by a fresh request (proves the proxy releases the
+  and Responses over HTTP/SSE and WebSocket, with assertions that the model
+  mentions a color or shape from the fixture (not just "I see an image")
+- WebSocket terminal error handling through the AI SDK transport, plus
+  mid-stream abort followed by a fresh request (proves the proxy releases the
   cancelled upstream session and tool-call park, then serves new traffic)
 
 The tests are gated so they are safe to run in normal development without a live
@@ -42,7 +44,9 @@ Copilot-backed server.
 
 ## Run
 
-Start `copilot-api` in another shell first. The example uses an API key because non-loopback binds require one and using a key also exercises the bearer-auth path:
+Start `copilot-api` in another shell first. The example uses an API key because
+non-loopback binds require one and using a key also exercises the bearer-auth
+path:
 
 ```sh
 COPILOT_API_KEY=local-secret ./copilot-api serve

@@ -2,6 +2,8 @@ package copilotgw
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
@@ -117,6 +119,35 @@ func (g *RealGateway) forgetRunner(batchID string) {
 	defer g.pendingMu.Unlock()
 	delete(g.pendingRunners, batchID)
 }
+func functionOutputsWithContinuationInput(outputs map[string]string, input openai.PromptContent) (map[string]string, error) {
+	if strings.TrimSpace(input.Text) == "" && len(input.Images) == 0 {
+		return outputs, nil
+	}
+	if len(input.Images) > 0 {
+		return nil, openai.InvalidRequest("image input cannot be combined with function_call_output continuation input", "input")
+	}
+	ids := make([]string, 0, len(outputs))
+	for id := range outputs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return outputs, nil
+	}
+	out := make(map[string]string, len(outputs))
+	for id, value := range outputs {
+		out[id] = value
+	}
+	// The Copilot SDK resumes a parked tool turn by returning strings from the
+	// pending tool handlers; it has no separate channel for a same-turn user
+	// message after function_call_output items. Preserve the client's follow-up
+	// input by appending it to one deterministic tool result rather than dropping
+	// it. Keep this adapter isolated so it can be replaced if the SDK gains native
+	// mixed-continuation support.
+	out[ids[0]] += "\n\nAdditional user input after tool output:\n" + input.Text
+	return out, nil
+}
+
 func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error) {
 	ids := make([]string, 0, len(req.FunctionOutputs))
 	for id := range req.FunctionOutputs {
@@ -141,10 +172,14 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	}
 	previousRecord, err := g.store.LoadResponseForContinuation(previousResponseID)
 	if err != nil {
-		return nil, openai.NotFound("previous_response_id not found", "not_found")
+		return nil, openai.PreviousResponseNotFound(previousResponseID)
 	}
 	runner := g.runnerForBatch(batch.ID)
-	if err := batch.Complete(req.FunctionOutputs); err != nil {
+	outputs, err := functionOutputsWithContinuationInput(req.FunctionOutputs, req.Input)
+	if err != nil {
+		return nil, err
+	}
+	if err := batch.Complete(outputs); err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "input")
 	}
 	g.broker.Remove(batch)

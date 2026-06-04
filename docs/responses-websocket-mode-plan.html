@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Responses WebSocket Mode Implementation Plan</title>
+  <style>
+    :root {
+      --ink: #17120d;
+      --muted: #675c4e;
+      --paper: #f4ead7;
+      --paper-bright: #fff8e9;
+      --paper-deep: #ead8b8;
+      --line: #d4bd91;
+      --line-strong: #9f7741;
+      --rust: #99401f;
+      --amber: #cf821c;
+      --green: #326c50;
+      --blue: #255978;
+      --violet: #5e4963;
+      --red: #a73628;
+      --shadow: 0 28px 80px rgba(49, 32, 11, 0.18);
+      --radius: 24px;
+      --mono: "Berkeley Mono", "SF Mono", Menlo, Consolas, monospace;
+      --serif: "Iowan Old Style", Charter, "Palatino Linotype", Georgia, serif;
+      --sans: Avenir, "Avenir Next", Optima, Candara, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(207, 130, 28, 0.18), transparent 30rem),
+        radial-gradient(circle at 88% 18%, rgba(37, 89, 120, 0.13), transparent 25rem),
+        linear-gradient(135deg, var(--paper), #efe0c5 58%, #e8d0aa);
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      font-family: var(--sans);
+      line-height: 1.6;
+      letter-spacing: 0.005em;
+      overflow-x: clip;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.28;
+      mix-blend-mode: multiply;
+      background-image:
+        linear-gradient(rgba(23, 18, 13, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 18, 13, 0.035) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 78%);
+    }
+
+    a { color: var(--blue); text-underline-offset: 0.18em; }
+    code, pre { font-family: var(--mono); }
+
+    .shell {
+      width: min(1200px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 10px);
+      padding: clamp(28px, 5vw, 66px);
+      background:
+        linear-gradient(135deg, rgba(255, 248, 233, 0.97), rgba(238, 218, 181, 0.9)),
+        repeating-linear-gradient(-35deg, rgba(153, 64, 31, 0.08) 0 1px, transparent 1px 16px);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 390px;
+      height: 390px;
+      right: -120px;
+      top: -145px;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(207, 130, 28, 0.24), transparent 62%),
+        conic-gradient(from 45deg, rgba(153, 64, 31, 0.18), rgba(37, 89, 120, 0.13), rgba(50, 108, 80, 0.16), rgba(153, 64, 31, 0.18));
+      filter: blur(1px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 18px;
+      padding: 6px 12px;
+      border: 1px solid rgba(153, 64, 31, 0.25);
+      border-radius: 999px;
+      color: var(--rust);
+      background: rgba(255, 248, 233, 0.72);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.05;
+      letter-spacing: -0.035em;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: clamp(2.6rem, 7vw, 5.9rem);
+      overflow-wrap: anywhere;
+      text-wrap: balance;
+    }
+
+    h2 { font-size: clamp(1.9rem, 4vw, 3rem); }
+    h3 { font-size: clamp(1.35rem, 2.4vw, 1.9rem); }
+
+    .subtitle {
+      max-width: 820px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.08rem, 2vw, 1.34rem);
+    }
+
+    .meta-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .meta-card {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      border-radius: 17px;
+      background: rgba(255, 248, 233, 0.74);
+      overflow-wrap: anywhere;
+    }
+
+    .meta-card b {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 270px) minmax(0, 1fr);
+      gap: 30px;
+      align-items: start;
+      margin-top: 30px;
+      min-width: 0;
+    }
+
+    nav {
+      position: sticky;
+      top: 20px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 248, 233, 0.8);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 16px 50px rgba(49, 32, 11, 0.08);
+    }
+
+    nav strong {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    nav a {
+      display: block;
+      padding: 9px 10px;
+      border-radius: 12px;
+      color: var(--ink);
+      font-size: 0.94rem;
+      text-decoration: none;
+    }
+
+    nav a:hover {
+      background: rgba(207, 130, 28, 0.14);
+      color: var(--rust);
+    }
+
+    main {
+      display: grid;
+      gap: 22px;
+      min-width: 0;
+    }
+
+    section {
+      padding: clamp(22px, 4vw, 38px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 248, 233, 0.86);
+      box-shadow: 0 18px 60px rgba(49, 32, 11, 0.08);
+      min-width: 0;
+    }
+
+    section > p:first-of-type { margin-top: 14px; }
+    p, li { color: var(--muted); }
+    strong { color: var(--ink); }
+
+    .callout {
+      margin: 20px 0;
+      padding: 18px 20px;
+      border: 1px solid rgba(37, 89, 120, 0.25);
+      border-left: 5px solid var(--blue);
+      border-radius: 18px;
+      background: rgba(37, 89, 120, 0.08);
+    }
+
+    .warning {
+      border-color: rgba(167, 54, 40, 0.25);
+      border-left-color: var(--red);
+      background: rgba(167, 54, 40, 0.07);
+    }
+
+    .success {
+      border-color: rgba(50, 108, 80, 0.25);
+      border-left-color: var(--green);
+      background: rgba(50, 108, 80, 0.08);
+    }
+
+    .grid-2,
+    .grid-3 {
+      display: grid;
+      gap: 14px;
+      margin: 20px 0;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card {
+      padding: 18px;
+      border: 1px solid rgba(159, 119, 65, 0.32);
+      border-radius: 18px;
+      background: rgba(255, 253, 247, 0.62);
+      min-width: 0;
+    }
+
+    .card h3,
+    .card h4 { margin-bottom: 8px; }
+    .card p { margin: 0; }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      color: var(--rust);
+      background: rgba(153, 64, 31, 0.09);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .status.ok {
+      color: var(--green);
+      background: rgba(50, 108, 80, 0.1);
+    }
+
+    .status.wait {
+      color: var(--blue);
+      background: rgba(37, 89, 120, 0.1);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0 6px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 253, 247, 0.58);
+    }
+
+    th, td {
+      padding: 13px 14px;
+      border-bottom: 1px solid rgba(212, 189, 145, 0.7);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--rust);
+      background: rgba(153, 64, 31, 0.08);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    td code, li code, p code {
+      padding: 0.12em 0.35em;
+      border: 1px solid rgba(159, 119, 65, 0.26);
+      border-radius: 7px;
+      background: rgba(255, 248, 233, 0.8);
+      color: #3a2414;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 18px 0;
+      padding: 18px;
+      overflow: auto;
+      border: 1px solid rgba(159, 119, 65, 0.38);
+      border-radius: 18px;
+      background: #21170f;
+      color: #fbe7bd;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+
+    pre code { font-size: 0.86rem; }
+
+    .phase {
+      counter-increment: phase;
+      position: relative;
+      padding-left: 72px;
+    }
+
+    .phase::before {
+      content: counter(phase);
+      position: absolute;
+      left: 0;
+      top: 2px;
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border-radius: 16px;
+      color: var(--paper-bright);
+      background: linear-gradient(135deg, var(--rust), var(--amber));
+      font-family: var(--mono);
+      font-weight: 700;
+      box-shadow: 0 10px 28px rgba(153, 64, 31, 0.22);
+    }
+
+    .phase + .phase {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px dashed rgba(159, 119, 65, 0.46);
+    }
+
+    .phase h3 { margin-bottom: 8px; }
+
+    .file-map {
+      display: grid;
+      gap: 10px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .file-map li {
+      padding: 12px 14px;
+      border: 1px solid rgba(159, 119, 65, 0.25);
+      border-radius: 14px;
+      background: rgba(255, 253, 247, 0.54);
+    }
+
+    .decision {
+      border-left: 4px solid var(--amber);
+    }
+
+    .mermaid-wrap {
+      margin-top: 18px;
+    }
+
+    footer {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      text-align: center;
+    }
+
+    @media (max-width: 920px) {
+      .layout { grid-template-columns: 1fr; }
+      nav { position: static; }
+      .meta-grid, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .phase { padding-left: 0; padding-top: 62px; }
+      .phase::before { top: 0; }
+    }
+
+    @media print {
+      html { background: white; }
+      body::before, .hero::after, nav { display: none; }
+      .shell { width: auto; padding: 0; }
+      .hero, section { box-shadow: none; background: white; }
+      a { color: inherit; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <p class="eyebrow">Implementation plan · Responses API</p>
+      <h1>WebSocket mode for long-running Responses workflows</h1>
+      <p class="subtitle">
+        A phased plan to add OpenAI-compatible WebSocket transport to <code>/v1/responses</code>, reusing the existing Responses validation, streaming event model, Copilot SDK gateway, tool-call continuation machinery, and prompt isolation guarantees.
+      </p>
+      <div class="meta-grid" aria-label="Plan metadata">
+        <div class="meta-card"><b>Target path</b><code>GET /v1/responses</code> upgrade</div>
+        <div class="meta-card"><b>Transport</b>WebSocket JSON events</div>
+        <div class="meta-card"><b>Current state</b>HTTP + SSE implemented</div>
+        <div class="meta-card"><b>Date</b>2026-06-03</div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="Table of contents">
+        <strong>Contents</strong>
+        <a href="#summary">Summary</a>
+        <a href="#current-state">Current state</a>
+        <a href="#protocol">Protocol contract</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#state">State model</a>
+        <a href="#phases">Implementation phases</a>
+        <a href="#tests">Testing plan</a>
+        <a href="#risks">Risks</a>
+        <a href="#acceptance">Acceptance criteria</a>
+      </nav>
+
+      <main>
+        <section id="summary">
+          <h2>Summary</h2>
+          <p>
+            OpenAI's Responses WebSocket mode keeps a persistent connection to <code>/v1/responses</code>. Clients send <code>response.create</code> events over the socket, and the server returns the same Responses streaming event model already used by SSE. The biggest behavioral difference is continuation: the active socket should retain the most recent response state in memory so <code>store:false</code> chains can continue without writing API-visible response state to disk.
+          </p>
+          <div class="callout success">
+            <strong>Recommended strategy:</strong> add a WebSocket transport layer in <code>internal/httpapi</code> that converts socket messages into the existing <code>copilotgw.ResponseRequest</code> path, while extracting shared stream-event serialization from the current SSE handler. Keep the gateway as the single source of generation behavior.
+          </div>
+          <div class="grid-3">
+            <div class="card">
+              <h3>Reuse</h3>
+              <p>Validation, input parsing, reasoning-effort resolution, tool aliasing, session runners, and OpenAI response event schemas.</p>
+            </div>
+            <div class="card">
+              <h3>Add</h3>
+              <p>WebSocket upgrade handling, client event parsing, per-connection sequencing, socket-local response cache, and JSON event writer.</p>
+            </div>
+            <div class="card">
+              <h3>Defer</h3>
+              <p>Standalone <code>/v1/responses/compact</code> unless separately prioritized; document it as unsupported in the compatibility matrix.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="current-state">
+          <h2>Current state</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Existing implementation</th>
+                <th>WebSocket implication</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Routing</td>
+                <td><code>internal/httpapi/server.go</code> registers <code>POST /v1/responses</code>, <code>GET /v1/responses/</code>, and <code>DELETE /v1/responses/</code>.</td>
+                <td>Add <code>GET /v1/responses</code> for <code>Upgrade: websocket</code>. Keep trailing-slash <code>GET /v1/responses/{id}</code> unchanged.</td>
+              </tr>
+              <tr>
+                <td>Streaming</td>
+                <td><code>streamResponses</code> writes Server-Sent Events via <code>openai.SSEWriter</code>.</td>
+                <td>Extract the Responses streaming event conversion into a transport-neutral helper so SSE and WebSocket use identical event ordering.</td>
+              </tr>
+              <tr>
+                <td>Generation</td>
+                <td><code>copilotgw.StreamResponse</code> returns internal <code>ResponseStreamEvent</code> values.</td>
+                <td>Reuse it for generated WebSocket turns; do not create a parallel gateway path unless needed for connection-local continuation.</td>
+              </tr>
+              <tr>
+                <td>Continuation</td>
+                <td>HTTP continuation checks stored response metadata. Some <code>store:false</code> records are retained for debugging, but non-tool continuation requires <code>Stored</code>.</td>
+                <td>WebSocket mode needs an in-memory most-recent response cache so <code>store:false</code> continuations can work while the connection is alive.</td>
+              </tr>
+              <tr>
+                <td>Tool calls</td>
+                <td>Pending tool-call batches park SDK handlers and unblock when clients send <code>function_call_output</code>.</td>
+                <td>Socket continuations should reuse the same broker/runner model, but must support repeated sequential <code>response.create</code> messages on one connection.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="protocol">
+          <h2>Protocol contract</h2>
+          <p>
+            The first compatibility target is the WebSocket mode documented at <a href="https://developers.openai.com/api/docs/guides/websocket-mode">OpenAI API: WebSocket Mode</a>. The project should support the documented core loop before adding extra conveniences.
+          </p>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Client → server</h3>
+              <pre><code>{
+  "type": "response.create",
+  "model": "gpt-5.5",
+  "store": false,
+  "previous_response_id": "resp_123",
+  "input": [
+    {
+      "type": "function_call_output",
+      "call_id": "call_123",
+      "output": "tool result"
+    }
+  ],
+  "tools": []
+}</code></pre>
+            </div>
+            <div class="card">
+              <h3>Server → client</h3>
+              <pre><code>{
+  "type": "response.output_text.delta",
+  "output_index": 0,
+  "content_index": 0,
+  "item_id": "msg_abc",
+  "delta": "hello"
+}</code></pre>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Requirement</th>
+                <th>Planned behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Endpoint</td>
+                <td>Accept WebSocket upgrades on <code>GET /v1/responses</code>. Reject non-upgrade GETs with an OpenAI-shaped error or <code>426 Upgrade Required</code>.</td>
+              </tr>
+              <tr>
+                <td>Authentication</td>
+                <td>Use the existing bearer-token middleware before upgrade. Do not introduce a separate auth path.</td>
+              </tr>
+              <tr>
+                <td>Event type</td>
+                <td>Support <code>response.create</code>. Return <code>invalid_request_error</code> for unknown client event types.</td>
+              </tr>
+              <tr>
+                <td>Unsupported request fields</td>
+                <td>Ignore or reject fields using the same strict/permissive compatibility rules as HTTP. Treat <code>stream</code> and <code>background</code> as transport-specific no-ops in WebSocket mode.</td>
+              </tr>
+              <tr>
+                <td>Ordering</td>
+                <td>One in-flight response per connection. Queueing is optional; the MVP should reject a second <code>response.create</code> while one is active with a clear error.</td>
+              </tr>
+              <tr>
+                <td>Connection limit</td>
+                <td>Close or reject new work after 60 minutes with <code>websocket_connection_limit_reached</code>. Make the limit configurable only if tests need shorter durations.</td>
+              </tr>
+              <tr>
+                <td>Warmup</td>
+                <td>Support <code>generate:false</code> as a second phase. MVP may return a documented unsupported error until a safe SDK session-warmup path is proven.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="architecture">
+          <h2>Architecture</h2>
+          <p>
+            Treat WebSocket mode as a transport adapter. The HTTP handler should be responsible for upgrade, event IO, connection lifetime, and socket-local state. The gateway should remain responsible for model validation, Copilot SDK sessions, response construction, tool batches, and persistence.
+          </p>
+
+          <div class="mermaid-wrap">
+            <pre><code>flowchart TD
+    Client[WebSocket client] -- response.create --> WS[httpapi responses WebSocket handler]
+    WS --> Decode[Decode and validate client event]
+    Decode --> Parse[Reuse Responses input parsing and reasoning resolution]
+    Parse --> CacheCheck{previous_response_id in socket cache?}
+    CacheCheck -- yes --> Fast[Use connection-local continuation metadata]
+    CacheCheck -- no --> Store[Fallback to persisted response state when store=true]
+    Fast --> GW[copilotgw.StreamResponse]
+    Store --> GW
+    GW --> Events[ResponseStreamEvent channel]
+    Events --> Shape[Transport-neutral Responses event shaper]
+    Shape -- JSON frames --> WS
+    WS --> Client</code></pre>
+          </div>
+
+          <h3>Proposed file map</h3>
+          <ul class="file-map">
+            <li><code>internal/httpapi/server.go</code> — route <code>GET /v1/responses</code> to a WebSocket upgrade handler before the existing response-id subtree route.</li>
+            <li><code>internal/httpapi/responses_ws.go</code> — WebSocket upgrade, read loop, sequential execution guard, connection deadline, close/error mapping.</li>
+            <li><code>internal/httpapi/responses_stream.go</code> — transport-neutral conversion from <code>copilotgw.ResponseStreamEvent</code> to <code>openai.ResponseStreamEvent</code> values.</li>
+            <li><code>internal/openai/websocket.go</code> — client event envelope structs, WebSocket error envelope helpers, and optional close-code constants.</li>
+            <li><code>internal/copilotgw/responses.go</code> — minimal extension points for socket-local continuation records if transport-only adaptation is insufficient.</li>
+            <li><code>internal/sessionstore/store.go</code> — no required schema change for MVP; add helpers only if persisted fallback needs clearer semantics.</li>
+            <li><code>internal/httpapi/server_test.go</code> or <code>responses_ws_test.go</code> — protocol, event ordering, continuation, and error tests.</li>
+          </ul>
+
+          <div class="callout decision">
+            <strong>Dependency decision:</strong> use <code>github.com/coder/websocket</code> unless there is a strong reason to avoid a new dependency. It is small, actively maintained, context-aware, and avoids the older Gorilla package's maintenance history. Add it with <code>go get</code>, then run <code>goimports -w</code> after edits.
+          </div>
+        </section>
+
+        <section id="state">
+          <h2>State model</h2>
+          <p>
+            OpenAI WebSocket mode's main value is connection-local continuation. The implementation should keep a small in-memory record for the latest response on each socket and use persisted state only as a fallback when allowed.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Expected behavior</th>
+                <th>Implementation detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>No <code>previous_response_id</code></td>
+                <td>Start a new response chain.</td>
+                <td>Create a fresh <code>resp_</code> ID and SDK session exactly like HTTP streaming.</td>
+              </tr>
+              <tr>
+                <td>Previous ID equals socket cache</td>
+                <td>Continue quickly, including with <code>store:false</code>.</td>
+                <td>Use connection-local metadata to resume the SDK session or to build a synthetic continuation prompt if resume fails.</td>
+              </tr>
+              <tr>
+                <td>Previous ID not cached, <code>store:true</code></td>
+                <td>Fallback to persisted response metadata when available.</td>
+                <td>Reuse current <code>LoadResponseForContinuation</code> / <code>Stored</code> checks for normal persisted chains.</td>
+              </tr>
+              <tr>
+                <td>Previous ID not cached, <code>store:false</code></td>
+                <td>Return <code>previous_response_not_found</code>.</td>
+                <td>Do not rely on debug-retained disk files to emulate ZDR-compatible behavior.</td>
+              </tr>
+              <tr>
+                <td>Continuation fails with 4xx/5xx</td>
+                <td>Evict the referenced cached previous response.</td>
+                <td>Delete the socket cache entry before sending the terminal error event.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout warning">
+            <strong>Design tension:</strong> the current gateway stores response records for debug retention even when <code>store:false</code>. WebSocket mode should not use that debug persistence as a continuation source for uncached <code>store:false</code> responses. Keep API-visible storage, debug retention, and socket-local cache as separate concepts.
+          </div>
+        </section>
+
+        <section id="phases">
+          <h2>Implementation phases</h2>
+          <div style="counter-reset: phase;">
+            <article class="phase">
+              <h3>Establish shared streaming event shaping</h3>
+              <p>
+                Extract the logic in <code>streamResponses</code> that turns internal gateway events into OpenAI Responses stream events. The new helper should not know whether events are written as SSE lines or WebSocket JSON frames.
+              </p>
+              <ul>
+                <li>Create a transport interface such as <code>responseEventSink</code> with <code>Write(event openai.ResponseStreamEvent) error</code> and <code>Done() error</code>.</li>
+                <li>Move message item bookkeeping, output-text done events, function-call argument events, and failure events into the helper.</li>
+                <li>Keep current SSE output byte-for-byte equivalent where practical; update focused tests if event ordering becomes more explicitly normalized.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Add WebSocket upgrade and base event loop</h3>
+              <p>
+                Add <code>GET /v1/responses</code> support that accepts WebSocket upgrades and reads JSON messages from the client until close, deadline, or protocol error.
+              </p>
+              <ul>
+                <li>Add the WebSocket dependency with <code>go get github.com/coder/websocket</code>.</li>
+                <li>Implement <code>responsesWebSocket(w, r)</code> in <code>internal/httpapi/responses_ws.go</code>.</li>
+                <li>Use existing auth, logging, panic recovery, and request ID middleware.</li>
+                <li>Bound message size using <code>COPILOT_MAX_REQUEST_BODY_BYTES</code> or a smaller WebSocket-specific limit if added.</li>
+                <li>Reject unknown event types with a WebSocket JSON error event, not a raw HTTP error after upgrade.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Map <code>response.create</code> into existing request handling</h3>
+              <p>
+                Decode the WebSocket event into the existing <code>openai.ResponsesRequest</code> shape, then reuse validation, input parsing, tool filtering, and reasoning-effort resolution.
+              </p>
+              <ul>
+                <li>Add an envelope type with <code>type</code>, <code>generate</code>, and embedded Responses create fields.</li>
+                <li>Treat <code>stream</code> as implicit <code>true</code> and ignore any client-supplied value in permissive mode.</li>
+                <li>Preserve current strict compatibility behavior for unsupported semantic fields.</li>
+                <li>Log generation starts with a transport tag such as <code>responses.websocket</code>.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Enforce one in-flight response per connection</h3>
+              <p>
+                OpenAI's documented mode runs responses sequentially on a socket and does not multiplex. The implementation should make that invariant explicit.
+              </p>
+              <ul>
+                <li>MVP option: process the read loop synchronously and do not read the next <code>response.create</code> until the current turn completes.</li>
+                <li>If asynchronous reads are introduced later, guard with a mutex or state machine and reject overlapping work.</li>
+                <li>Cancel the active Copilot turn when the socket closes or the 60-minute connection limit is reached.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Implement socket-local continuation cache</h3>
+              <p>
+                Store the latest response record for the connection after a completed response or tool-call response. Use it before persisted fallback when <code>previous_response_id</code> is supplied.
+              </p>
+              <ul>
+                <li>Cache only what the gateway needs: response ID, SDK session ID, model, instructions, input text, output text/items, previous response ID, pending batch ID, retained path, and stored flag.</li>
+                <li>Keep only the most recent response for MVP to match the documented behavior. Consider a tiny LRU only if real clients need it.</li>
+                <li>For <code>store:false</code>, allow continuation only when the previous ID matches the connection cache.</li>
+                <li>On failed continuation, evict the referenced cached state before sending the error event.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Support tool-call-heavy continuation loops</h3>
+              <p>
+                Ensure <code>function_call_output</code> continuations over the socket unblock pending SDK handlers and emit subsequent response events on the same socket.
+              </p>
+              <ul>
+                <li>Reuse existing pending batch ownership validation: endpoint kind, model, previous response ID, and one output per pending call.</li>
+                <li>Make error messages match the documented <code>previous_response_not_found</code> and existing OpenAI-shaped invalid request envelopes.</li>
+                <li>Verify multiple tool calls in a batch and multiple sequential batches in one socket session.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Add lifecycle limits and observability</h3>
+              <p>
+                Add production controls before enabling the feature broadly.
+              </p>
+              <ul>
+                <li>Enforce a 60-minute maximum connection age and send <code>websocket_connection_limit_reached</code> before close when possible.</li>
+                <li>Emit structured logs for socket open, close, response start, response completion, response failure, cache hit, cache miss, and connection-limit closure.</li>
+                <li>Preserve content redaction rules; only include bodies when <code>COPILOT_LOG_CONTENT=true</code>.</li>
+                <li>Consider counters for active WebSocket connections and rejected overlapping requests if observability grows beyond logs.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Document compatibility and deferments</h3>
+              <p>
+                Update public documentation after tests pass.
+              </p>
+              <ul>
+                <li>Add WebSocket mode to the README endpoint and compatibility sections.</li>
+                <li>Document unsupported or deferred features: <code>generate:false</code> warmup if not implemented, standalone compaction, and any limits that differ from OpenAI.</li>
+                <li>Add examples using a minimal WebSocket client and a tool-call continuation loop.</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+
+        <section id="tests">
+          <h2>Testing plan</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Test class</th>
+                <th>Coverage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Unit: event shaping</td>
+                <td>Given gateway deltas, function calls, completed responses, and errors, assert emitted OpenAI Responses events are identical for SSE and WebSocket sinks.</td>
+              </tr>
+              <tr>
+                <td>Handler: upgrade</td>
+                <td>Authenticated WebSocket upgrade succeeds; unauthenticated upgrade fails through existing middleware; non-upgrade GET is rejected cleanly.</td>
+              </tr>
+              <tr>
+                <td>Handler: response.create</td>
+                <td>Valid request emits <code>response.created</code>, deltas, terminal response event, and no SSE <code>[DONE]</code> sentinel.</td>
+              </tr>
+              <tr>
+                <td>Continuation: <code>store:false</code></td>
+                <td>Same-socket previous ID continues successfully; new socket with the same ID returns <code>previous_response_not_found</code>.</td>
+              </tr>
+              <tr>
+                <td>Continuation: <code>store:true</code></td>
+                <td>New socket can fallback to persisted response state when the previous response is stored.</td>
+              </tr>
+              <tr>
+                <td>Tool loop</td>
+                <td>Model emits function call; client replies with <code>function_call_output</code>; parked runner resumes; completed response is emitted on the same socket.</td>
+              </tr>
+              <tr>
+                <td>Protocol errors</td>
+                <td>Malformed JSON, unknown event type, missing model, unknown model, unsupported fields, and overlapping creates return OpenAI-shaped socket error events.</td>
+              </tr>
+              <tr>
+                <td>Lifecycle</td>
+                <td>Socket close cancels active generation; deadline emits <code>websocket_connection_limit_reached</code>; failed continuation evicts cached state.</td>
+              </tr>
+              <tr>
+                <td>Live gated test</td>
+                <td>Behind existing live-test environment gates, run a short real Copilot WebSocket response and a tool-call continuation if live tools are available.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout">
+            <strong>Validation commands:</strong> run <code>goimports -w</code> on edited Go files, then <code>go test ./...</code>. Add a focused WebSocket test package before touching live tests so protocol regressions are caught without Copilot credentials.
+          </div>
+        </section>
+
+        <section id="risks">
+          <h2>Risks and mitigations</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Risk</th>
+                <th>Mitigation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Subtle drift between SSE and WebSocket event ordering</td>
+                <td>Centralize event shaping and test both transports from the same synthetic gateway event stream.</td>
+              </tr>
+              <tr>
+                <td><code>store:false</code> accidentally uses debug-retained disk state</td>
+                <td>Require socket-cache hit for uncached <code>store:false</code>; test same-socket success and new-socket failure.</td>
+              </tr>
+              <tr>
+                <td>SDK session resume does not support desired fast path</td>
+                <td>Reuse current resume behavior first; fallback to synthetic continuation prompt only where existing HTTP behavior already does.</td>
+              </tr>
+              <tr>
+                <td>Long-lived sockets hide stuck SDK turns</td>
+                <td>Propagate context cancellation on socket close, enforce configured request timeout per turn, and enforce the 60-minute socket limit.</td>
+              </tr>
+              <tr>
+                <td>Tool-call batches leak if clients disconnect mid-turn</td>
+                <td>Cancel active runner and remove connection-owned pending batches on socket close or terminal failure.</td>
+              </tr>
+              <tr>
+                <td>Dependency expands attack surface</td>
+                <td>Choose a minimal WebSocket library, pin via <code>go.mod</code>, bound message sizes, and fuzz/error-test JSON input handling.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="acceptance">
+          <h2>Acceptance criteria</h2>
+          <div class="grid-2">
+            <div class="card">
+              <h3><span class="status ok">Must pass</span></h3>
+              <ul>
+                <li><code>wss://host/v1/responses</code> accepts authenticated WebSocket connections.</li>
+                <li>Client <code>response.create</code> events produce OpenAI-shaped Responses streaming JSON events.</li>
+                <li>Only one response runs at a time per connection.</li>
+                <li>Same-socket <code>store:false</code> continuation works with <code>previous_response_id</code>.</li>
+                <li>Uncached <code>store:false</code> continuation returns <code>previous_response_not_found</code>.</li>
+                <li>Tool-call continuation loops work over a single persistent socket.</li>
+                <li><code>go test ./...</code> passes.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3><span class="status wait">May defer</span></h3>
+              <ul>
+                <li><code>generate:false</code> warmup, if no safe SDK warmup path is available.</li>
+                <li>Standalone <code>/v1/responses/compact</code>.</li>
+                <li>Multiplexing; OpenAI does not support it for this mode today.</li>
+                <li>Connection-local cache larger than one previous response.</li>
+                <li>Metrics beyond structured logs.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="callout success">
+            <strong>Definition of done:</strong> WebSocket mode is documented in the README compatibility matrix, covered by deterministic tests, and can run an agentic tool-call loop without requiring clients to reopen HTTP/SSE requests for each turn.
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <footer>
+      <p>Prepared for <code>copilot-api</code>. This document is an implementation plan, not an implementation.</p>
+    </footer>
+  </div>
+</body>
+</html>
