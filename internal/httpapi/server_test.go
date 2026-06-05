@@ -168,9 +168,9 @@ func (g *resolvingChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest
 	return &copilotgw.TurnResult{ID: req.OpenAIID, Created: openai.UnixNow(), Model: req.Model, Text: "ok", FinishReason: "stop"}, nil
 }
 
-func (g *resolvingChatGateway) ContinueChatToolCalls(_ context.Context, model string, outputs map[string]string) (*copilotgw.TurnResult, error) {
+func (g *resolvingChatGateway) ContinueChatToolCalls(_ context.Context, req copilotgw.ChatContinuationRequest) (*copilotgw.TurnResult, error) {
 	g.continueCalled = true
-	return &copilotgw.TurnResult{Model: model, Text: outputs["call_1"], FinishReason: "stop"}, nil
+	return &copilotgw.TurnResult{Model: req.Model, Text: req.Outputs["call_1"], FinishReason: "stop"}, nil
 }
 
 type streamChatGateway struct {
@@ -566,6 +566,35 @@ func TestChatRequestPassesReasoningHistoryAndImageInput(t *testing.T) {
 	}
 }
 
+func TestChatAssistantPrefillBecomesHistoryWithContinuationPrompt(t *testing.T) {
+	gw := &captureChatGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := strings.NewReader(`{
+		"model":"gpt-5",
+		"messages":[
+			{"role":"user","content":"Write a greeting."},
+			{"role":"assistant","content":"Hello"}
+		]
+	}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if len(gw.got.History) != 2 || gw.got.History[1].Role != "assistant" {
+		t.Fatalf("History = %#v, want final assistant prefill preserved", gw.got.History)
+	}
+	text, err := gw.got.FinalUser.Text()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "Continue." {
+		t.Fatalf("FinalUser = %q, want Continue.", text)
+	}
+}
+
 func TestChatRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
 	gw := &captureChatGateway{}
 	s := New(config.Config{DefaultReasoningEffort: "medium"}, gw, slog.Default())
@@ -613,7 +642,10 @@ func TestChatStreamWithToolCallAndIncludeUsageUsesOpenAIChunkShape(t *testing.T)
 		`"role":"assistant"`,
 		`"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"alpha\"}"}}]`,
 		`"finish_reason":"tool_calls"`,
-		`"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}`,
+		// JSON key order is insignificant, so assert the terminal usage chunk's
+		// empty choices and usage object independently.
+		`"choices":[]`,
+		`"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}`,
 		`data: [DONE]`,
 	} {
 		if !strings.Contains(out, want) {
@@ -901,16 +933,23 @@ func TestResponsesWebSocketEmitsTextEventsInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got []string
+	var sequences []int64
 	for {
 		ev := readWebSocketEvent(t, ctx, conn)
 		got = append(got, ev.Type)
+		sequences = append(sequences, ev.SequenceNumber)
 		if ev.Type == "response.completed" {
 			break
 		}
 	}
-	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.output_text.delta", "response.output_text.done", "response.output_item.done", "response.completed"}
+	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("event order = %v, want %v", got, want)
+	}
+	for i, seq := range sequences {
+		if seq != int64(i) {
+			t.Fatalf("sequence_number[%d] = %d, want %d (events %v)", i, seq, i, got)
+		}
 	}
 }
 
@@ -964,7 +1003,7 @@ func TestResponsesWebSocketStreamErrorClosesTextItemAndFailsResponse(t *testing.
 			break
 		}
 	}
-	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.output_text.delta", "response.output_text.done", "response.output_item.done", "response.failed", "error"}
+	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.failed", "error"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("event order = %v, want %v", got, want)
 	}
@@ -1012,6 +1051,65 @@ func TestResponsesWebSocketPreGenerationErrorsUseTopLevelError(t *testing.T) {
 	ev := readWebSocketErrorEvent(t, ctx, conn)
 	if ev.Type != "error" || ev.EventID != "evt_missing" || ev.Status != http.StatusBadRequest || ev.Error.Code != "previous_response_not_found" || ev.Error.Param != "previous_response_id" {
 		t.Fatalf("error event = %#v, want previous_response_not_found", ev)
+	}
+}
+
+func TestResponsesWebSocketIdleTimeoutClosesConnection(t *testing.T) {
+	s := New(config.Config{WebSocketIdleTimeout: 10 * time.Millisecond, WebSocketPingInterval: 0}, &websocketStreamGateway{}, slog.Default())
+	hts := httptest.NewServer(s.Handler())
+	defer hts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hts.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	ev, err := readOptionalWebSocketErrorEvent(ctx, conn)
+	if err != nil {
+		if websocket.CloseStatus(err) == websocket.StatusGoingAway || strings.Contains(err.Error(), "EOF") {
+			return
+		}
+		t.Fatal(err)
+	}
+	if !strings.Contains(ev.Error.Message, "idle timeout") {
+		t.Fatalf("idle timeout event = %#v, want idle timeout error", ev)
+	}
+}
+
+func TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	gw := &websocketStreamGateway{started: started, release: release}
+	s := New(config.Config{WebSocketIdleTimeout: 30 * time.Millisecond, WebSocketPingInterval: 0}, gw, slog.Default())
+	hts := httptest.NewServer(s.Handler())
+	defer hts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hts.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("response generation did not start")
+	}
+	// Stay quiet well past the idle timeout while the response is still
+	// generating. The idle watchdog must not treat an in-flight response as idle
+	// and abort it mid-stream.
+	time.Sleep(120 * time.Millisecond)
+	close(release)
+
+	resp := readUntilResponseCompleted(t, ctx, conn)
+	if resp == nil || resp.Status != "completed" {
+		t.Fatalf("response = %#v, want completed after a long generation", resp)
 	}
 }
 
@@ -1075,6 +1173,12 @@ func readUntilResponseCompleted(t *testing.T, ctx context.Context, conn *websock
 	}
 }
 
+func readOptionalWebSocketErrorEvent(ctx context.Context, conn *websocket.Conn) (openai.WebSocketErrorEvent, error) {
+	var ev openai.WebSocketErrorEvent
+	err := wsjson.Read(ctx, conn, &ev)
+	return ev, err
+}
+
 func readWebSocketErrorEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) openai.WebSocketErrorEvent {
 	t.Helper()
 	var ev openai.WebSocketErrorEvent
@@ -1086,11 +1190,21 @@ func readWebSocketErrorEvent(t *testing.T, ctx context.Context, conn *websocket.
 
 func readWebSocketEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) openai.ResponseStreamEvent {
 	t.Helper()
-	var ev openai.ResponseStreamEvent
-	if err := wsjson.Read(ctx, conn, &ev); err != nil {
+	var raw json.RawMessage
+	if err := wsjson.Read(ctx, conn, &raw); err != nil {
 		t.Fatal(err)
 	}
-	return ev
+	// The websocket carries both response stream events (string status) and
+	// terminal error frames (numeric HTTP status) under the shared `status` field
+	// name. Decode tolerantly so this single reader can surface either kind.
+	var tol struct {
+		openai.ResponseStreamEvent
+		Status json.RawMessage `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &tol); err != nil {
+		t.Fatalf("failed to unmarshal websocket event %s: %v", raw, err)
+	}
+	return tol.ResponseStreamEvent
 }
 
 func TestResponsesGetDeleteHTTPContract(t *testing.T) {
@@ -1282,6 +1396,17 @@ func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
 	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_scalar","output":42}]`))
 	if err == nil {
 		t.Fatal("expected scalar function_call_output rejection")
+	}
+	_, outputs, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_text_parts","output":[{"type":"output_text","text":"alpha"},{"type":"text","text":" beta"}]}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outputs["call_text_parts"]; got != "alpha beta" {
+		t.Fatalf("text content-part output = %q, want alpha beta", got)
+	}
+	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_file","output":[{"type":"file","file_id":"file_1"}]}]`))
+	if err == nil || !strings.Contains(err.Error(), "file content arrays") {
+		t.Fatalf("expected file content array rejection, got %v", err)
 	}
 }
 

@@ -600,11 +600,23 @@ integrationTest(
         },
       });
       // The WebSocket fetch shim treats top-level error frames as terminal and
-      // may surface provider-specific stream parts before closing. Draining the
-      // stream under the test timeout proves the client does not hang.
-      for await (const _part of result.fullStream) {
-        // Drain until the WebSocket transport observes the terminal error.
+      // may either emit an error part or reject while the stream is drained. A
+      // clean close without an observed error must fail this test.
+      let observedError = false;
+      try {
+        for await (const part of result.fullStream) {
+          if ((part as { type?: string }).type === "error") {
+            observedError = true;
+          }
+        }
+        await result.finishReason;
+      } catch (_err) {
+        observedError = true;
       }
+      assert(
+        observedError,
+        "Responses WebSocket missing previous_response_id closed without an observed terminal error",
+      );
     } finally {
       ws.close();
     }

@@ -54,7 +54,9 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		previous = &req.PreviousResponseID
 		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
 		if err != nil || session == nil {
-			g.log.Warn("falling back to synthetic Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
+			if g.log != nil {
+				g.log.Warn("falling back to synthetic Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
+			}
 			prompt = g.responseContinuationPrompt(record, prompt)
 			sessionID = "resp_sdk_" + uuid.NewString()
 			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
@@ -70,7 +72,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		return nil, openai.Upstream("copilot SDK returned nil session")
 	}
 	retained := g.fs.SessionRoot(sessionID)
-	runner := g.newTurnRunner(req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
+	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
 	runner.watchContext(ctx)
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
 		_ = session.Disconnect()
@@ -103,7 +105,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		batch, err := g.broker.FindByCallIDs(ids)
 		if err != nil {
-			return nil, openai.InvalidRequest("unknown or expired function_call_output call_id", "input")
+			return g.streamToolResponseFromRecord(ctx, req)
 		}
 		previousResponseID := req.PreviousResponseID
 		if previousResponseID == "" {
@@ -124,7 +126,10 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		runner := g.runnerForBatch(batch.ID)
 		if runner == nil {
-			return nil, openai.InvalidRequest("pending function_call_output is not attached to a live streamable turn", "input")
+			batch.Cancel(openai.InvalidRequest("pending function_call_output is not attached to a live streamable turn", "input"))
+			g.broker.Remove(batch)
+			g.forgetRunner(batch.ID)
+			return g.streamToolResponseFromRecord(ctx, req)
 		}
 		storeVisible := req.Store
 		if !req.StoreSet {
@@ -138,14 +143,17 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		ch := make(chan ResponseStreamEvent, 32)
 		if err := batch.CompleteWithSetup(outputs, func() {
 			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, ctx.Done())
-			runner.setOnResult(func(turn *TurnResult) {
+			runner.setOnResult(func(turn *TurnResult) error {
 				if turn.PendingBatchID != "" {
 					g.rememberRunner(turn.PendingBatchID, runner)
 				}
 				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn)
 				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 				record.PendingBatchID = turn.PendingBatchID
-				_ = g.store.SaveResponse(record)
+				if err := g.store.SaveResponse(record); err != nil {
+					return openai.Internal(err.Error())
+				}
+				return nil
 			})
 		}); err != nil {
 			close(ch)
@@ -227,10 +235,10 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		retained = g.fs.SessionRoot(sessionID)
 	}
 	ch := make(chan ResponseStreamEvent, 32)
-	runner := g.newTurnRunner(req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
+	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
 	runner.watchContext(ctx)
 	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, previous, req.Store, ctx.Done())
-	runner.setOnResult(func(turn *TurnResult) {
+	runner.setOnResult(func(turn *TurnResult) error {
 		if turn.PendingBatchID != "" {
 			g.rememberRunner(turn.PendingBatchID, runner)
 		}
@@ -238,7 +246,10 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record := recordFromResponse(resp, sessionID, retained)
 		record.InputText = req.Input.Text
 		record.PendingBatchID = turn.PendingBatchID
-		_ = g.store.SaveResponse(record)
+		if err := g.store.SaveResponse(record); err != nil {
+			return openai.Internal(err.Error())
+		}
+		return nil
 	})
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
 		_ = session.Disconnect()

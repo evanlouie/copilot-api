@@ -44,6 +44,10 @@ func (w *webSocketJSONWriter) writeError(err error, eventID string) error {
 type responsesWebSocketState struct {
 	mu     sync.Mutex
 	active bool
+	// lastSeen is the time of the most recent client activity or response
+	// completion. It seeds the idle watchdog so an in-flight response does not
+	// count as idle and the idle clock restarts once generation finishes.
+	lastSeen time.Time
 	// latestID mirrors OpenAI's latest-response cache lifecycle for bookkeeping.
 	// Continuation still falls back to locally persisted records, including
 	// store:false records, because this proxy intentionally retains local debug
@@ -51,6 +55,24 @@ type responsesWebSocketState struct {
 	latestID string
 	warm     *copilotgw.WarmResponseSession
 	wg       sync.WaitGroup
+}
+
+func (s *responsesWebSocketState) markActivity() {
+	s.mu.Lock()
+	s.lastSeen = time.Now()
+	s.mu.Unlock()
+}
+
+// idleFor reports whether the connection has had no client activity for at least
+// d while no response is being generated. An in-flight response never counts as
+// idle, since the client is legitimately waiting on streamed output.
+func (s *responsesWebSocketState) idleFor(d time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active || s.lastSeen.IsZero() {
+		return false
+	}
+	return time.Since(s.lastSeen) >= d
 }
 
 func (s *responsesWebSocketState) tryStart() bool {
@@ -67,6 +89,7 @@ func (s *responsesWebSocketState) tryStart() bool {
 func (s *responsesWebSocketState) finish() {
 	s.mu.Lock()
 	s.active = false
+	s.lastSeen = time.Now()
 	s.mu.Unlock()
 	s.wg.Done()
 }
@@ -146,9 +169,15 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(readLimit)
 
-	connCtx, cancel := context.WithCancel(r.Context())
+	parent := r.Context()
+	if s.cfg.WebSocketMaxLifetime > 0 {
+		var cancelLifetime context.CancelFunc
+		parent, cancelLifetime = context.WithTimeout(parent, s.cfg.WebSocketMaxLifetime)
+		defer cancelLifetime()
+	}
+	connCtx, cancel := context.WithCancel(parent)
 	writer := &webSocketJSONWriter{conn: conn}
-	state := &responsesWebSocketState{}
+	state := &responsesWebSocketState{lastSeen: time.Now()}
 	var closeOnce sync.Once
 	closeWith := func(status websocket.StatusCode, reason string) {
 		closeOnce.Do(func() {
@@ -157,6 +186,19 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	defer closeWith(websocket.StatusNormalClosure, "")
+	if s.cfg.WebSocketPingInterval > 0 {
+		go keepResponsesWebSocketAlive(connCtx, conn, s.cfg.WebSocketPingInterval, closeWith)
+	}
+	// Enforce the idle timeout from a watchdog rather than the read deadline.
+	// Cancelling an in-flight websocket read tears down the connection, so a
+	// per-read deadline would abort a long response mid-stream. The watchdog only
+	// fires when no response is generating and the client has gone quiet.
+	if s.cfg.WebSocketIdleTimeout > 0 {
+		go watchResponsesWebSocketIdle(connCtx, state, s.cfg.WebSocketIdleTimeout, func() {
+			_ = writer.writeError(openai.InvalidRequest("websocket idle timeout", "body"), "")
+			closeWith(websocket.StatusGoingAway, "websocket idle timeout")
+		})
+	}
 
 	for {
 		var raw json.RawMessage
@@ -171,6 +213,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 			_ = writer.writeError(openai.InvalidRequest("invalid JSON websocket message: "+err.Error(), "body"), "")
 			continue
 		}
+		state.markActivity()
 
 		var envelope openai.WebSocketClientEvent
 		if err := json.Unmarshal(raw, &envelope); err != nil {
@@ -205,6 +248,45 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	closeWith(websocket.StatusNormalClosure, "")
 	state.close()
 	state.wait()
+}
+
+func watchResponsesWebSocketIdle(ctx context.Context, state *responsesWebSocketState, idle time.Duration, onIdle func()) {
+	interval := idle / 2
+	if interval <= 0 {
+		interval = idle
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if state.idleFor(idle) {
+				onIdle()
+				return
+			}
+		}
+	}
+}
+
+func keepResponsesWebSocketAlive(ctx context.Context, conn *websocket.Conn, interval time.Duration, closeWith func(websocket.StatusCode, string)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, webSocketWriteTimeout)
+			err := conn.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				closeWith(websocket.StatusGoingAway, "websocket ping failed")
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.Request, writer *webSocketJSONWriter, state *responsesWebSocketState, closeWith func(websocket.StatusCode, string), raw json.RawMessage) {

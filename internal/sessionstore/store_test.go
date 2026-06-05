@@ -2,6 +2,8 @@ package sessionstore
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +19,26 @@ func TestLockExcludesSecondProcess(t *testing.T) {
 	defer lock.Release()
 	if _, err := AcquireLock(store.LockPath()); err == nil {
 		t.Fatal("expected second lock acquisition to fail")
+	}
+}
+
+func TestSaveResponseWritesVersionedCompactJSON(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveResponse(ResponseRecord{ID: "resp_compact", SDKSessionID: "sdk", Model: "gpt-5", Stored: true}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(store.responsePath("resp_compact"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"version":2`) {
+		t.Fatalf("record JSON missing version: %s", b)
+	}
+	if strings.Contains(string(b), "\n  ") {
+		t.Fatalf("record JSON should be compact, got: %s", b)
 	}
 }
 

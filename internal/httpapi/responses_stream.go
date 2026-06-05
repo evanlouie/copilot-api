@@ -34,30 +34,32 @@ func writeResponseLifecycleStart(writer responseEventWriter, req copilotgw.Respo
 		previous = &req.PreviousResponseID
 	}
 	initial := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: status, Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
-	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.created", Response: initial}); err != nil {
+	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.created", Response: initial, Status: initial.Status}); err != nil {
 		return nil, err
 	}
-	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.in_progress", Response: initial}); err != nil {
+	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.in_progress", Response: initial, Status: initial.Status}); err != nil {
 		return nil, err
 	}
 	return initial, nil
 }
 
 func writeWarmResponseEvents(writer responseEventWriter, resp *openai.Response) error {
+	writer = newResponseStreamEncoder(writer)
 	initial := *resp
 	initial.Status = "in_progress"
 	initial.Output = []openai.ResponseOutputItem{}
 	initial.OutputText = ""
-	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.created", Response: &initial}); err != nil {
+	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.created", Response: &initial, Status: initial.Status}); err != nil {
 		return err
 	}
-	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.in_progress", Response: &initial}); err != nil {
+	if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.in_progress", Response: &initial, Status: initial.Status}); err != nil {
 		return err
 	}
-	return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.completed", Response: resp})
+	return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.completed", Response: resp, Status: resp.Status})
 }
 
 func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, req copilotgw.ResponseRequest, ch <-chan copilotgw.ResponseStreamEvent) responseStreamWriteResult {
+	writer = newResponseStreamEncoder(writer)
 	if _, err := writeResponseLifecycleStart(writer, req, "in_progress"); err != nil {
 		return responseStreamWriteResult{Err: err, WriteFailed: true}
 	}
@@ -65,6 +67,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 	messageID := openai.NewID("msg_")
 	messageStarted := false
 	messageDone := false
+	contentPartStarted := false
 	var messageText strings.Builder
 	var final *openai.Response
 	for {
@@ -87,10 +90,17 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 				if !messageStarted {
 					item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "in_progress", Role: "assistant", Content: []openai.ResponseText{}}
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &zero, Item: &item}); err != nil {
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &zero, Item: &item, Status: item.Status}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
 					messageStarted = true
+				}
+				if !contentPartStarted {
+					part := openai.ResponseText{Type: "output_text", Text: ""}
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.added", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Part: &part}); err != nil {
+						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+					}
+					contentPartStarted = true
 				}
 				messageText.WriteString(ev.Delta)
 				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Delta: ev.Delta}); err != nil {
@@ -103,9 +113,15 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: text}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
+					if contentPartStarted {
+						part := openai.ResponseText{Type: "output_text", Text: text}
+						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Part: &part}); err != nil {
+							return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+						}
+					}
 					messageDone = true
 					if item, idx := streamedMessageItem(ev.Response, messageID, text); item != nil {
-						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: item}); err != nil {
+						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: item, Status: item.Status}); err != nil {
 							return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 						}
 					}
@@ -113,18 +129,25 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				if err := writeResponseOutputEvents(writer, ev.Response); err != nil {
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
-				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.completed", Response: ev.Response}); err != nil {
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.completed", Response: ev.Response, Status: ev.Response.Status}); err != nil {
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 				final = ev.Response
 			case "error":
 				if messageStarted && !messageDone {
 					zero := 0
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: messageText.String()}); err != nil {
+					text := messageText.String()
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: text}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
-					item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "incomplete", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: messageText.String()}}}
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &zero, Item: &item}); err != nil {
+					if contentPartStarted {
+						part := openai.ResponseText{Type: "output_text", Text: text}
+						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Part: &part}); err != nil {
+							return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+						}
+					}
+					item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "incomplete", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: text}}}
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &zero, Item: &item, Status: item.Status}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
 				}
@@ -147,7 +170,7 @@ func writeResponseOutputEvents(writer responseEventWriter, resp *openai.Response
 			continue
 		}
 		idx := i
-		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item}); err != nil {
+		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item, Status: item.Status}); err != nil {
 			return err
 		}
 		if item.Arguments != "" {
@@ -155,10 +178,10 @@ func writeResponseOutputEvents(writer responseEventWriter, resp *openai.Response
 				return err
 			}
 		}
-		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: &idx, ItemID: item.ID, Arguments: item.Arguments}); err != nil {
+		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: &idx, ItemID: item.ID, Arguments: item.Arguments, Name: item.Name}); err != nil {
 			return err
 		}
-		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item}); err != nil {
+		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item, Status: item.Status}); err != nil {
 			return err
 		}
 	}
@@ -172,5 +195,5 @@ func writeResponseFailedEvent(writer responseEventWriter, req copilotgw.Response
 		previous = &req.PreviousResponseID
 	}
 	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "failed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: obj, IncompleteDetails: nil}
-	return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.failed", Response: resp, Error: &obj})
+	return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.failed", Response: resp, Error: &obj, Status: resp.Status})
 }

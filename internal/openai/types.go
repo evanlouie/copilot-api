@@ -374,6 +374,22 @@ type ChatCompletionChunk struct {
 	Choices           []ChatChunkChoice `json:"choices"`
 	Usage             *Usage            `json:"usage,omitempty"`
 	SystemFingerprint *string           `json:"system_fingerprint"`
+	IncludeUsage      bool              `json:"-"`
+}
+
+func (c ChatCompletionChunk) MarshalJSON() ([]byte, error) {
+	type alias ChatCompletionChunk
+	if !c.IncludeUsage {
+		return json.Marshal(alias(c))
+	}
+	// When stream_options.include_usage is set, OpenAI sends usage on every
+	// chunk (null until the terminal usage chunk). Embedding the alias keeps all
+	// other fields in sync automatically while the shadowing Usage field drops
+	// omitempty so null is rendered explicitly.
+	return json.Marshal(struct {
+		alias
+		Usage *Usage `json:"usage"`
+	}{alias: alias(c), Usage: c.Usage})
 }
 
 type ChatChunkChoice struct {
@@ -498,15 +514,19 @@ type ResponseInputItem struct {
 }
 
 type ResponseStreamEvent struct {
-	EventID      string              `json:"event_id,omitempty"`
-	Type         string              `json:"type"`
-	Response     *Response           `json:"response,omitempty"`
-	Item         *ResponseOutputItem `json:"item,omitempty"`
-	ItemID       string              `json:"item_id,omitempty"`
-	OutputIndex  *int                `json:"output_index,omitempty"`
-	ContentIndex *int                `json:"content_index,omitempty"`
-	Delta        string              `json:"delta,omitempty"`
-	Text         string              `json:"text,omitempty"`
-	Arguments    string              `json:"arguments,omitempty"`
-	Error        *ErrorObject        `json:"error,omitempty"`
+	EventID        string              `json:"event_id,omitempty"`
+	Type           string              `json:"type"`
+	SequenceNumber int64               `json:"sequence_number"`
+	Response       *Response           `json:"response,omitempty"`
+	Item           *ResponseOutputItem `json:"item,omitempty"`
+	Part           *ResponseText       `json:"part,omitempty"`
+	ItemID         string              `json:"item_id,omitempty"`
+	OutputIndex    *int                `json:"output_index,omitempty"`
+	ContentIndex   *int                `json:"content_index,omitempty"`
+	Delta          string              `json:"delta,omitempty"`
+	Text           string              `json:"text,omitempty"`
+	Arguments      string              `json:"arguments,omitempty"`
+	Name           string              `json:"name,omitempty"`
+	Status         string              `json:"status,omitempty"`
+	Error          *ErrorObject        `json:"error,omitempty"`
 }

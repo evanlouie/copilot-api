@@ -1,7 +1,9 @@
 package toolproxy
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +117,40 @@ func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("expired batch remained registered")
+}
+
+func TestBatchContextCancellationUnblocksHandler(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	rt.SetContext(ctx)
+	done := make(chan string, 1)
+	go func() {
+		_, err := rt.Tools()[0].Handler(copilot.ToolInvocation{ToolCallID: "call_cancel", ToolName: rt.Tools()[0].Name, Arguments: map[string]any{}})
+		if err != nil {
+			done <- err.Error()
+			return
+		}
+		done <- "ok"
+	}()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if _, err := broker.FindByCallIDs([]string{"call_cancel"}); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if !strings.Contains(got, "canceled") {
+			t.Fatalf("handler error = %q, want cancellation", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not unblock after context cancellation")
+	}
 }
 
 func TestBatchCompleteUnblocksHandler(t *testing.T) {

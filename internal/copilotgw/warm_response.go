@@ -116,7 +116,8 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	if err != nil {
 		return nil, err
 	}
-	if _, err := g.resolvePrompt(ctx, req.Model, req.Input, "input"); err != nil {
+	prompt, err := g.resolvePrompt(ctx, req.Model, req.Input, "input")
+	if err != nil {
 		return nil, err
 	}
 	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
@@ -139,6 +140,8 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 			if g.log != nil {
 				g.log.Warn("falling back to synthetic warm Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
 			}
+			prompt = g.responseContinuationPrompt(record, prompt)
+			req.Input.Text = prompt.Text
 			sessionID = "resp_sdk_" + uuid.NewString()
 			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 		}

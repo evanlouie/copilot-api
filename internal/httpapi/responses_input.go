@@ -9,6 +9,9 @@ import (
 )
 
 func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]string, string, error) {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return openai.PromptContent{}, nil, "", nil
+	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return openai.PromptContent{Text: s}, nil, "", nil
@@ -174,12 +177,15 @@ func combineInstructions(base, extra string) string {
 	return base + "\n\n" + extra
 }
 func outputRawToString(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
 		return "", nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s, nil
+	}
+	if text, ok, err := outputContentPartsToString(raw); ok || err != nil {
+		return text, err
 	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
@@ -190,6 +196,51 @@ func outputRawToString(raw json.RawMessage) (string, error) {
 		b, _ := json.Marshal(v)
 		return string(b), nil
 	default:
-		return "", fmt.Errorf("function_call_output output must be string, JSON object, or JSON array")
+		return "", fmt.Errorf("function_call_output output must be string, JSON object, JSON array, or text content parts")
 	}
+}
+
+func outputContentPartsToString(raw json.RawMessage) (string, bool, error) {
+	var parts []openai.ContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", false, nil
+	}
+	if len(parts) == 0 {
+		return "", true, nil
+	}
+	var b strings.Builder
+	recognized := false
+	for _, part := range parts {
+		if part.FileID != "" {
+			return "", true, fmt.Errorf("function_call_output file content arrays are not supported")
+		}
+		if len(part.ImageURL) > 0 {
+			return "", true, fmt.Errorf("function_call_output image content arrays are not supported")
+		}
+		switch part.Type {
+		case "text", "input_text", "output_text":
+			recognized = true
+			b.WriteString(part.Text)
+		case "refusal":
+			recognized = true
+			b.WriteString(part.Refusal)
+		case "image", "image_url", "input_image", "output_image":
+			return "", true, fmt.Errorf("function_call_output image content arrays are not supported")
+		case "file", "input_file", "output_file":
+			return "", true, fmt.Errorf("function_call_output file content arrays are not supported")
+		case "":
+			if part.Text == "" && part.Refusal == "" {
+				return "", false, nil
+			}
+			recognized = true
+			b.WriteString(part.Text)
+			b.WriteString(part.Refusal)
+		default:
+			return "", true, fmt.Errorf("unsupported function_call_output content part type %q", part.Type)
+		}
+	}
+	if !recognized {
+		return "", false, nil
+	}
+	return b.String(), true, nil
 }

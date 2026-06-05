@@ -19,7 +19,15 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 )
 
-const maxImageBytes = 50 << 20
+const (
+	maxImageBytes          = 50 << 20
+	defaultMaxPromptImages = 20
+)
+
+// maxAggregateImageBytes caps the total decoded image bytes accepted per
+// request. It is a var (not a const) so tests can exercise the aggregate limit
+// without allocating the full default.
+var maxAggregateImageBytes int64 = 100 << 20
 
 var imageHTTPClient = &http.Client{
 	Timeout:       30 * time.Second,
@@ -133,94 +141,109 @@ func (g *RealGateway) resolvePrompt(ctx context.Context, model string, prompt op
 	if !modelInfo.VisionKnown || !modelInfo.SupportsVision {
 		return resolvedPrompt{}, openai.InvalidRequest("model does not support image inputs: "+model, param)
 	}
-	if modelInfo.Vision != nil && modelInfo.Vision.MaxPromptImages > 0 && int64(len(prompt.Images)) > modelInfo.Vision.MaxPromptImages {
-		return resolvedPrompt{}, openai.InvalidRequest(fmt.Sprintf("model supports at most %d image inputs per prompt", modelInfo.Vision.MaxPromptImages), param)
+	maxImages := int64(defaultMaxPromptImages)
+	if modelInfo.Vision != nil && modelInfo.Vision.MaxPromptImages > 0 {
+		maxImages = modelInfo.Vision.MaxPromptImages
+	}
+	if int64(len(prompt.Images)) > maxImages {
+		return resolvedPrompt{}, openai.InvalidRequest(fmt.Sprintf("model supports at most %d image inputs per prompt", maxImages), param)
 	}
 	attachments := make([]copilot.Attachment, 0, len(prompt.Images))
+	var aggregateBytes int64
 	for i, image := range prompt.Images {
-		attachment, err := resolveImageAttachment(ctx, image, i, modelInfo.Vision, param)
+		resolved, err := resolveImageAttachment(ctx, image, i, modelInfo.Vision, param)
 		if err != nil {
 			return resolvedPrompt{}, err
 		}
-		attachments = append(attachments, attachment)
+		aggregateBytes += resolved.bytes
+		if aggregateBytes > maxAggregateImageBytes {
+			return resolvedPrompt{}, openai.InvalidRequest(fmt.Sprintf("image inputs exceed the aggregate %d byte size limit", maxAggregateImageBytes), param)
+		}
+		attachments = append(attachments, resolved.attachment)
 	}
 	return resolvedPrompt{Text: prompt.Text, Attachments: attachments}, nil
 }
 
-func resolveImageAttachment(ctx context.Context, image openai.ImageInput, index int, limits *VisionLimits, param string) (copilot.Attachment, error) {
+type resolvedImageAttachment struct {
+	attachment copilot.Attachment
+	bytes      int64
+}
+
+func resolveImageAttachment(ctx context.Context, image openai.ImageInput, index int, limits *VisionLimits, param string) (resolvedImageAttachment, error) {
 	raw := strings.TrimSpace(image.URL)
 	if raw == "" {
-		return nil, openai.InvalidRequest("image_url is required", param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("image_url is required", param)
 	}
 	if strings.HasPrefix(strings.ToLower(raw), "data:") {
 		return dataURLAttachment(raw, index, limits, param)
 	}
 	u, err := url.Parse(raw)
 	if err != nil || !u.IsAbs() {
-		return nil, openai.InvalidRequest("image_url must be an absolute URL or data URL", param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("image_url must be an absolute URL or data URL", param)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
 		if err := validateRemoteImageURL(u); err != nil {
-			return nil, openai.InvalidRequest(err.Error(), param)
+			return resolvedImageAttachment{}, openai.InvalidRequest(err.Error(), param)
 		}
 		return remoteImageAttachment(ctx, u, index, limits, param)
 	default:
-		return nil, openai.InvalidRequest("image_url scheme must be http, https, or data", param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("image_url scheme must be http, https, or data", param)
 	}
 }
 
-func dataURLAttachment(raw string, index int, limits *VisionLimits, param string) (copilot.Attachment, error) {
-	mediaType, data, err := parseImageDataURL(raw)
+func dataURLAttachment(raw string, index int, limits *VisionLimits, param string) (resolvedImageAttachment, error) {
+	mediaType, data, size, err := parseImageDataURL(raw, imageByteLimit(limits))
 	if err != nil {
-		return nil, openai.InvalidRequest(err.Error(), param)
+		return resolvedImageAttachment{}, openai.InvalidRequest(err.Error(), param)
 	}
 	if !mediaTypeAllowed(mediaType, limits) {
-		return nil, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
 	}
 	displayName := imageDisplayName(index, mediaType, "")
-	return copilot.AttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
+	return resolvedImageAttachment{attachment: copilot.AttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, bytes: size}, nil
 }
 
-func remoteImageAttachment(ctx context.Context, u *url.URL, index int, limits *VisionLimits, param string) (copilot.Attachment, error) {
+func remoteImageAttachment(ctx context.Context, u *url.URL, index int, limits *VisionLimits, param string) (resolvedImageAttachment, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, openai.InvalidRequest("invalid image_url", param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("invalid image_url", param)
 	}
 	resp, err := imageHTTPClient.Do(req)
 	if err != nil {
-		return nil, openai.InvalidRequest("failed to fetch image_url: "+err.Error(), param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("failed to fetch image_url: "+err.Error(), param)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, openai.InvalidRequest(fmt.Sprintf("image_url returned HTTP %d", resp.StatusCode), param)
+		return resolvedImageAttachment{}, openai.InvalidRequest(fmt.Sprintf("image_url returned HTTP %d", resp.StatusCode), param)
 	}
-	if resp.ContentLength > maxImageBytes {
-		return nil, openai.InvalidRequest("image_url exceeds the 50 MB size limit", param)
+	limit := imageByteLimit(limits)
+	if resp.ContentLength > limit {
+		return resolvedImageAttachment{}, openai.InvalidRequest(imageSizeLimitMessage("image_url", limit), param)
 	}
-	body, err := readLimited(resp.Body, maxImageBytes)
+	body, err := readLimited(resp.Body, limit)
 	if err != nil {
-		return nil, openai.InvalidRequest(err.Error(), param)
+		return resolvedImageAttachment{}, openai.InvalidRequest(err.Error(), param)
 	}
 	if len(body) == 0 {
-		return nil, openai.InvalidRequest("image_url returned an empty image", param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("image_url returned an empty image", param)
 	}
 	mediaType := imageMediaType(resp.Header.Get("Content-Type"), body)
 	if mediaType == "" {
-		return nil, openai.InvalidRequest("image_url did not return a supported image MIME type", param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("image_url did not return a supported image MIME type", param)
 	}
 	if !mediaTypeAllowed(mediaType, limits) {
-		return nil, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
+		return resolvedImageAttachment{}, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
 	}
 	data := base64.StdEncoding.EncodeToString(body)
 	displayName := imageDisplayName(index, mediaType, path.Base(u.Path))
-	return copilot.AttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, nil
+	return resolvedImageAttachment{attachment: copilot.AttachmentBlob{Data: data, MIMEType: mediaType, DisplayName: &displayName}, bytes: int64(len(body))}, nil
 }
 
-func parseImageDataURL(raw string) (string, string, error) {
+func parseImageDataURL(raw string, limit int64) (string, string, int64, error) {
 	comma := strings.IndexByte(raw, ',')
 	if comma < 0 {
-		return "", "", fmt.Errorf("data URL image inputs must include base64 data")
+		return "", "", 0, fmt.Errorf("data URL image inputs must include base64 data")
 	}
 	meta := raw[len("data:"):comma]
 	payload := raw[comma+1:]
@@ -234,29 +257,41 @@ func parseImageDataURL(raw string) (string, string, error) {
 		}
 	}
 	if !base64Encoded {
-		return "", "", fmt.Errorf("data URL image inputs must be base64 encoded")
+		return "", "", 0, fmt.Errorf("data URL image inputs must be base64 encoded")
 	}
 	unescaped, err := url.PathUnescape(payload)
 	if err != nil {
-		return "", "", fmt.Errorf("data URL image payload is not valid")
+		return "", "", 0, fmt.Errorf("data URL image payload is not valid")
 	}
 	decoded, err := base64.StdEncoding.DecodeString(compactBase64(unescaped))
 	if err != nil {
-		return "", "", fmt.Errorf("data URL image payload is not valid base64")
+		return "", "", 0, fmt.Errorf("data URL image payload is not valid base64")
 	}
 	if len(decoded) == 0 {
-		return "", "", fmt.Errorf("data URL image payload is empty")
+		return "", "", 0, fmt.Errorf("data URL image payload is empty")
 	}
-	if len(decoded) > maxImageBytes {
-		return "", "", fmt.Errorf("image input exceeds the 50 MB size limit")
+	if int64(len(decoded)) > limit {
+		return "", "", 0, fmt.Errorf("%s", imageSizeLimitMessage("image input", limit))
 	}
 	if mediaType == "" || mediaType == "application/octet-stream" {
 		mediaType = imageMediaType("", decoded)
 	}
 	if mediaType == "" || !strings.HasPrefix(mediaType, "image/") {
-		return "", "", fmt.Errorf("data URL MIME type must be an image type")
+		return "", "", 0, fmt.Errorf("data URL MIME type must be an image type")
 	}
-	return mediaType, base64.StdEncoding.EncodeToString(decoded), nil
+	return mediaType, base64.StdEncoding.EncodeToString(decoded), int64(len(decoded)), nil
+}
+
+func imageByteLimit(limits *VisionLimits) int64 {
+	limit := int64(maxImageBytes)
+	if limits != nil && limits.MaxPromptImageSize > 0 && limits.MaxPromptImageSize < limit {
+		limit = limits.MaxPromptImageSize
+	}
+	return limit
+}
+
+func imageSizeLimitMessage(subject string, limit int64) string {
+	return fmt.Sprintf("%s exceeds the %d byte size limit", subject, limit)
 }
 
 func readLimited(r io.Reader, limit int64) ([]byte, error) {
@@ -265,7 +300,7 @@ func readLimited(r io.Reader, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read image_url: %w", err)
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("image_url exceeds the 50 MB size limit")
+		return nil, fmt.Errorf("%s", imageSizeLimitMessage("image_url", limit))
 	}
 	return body, nil
 }

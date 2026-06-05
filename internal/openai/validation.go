@@ -113,7 +113,9 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 		return InvalidRequest("model is required", "model")
 	}
 	if len(req.Input) == 0 || string(req.Input) == "null" {
-		return InvalidRequest("input is required", "input")
+		if req.PreviousResponseID == "" {
+			return InvalidRequest("input is required", "input")
+		}
 	}
 	if err := validateUnsupportedFields(req.Raw, alwaysRejectResponseFields); err != nil {
 		return err

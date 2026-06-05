@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,15 +28,23 @@ type RealGateway struct {
 	store  *sessionstore.Store
 	broker *toolproxy.Broker
 
-	modelsMu       sync.Mutex
-	models         []Model
-	modelsFetched  time.Time
-	modelsCacheTTL time.Duration
+	modelsMu          sync.Mutex
+	models            []Model
+	modelsFetched     time.Time
+	modelsCacheTTL    time.Duration
+	modelsRefreshing  bool
+	modelsRefreshDone chan struct{}
+	// modelsFetcher overrides the upstream model fetch. It is nil in production
+	// (the SDK client is used) and set by tests to observe refresh behavior.
+	modelsFetcher  func(context.Context) ([]Model, error)
 	pendingMu      sync.Mutex
 	pendingRunners map[string]*turnRunner
 }
 
 func NewReal(cfg config.Config, store *sessionstore.Store, log *slog.Logger) *RealGateway {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	fs := sessionfs.NewManager(cfg.DataDir)
 	opts := newRealClientOptions(cfg)
 	return &RealGateway{cfg: cfg, log: log, client: copilot.NewClient(opts), fs: fs, store: store, broker: toolproxy.NewBroker(cfg.ToolCallTTL), modelsCacheTTL: cfg.ModelsCacheTTL, pendingRunners: map[string]*turnRunner{}}

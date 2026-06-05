@@ -138,6 +138,65 @@ func TestResolvePromptRejectsPrivateRemoteImageHost(t *testing.T) {
 	}
 }
 
+func TestResolvePromptRejectsModelImageSizeLimit(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID:             "vision",
+		VisionKnown:    true,
+		SupportsVision: true,
+		Vision:         &VisionLimits{SupportedMediaTypes: []string{"image/png"}, MaxPromptImageSize: 1},
+	})
+	_, err := gw.resolvePrompt(context.Background(), "vision", openai.PromptContent{
+		Images: []openai.ImageInput{{URL: "data:image/png;base64," + tinyPNG}},
+	}, "input")
+	if err == nil {
+		t.Fatal("expected per-image size limit rejection")
+	}
+}
+
+func TestResolvePromptRejectsAggregateImageSize(t *testing.T) {
+	raw, err := base64.StdEncoding.DecodeString(tinyPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := maxAggregateImageBytes
+	// Permit a single image but not two, so the aggregate cap trips on the second
+	// image rather than the per-image limit.
+	maxAggregateImageBytes = int64(len(raw)) + 1
+	defer func() { maxAggregateImageBytes = original }()
+
+	gw := cachedModelGateway(Model{
+		ID:             "vision",
+		VisionKnown:    true,
+		SupportsVision: true,
+		Vision:         &VisionLimits{SupportedMediaTypes: []string{"image/png"}},
+	})
+	img := openai.ImageInput{URL: "data:image/png;base64," + tinyPNG}
+	_, err = gw.resolvePrompt(context.Background(), "vision", openai.PromptContent{
+		Images: []openai.ImageInput{img, img},
+	}, "input")
+	if err == nil {
+		t.Fatal("expected aggregate image size rejection")
+	}
+}
+
+func TestResolvePromptRejectsDefaultImageCountWithoutMetadata(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID:             "vision",
+		VisionKnown:    true,
+		SupportsVision: true,
+		// No MaxPromptImages metadata, so the default fallback count applies.
+		Vision: &VisionLimits{SupportedMediaTypes: []string{"image/png"}},
+	})
+	images := make([]openai.ImageInput, defaultMaxPromptImages+1)
+	for i := range images {
+		images[i] = openai.ImageInput{URL: "data:image/png;base64," + tinyPNG}
+	}
+	_, err := gw.resolvePrompt(context.Background(), "vision", openai.PromptContent{Images: images}, "input")
+	if err == nil {
+		t.Fatalf("expected rejection when image count exceeds the default fallback of %d", defaultMaxPromptImages)
+	}
+}
+
 func TestResolvePromptRejectsUnsupportedMIME(t *testing.T) {
 	gw := cachedModelGateway(Model{
 		ID:             "vision",

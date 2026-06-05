@@ -17,11 +17,95 @@ func (g *RealGateway) ValidateModel(ctx context.Context, model string) error {
 	return err
 }
 func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, error) {
+	for {
+		g.modelsMu.Lock()
+		if !force && g.modelsFreshLocked() {
+			out := cloneModels(g.models)
+			g.modelsMu.Unlock()
+			return out, nil
+		}
+		if !force && len(g.models) > 0 {
+			if !g.modelsRefreshing {
+				done := make(chan struct{})
+				g.modelsRefreshing = true
+				g.modelsRefreshDone = done
+				go g.refreshModelsInBackground(done)
+			}
+			out := cloneModels(g.models)
+			g.modelsMu.Unlock()
+			return out, nil
+		}
+		if g.modelsRefreshing {
+			// A refresh is already in flight. Join it instead of issuing a duplicate
+			// upstream call, even for forced refreshes, so concurrent validations on
+			// an expired cache share a single fetch (singleflight).
+			done := g.modelsRefreshDone
+			before := g.modelsFetched
+			g.modelsMu.Unlock()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			g.modelsMu.Lock()
+			if g.models != nil && g.modelsFetched.After(before) {
+				out := cloneModels(g.models)
+				g.modelsMu.Unlock()
+				return out, nil
+			}
+			// The joined refresh failed and left the cache unchanged; loop so this
+			// caller issues its own fetch.
+			g.modelsMu.Unlock()
+			continue
+		}
+		done := make(chan struct{})
+		g.modelsRefreshing = true
+		g.modelsRefreshDone = done
+		g.modelsMu.Unlock()
+		out, err := g.fetchModels(ctx)
+		g.finishModelRefresh(done, out, err)
+		if err != nil {
+			return nil, err
+		}
+		return cloneModels(out), nil
+	}
+}
+
+func (g *RealGateway) modelsFreshLocked() bool {
+	return g.models != nil && (g.modelsCacheTTL <= 0 || time.Since(g.modelsFetched) < g.modelsCacheTTL)
+}
+
+func cloneModels(models []Model) []Model {
+	return append([]Model(nil), models...)
+}
+
+func (g *RealGateway) refreshModelsInBackground(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := g.fetchModels(ctx)
+	if err != nil && g.log != nil {
+		g.log.Warn("background model refresh failed", "error", err)
+	}
+	g.finishModelRefresh(done, out, err)
+}
+
+func (g *RealGateway) finishModelRefresh(done chan struct{}, models []Model, err error) {
 	g.modelsMu.Lock()
-	defer g.modelsMu.Unlock()
-	if !force && g.models != nil && (g.modelsCacheTTL <= 0 || time.Since(g.modelsFetched) < g.modelsCacheTTL) {
-		out := append([]Model(nil), g.models...)
-		return out, nil
+	if err == nil {
+		g.models = cloneModels(models)
+		g.modelsFetched = time.Now()
+	}
+	if g.modelsRefreshDone == done {
+		g.modelsRefreshing = false
+		g.modelsRefreshDone = nil
+		close(done)
+	}
+	g.modelsMu.Unlock()
+}
+
+func (g *RealGateway) fetchModels(ctx context.Context) ([]Model, error) {
+	if g.modelsFetcher != nil {
+		return g.modelsFetcher(ctx)
 	}
 	var out []Model
 	if g.client.RPC != nil {
@@ -64,8 +148,6 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 			out = append(out, Model{ID: m.ID, Name: m.Name, Metadata: meta, Limits: limits, VisionKnown: true, SupportsVision: m.Capabilities.Supports.Vision, Vision: vision, ReasoningEffortKnown: reasoningEffortKnown, SupportsReasoningEffort: supportsReasoningEffort, SupportedReasoningEfforts: supportedReasoningEfforts, DefaultReasoningEffort: defaultReasoningEffort})
 		}
 	}
-	g.models = append([]Model(nil), out...)
-	g.modelsFetched = time.Now()
 	return out, nil
 }
 func rpcTokenLimits(limits *rpc.ModelCapabilitiesLimits) *TokenLimits {

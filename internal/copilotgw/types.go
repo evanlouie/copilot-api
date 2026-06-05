@@ -40,8 +40,8 @@ type Gateway interface {
 	ListModels(ctx context.Context) ([]Model, error)
 	ValidateModel(ctx context.Context, model string) error
 	Chat(ctx context.Context, req ChatRequest) (*TurnResult, error)
-	ContinueChatToolCalls(ctx context.Context, model string, outputs map[string]string) (*TurnResult, error)
-	StreamContinueChatToolCalls(ctx context.Context, model string, outputs map[string]string) (<-chan StreamEvent, error)
+	ContinueChatToolCalls(ctx context.Context, req ChatContinuationRequest) (*TurnResult, error)
+	StreamContinueChatToolCalls(ctx context.Context, req ChatContinuationRequest) (<-chan StreamEvent, error)
 	StreamChat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
 	CreateResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error)
 	WarmResponse(ctx context.Context, req ResponseRequest) (*WarmResponseResult, error)
@@ -63,6 +63,18 @@ type ChatRequest struct {
 	ResolvedReasoningEffort string
 	ReasoningEffortResolved bool
 	IncludeUsageChunk       bool
+}
+
+type ChatContinuationRequest struct {
+	Model                  string
+	Instructions           string
+	Messages               []openai.ChatMessage
+	Outputs                map[string]string
+	Tools                  []openai.Tool
+	ToolChoiceNone         bool
+	ReasoningEffort        string
+	DefaultReasoningEffort string
+	IncludeUsageChunk      bool
 }
 
 type TurnResult struct {

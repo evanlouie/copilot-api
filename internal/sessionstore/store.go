@@ -55,7 +55,10 @@ type SessionMetadata struct {
 	PendingBatchID string    `json:"pending_batch_id,omitempty"`
 }
 
+const ResponseRecordVersion = 2
+
 type ResponseRecord struct {
+	Version            int                         `json:"version"`
 	ID                 string                      `json:"id"`
 	SDKSessionID       string                      `json:"sdk_session_id"`
 	Model              string                      `json:"model"`
@@ -75,6 +78,9 @@ type ResponseRecord struct {
 }
 
 func (s *Store) SaveResponse(record ResponseRecord) error {
+	if record.Version == 0 {
+		record.Version = ResponseRecordVersion
+	}
 	record.UpdatedAt = time.Now().UTC()
 	return writeJSON(s.responsePath(record.ID), record)
 }
@@ -182,7 +188,7 @@ func writeJSON(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(v, "", "  ")
+	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}

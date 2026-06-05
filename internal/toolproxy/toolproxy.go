@@ -93,12 +93,13 @@ type RequestTools struct {
 	available     []string
 	choiceNone    bool
 	mu            sync.Mutex
+	ctx           context.Context
 	batch         *Batch
 }
 
 func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*RequestTools, error) {
 	tools = openai.SupportedTools(tools)
-	rt := &RequestTools{broker: broker, aliasToPublic: map[string]string{}, publicToAlias: map[string]string{}, choiceNone: choiceNone}
+	rt := &RequestTools{broker: broker, aliasToPublic: map[string]string{}, publicToAlias: map[string]string{}, choiceNone: choiceNone, ctx: context.Background()}
 	if choiceNone || len(tools) == 0 {
 		rt.available = []string{NoToolsSentinel}
 		return rt, nil
@@ -133,6 +134,22 @@ func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*Req
 
 func (rt *RequestTools) Tools() []copilot.Tool    { return rt.tools }
 func (rt *RequestTools) AvailableTools() []string { return rt.available }
+func (rt *RequestTools) SetContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rt.mu.Lock()
+	rt.ctx = ctx
+	rt.mu.Unlock()
+}
+func (rt *RequestTools) context() context.Context {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.ctx == nil {
+		return context.Background()
+	}
+	return rt.ctx
+}
 func (rt *RequestTools) PublicName(alias string) string {
 	if p := rt.aliasToPublic[alias]; p != "" {
 		return p
@@ -176,7 +193,7 @@ func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolReque
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.batch == nil || !rt.batch.isOpen() {
-		rt.batch = newBatch(rt.broker.ttl, responseID, kind, model, done, abort)
+		rt.batch = newBatch(rt.broker.ttl, responseID, kind, model, done, abort, rt.ctx)
 	} else {
 		rt.batch.configure(responseID, kind, model, done, abort)
 	}
@@ -197,14 +214,15 @@ func (rt *RequestTools) handleInvocation(inv copilot.ToolInvocation) (copilot.To
 	args := rawArgs(inv.Arguments)
 	rt.mu.Lock()
 	if rt.batch == nil || !rt.batch.isOpen() {
-		rt.batch = newBatch(rt.broker.ttl, "", "", "", nil, nil)
+		rt.batch = newBatch(rt.broker.ttl, "", "", "", nil, nil, rt.ctx)
 	}
-	call := rt.batch.ensureCall(inv.ToolCallID, public, inv.ToolName, args)
-	rt.broker.Register(rt.batch)
-	rt.batch.startTimer()
+	batch := rt.batch
+	call := batch.ensureCall(inv.ToolCallID, public, inv.ToolName, args)
+	rt.broker.Register(batch)
+	batch.startTimer()
 	rt.mu.Unlock()
 
-	output, err := call.wait(context.Background())
+	output, err := call.wait(batch.Context())
 	if err != nil {
 		return copilot.ToolResult{}, err
 	}
@@ -226,6 +244,8 @@ type Batch struct {
 	Calls       map[string]*Call
 	Done        <-chan TurnFinalResult
 	abort       func()
+	ctx         context.Context
+	cancel      context.CancelFunc
 	mu          sync.Mutex
 	expired     bool
 	completed   bool
@@ -233,15 +253,28 @@ type Batch struct {
 	expireHooks []func(*Batch)
 }
 
-func newBatch(ttl time.Duration, responseID string, kind string, model string, done <-chan TurnFinalResult, abort func()) *Batch {
+func newBatch(ttl time.Duration, responseID string, kind string, model string, done <-chan TurnFinalResult, abort func(), parent context.Context) *Batch {
 	now := time.Now().UTC()
-	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, Model: model, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), Calls: map[string]*Call{}, Done: done, abort: abort}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, Model: model, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), Calls: map[string]*Call{}, Done: done, abort: abort, ctx: ctx, cancel: cancel}
 }
 
 func (b *Batch) isOpen() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return !b.expired && !b.completed
+}
+
+func (b *Batch) Context() context.Context {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ctx == nil {
+		return context.Background()
+	}
+	return b.ctx
 }
 
 func (b *Batch) OnExpire(hook func(*Batch)) {
@@ -309,29 +342,51 @@ func (b *Batch) startTimer() {
 	b.timer = time.AfterFunc(d, func() { b.expire() })
 }
 
-func (b *Batch) expire() {
+// closeBatch terminates an open batch exactly once: it fails any outstanding
+// calls with err, cancels the batch context so waiting tool handlers unblock,
+// optionally invokes the SDK abort callback, and runs expiry hooks. TTL expiry
+// and explicit cancellation share this path so the two stay in lockstep.
+func (b *Batch) closeBatch(err error, runAbort bool) {
 	b.mu.Lock()
-	if b.expired {
+	if b.expired || b.completed {
 		b.mu.Unlock()
 		return
 	}
 	b.expired = true
+	if b.timer != nil {
+		b.timer.Stop()
+	}
 	calls := make([]*Call, 0, len(b.Calls))
 	for _, call := range b.Calls {
 		calls = append(calls, call)
 	}
 	abort := b.abort
+	cancel := b.cancel
 	hooks := append([]func(*Batch){}, b.expireHooks...)
 	b.mu.Unlock()
 	for _, call := range calls {
-		call.fail(ErrExpired)
+		call.fail(err)
 	}
-	if abort != nil {
+	if cancel != nil {
+		cancel()
+	}
+	if runAbort && abort != nil {
 		abort()
 	}
 	for _, hook := range hooks {
 		hook(b)
 	}
+}
+
+func (b *Batch) expire() { b.closeBatch(ErrExpired, true) }
+
+// Cancel closes the batch in response to request cancellation. It does not run
+// the SDK abort callback, which the caller (the turn runner) drives separately.
+func (b *Batch) Cancel(err error) {
+	if err == nil {
+		err = context.Canceled
+	}
+	b.closeBatch(err, false)
 }
 
 func (b *Batch) Complete(outputs map[string]string) error {

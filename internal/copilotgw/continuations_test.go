@@ -30,3 +30,34 @@ func TestFunctionOutputsWithContinuationInputRejectsImages(t *testing.T) {
 		t.Fatal("expected image follow-up rejection")
 	}
 }
+
+func TestChatRequestFromContinuationDoesNotDuplicateToolOutputs(t *testing.T) {
+	req := ChatContinuationRequest{
+		Model: "gpt-5",
+		Messages: []openai.ChatMessage{
+			{Role: "user", Content: openai.NewTextContent("look up alpha")},
+			{Role: "assistant", ToolCalls: []openai.ChatToolCall{{ID: "call_1", Type: "function", Function: openai.ToolCallFunction{Name: "lookup", Arguments: "{}"}}}},
+			{Role: "tool", ToolCallID: "call_1", Content: openai.NewTextContent("alpha-result")},
+		},
+		Outputs: map[string]string{"call_1": "alpha-result"},
+	}
+	chatReq, err := chatRequestFromContinuation(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The whole transcript (including the tool result) is replayed via hydration,
+	// so the synthetic prompt must not restate the outputs.
+	if len(chatReq.History) != len(req.Messages) {
+		t.Fatalf("History = %d messages, want full transcript of %d", len(chatReq.History), len(req.Messages))
+	}
+	text, err := chatReq.FinalUser.Text()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "Continue." {
+		t.Fatalf("FinalUser = %q, want a minimal continuation prompt", text)
+	}
+	if strings.Contains(text, "alpha-result") {
+		t.Fatalf("continuation prompt duplicated tool outputs already present in history: %q", text)
+	}
+}

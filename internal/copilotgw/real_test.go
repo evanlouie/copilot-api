@@ -2,11 +2,13 @@ package copilotgw
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/sessionfs"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
@@ -400,5 +402,55 @@ func assertBoolPtr(t *testing.T, name string, got *bool, want bool) {
 	}
 	if *got != want {
 		t.Fatalf("%s = %v, want %v", name, *got, want)
+	}
+}
+
+func TestNewRealNormalizesNilLogger(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	gw := NewReal(config.Config{}, store, nil)
+	if gw.log == nil {
+		t.Fatal("NewReal left a nil logger; the constructor must install a discard logger")
+	}
+	// The installed fallback logger must be safe to use without panicking.
+	gw.log.Warn("nil-logger fallback smoke test", "ok", true)
+}
+
+func TestRefreshModelsDeduplicatesConcurrentForcedRefreshes(t *testing.T) {
+	var calls int32
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	gw := &RealGateway{
+		modelsCacheTTL: time.Hour,
+		modelsFetcher: func(context.Context) ([]Model, error) {
+			atomic.AddInt32(&calls, 1)
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return []Model{{ID: "gpt-5"}}, nil
+		},
+	}
+	const n = 8
+	errs := make(chan error, n)
+	for range n {
+		go func() {
+			_, err := gw.refreshModels(context.Background(), true)
+			errs <- err
+		}()
+	}
+	// The first caller is now parked inside the single in-flight fetch.
+	<-started
+	// Give the remaining callers time to join that fetch rather than starting
+	// their own.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatalf("forced refresh returned error: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("upstream fetch ran %d times, want 1 (deduplicated)", got)
 	}
 }

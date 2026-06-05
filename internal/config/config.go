@@ -13,10 +13,12 @@ import (
 const AppName = "copilot-api"
 
 const (
-	DefaultAddr                = "127.0.0.1:8080"
-	DefaultModelsCacheTTL      = 10 * time.Minute
-	DefaultToolCallTTL         = 5 * time.Minute
-	DefaultMaxRequestBodyBytes = 100 << 20
+	DefaultAddr                  = "127.0.0.1:8080"
+	DefaultModelsCacheTTL        = 10 * time.Minute
+	DefaultToolCallTTL           = 5 * time.Minute
+	DefaultMaxRequestBodyBytes   = 100 << 20
+	DefaultWebSocketIdleTimeout  = 2 * time.Minute
+	DefaultWebSocketPingInterval = 30 * time.Second
 )
 
 type Config struct {
@@ -29,6 +31,9 @@ type Config struct {
 	ToolCallTTL            time.Duration
 	RequestTimeout         time.Duration
 	MaxRequestBodyBytes    int64
+	WebSocketIdleTimeout   time.Duration
+	WebSocketMaxLifetime   time.Duration
+	WebSocketPingInterval  time.Duration
 	DataDir                string
 	StateDir               string
 	CacheDir               string
@@ -49,6 +54,8 @@ func Load() (Config, error) {
 		StrictCompat:           false,
 		ModelsCacheTTL:         DefaultModelsCacheTTL,
 		ToolCallTTL:            DefaultToolCallTTL,
+		WebSocketIdleTimeout:   DefaultWebSocketIdleTimeout,
+		WebSocketPingInterval:  DefaultWebSocketPingInterval,
 	}
 
 	if cfg.ModelsCacheTTL, err = parseDurationEnv("COPILOT_MODELS_CACHE_TTL", DefaultModelsCacheTTL); err != nil {
@@ -61,6 +68,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.MaxRequestBodyBytes, err = parseBytesEnv("COPILOT_MAX_REQUEST_BODY_BYTES", DefaultMaxRequestBodyBytes); err != nil {
+		return Config{}, err
+	}
+	if cfg.WebSocketIdleTimeout, err = parseDurationEnv("COPILOT_WEBSOCKET_IDLE_TIMEOUT", DefaultWebSocketIdleTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.WebSocketMaxLifetime, err = parseDurationEnv("COPILOT_WEBSOCKET_MAX_LIFETIME", 0); err != nil {
+		return Config{}, err
+	}
+	if cfg.WebSocketPingInterval, err = parseDurationEnv("COPILOT_WEBSOCKET_PING_INTERVAL", DefaultWebSocketPingInterval); err != nil {
 		return Config{}, err
 	}
 	if cfg.StrictCompat, err = parseBoolEnv("COPILOT_STRICT_COMPAT", false); err != nil {

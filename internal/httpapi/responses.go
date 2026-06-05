@@ -79,7 +79,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	defer cancel()
 	ch, err := s.gw.StreamResponse(ctx, req)
 	if err != nil {
-		_ = writeResponseFailedEvent(sseResponseEventWriter{writer: writer}, req, err)
+		_ = writeResponseFailedEvent(newResponseStreamEncoder(sseResponseEventWriter{writer: writer}), req, err)
 		_ = writer.Done()
 		return
 	}

@@ -175,6 +175,17 @@ func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 	}
 }
 
+func TestResponsesInputMayBeOmittedForPreviousResponseContinuation(t *testing.T) {
+	var req ResponsesRequest
+	body := []byte(`{"model":"gpt-5","previous_response_id":"resp_previous"}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateResponsesRequest(&req, false); err != nil {
+		t.Fatalf("missing input should be accepted with previous_response_id: %v", err)
+	}
+}
+
 func TestResponsesPermissiveAllowsIgnoredFields(t *testing.T) {
 	var req ResponsesRequest
 	body := []byte(`{"model":"gpt-5","temperature":0.1,"top_p":0.9,"input":"hi"}`)

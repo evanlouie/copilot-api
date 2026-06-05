@@ -52,7 +52,7 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
 	}
-	runner := g.newTurnRunner(req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
+	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
 	runner.watchContext(ctx)
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
 		_ = session.Disconnect()
@@ -107,14 +107,15 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 		return nil, openai.Upstream(err.Error())
 	}
 	ch := make(chan StreamEvent, 32)
-	runner := g.newTurnRunner(req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
+	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
 	runner.watchContext(ctx)
-	runner.enableChatStream(ch)
-	runner.setOnResult(func(result *TurnResult) {
+	runner.enableChatStream(ch, ctx.Done())
+	runner.setOnResult(func(result *TurnResult) error {
 		if result.PendingBatchID != "" {
 			g.rememberRunner(result.PendingBatchID, runner)
 		}
 		_ = g.store.SaveSessionMetadata(sessionID, sessionstore.SessionMetadata{ID: sessionID, Kind: "chat", OpenAIID: result.ID, SDKSessionID: sessionID, Model: req.Model, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), RetainedPath: retained, FinishReason: result.FinishReason, PendingBatchID: result.PendingBatchID})
+		return nil
 	})
 	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
 		_ = session.Disconnect()
