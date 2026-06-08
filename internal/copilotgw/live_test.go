@@ -81,7 +81,9 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 	}
 	sawReasoning := false
 	sawContentBeforeReasoning := false
+	sawContent := false
 	gotResult := false
+	var finalText string
 	for ev := range ch {
 		switch ev.Kind {
 		case "reasoning_delta":
@@ -89,13 +91,19 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 				sawReasoning = true
 			}
 		case "delta":
-			if ev.Delta != "" && !sawReasoning {
-				sawContentBeforeReasoning = true
+			if ev.Delta != "" {
+				sawContent = true
+				if !sawReasoning {
+					sawContentBeforeReasoning = true
+				}
 			}
 		case "result":
 			gotResult = true
-			if ev.Result != nil && ev.Result.Reasoning == "" {
-				t.Error("final turn result carried no reasoning text")
+			if ev.Result != nil {
+				finalText = ev.Result.Text
+				if ev.Result.Reasoning == "" {
+					t.Error("final turn result carried no reasoning text")
+				}
 			}
 		case "error":
 			t.Fatalf("stream error: %v", ev.Error)
@@ -107,7 +115,13 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 	if !sawReasoning {
 		t.Fatal("expected at least one reasoning delta before content")
 	}
+	if !sawContent {
+		t.Fatal("expected at least one content delta after reasoning")
+	}
 	if sawContentBeforeReasoning {
 		t.Fatal("content delta arrived before any reasoning delta")
+	}
+	if finalText == "" {
+		t.Fatal("final turn result carried no answer text")
 	}
 }

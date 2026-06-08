@@ -165,6 +165,77 @@ func TestChatReasoningEmissionPolicyNarrowing(t *testing.T) {
 	})
 }
 
+func TestChatStreamReasoningEmissionPolicy(t *testing.T) {
+	collect := func(emission string) (reasoning, reasoningContent bool, details bool) {
+		s := New(config.Config{ReasoningEmission: emission}, &reasoningStreamChatGateway{}, slog.Default())
+		body := strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+		}
+		for _, chunk := range parseChatStreamChunks(t, w.Body.String()) {
+			for _, ch := range chunk.Choices {
+				if ch.Delta.Reasoning != "" {
+					reasoning = true
+				}
+				if ch.Delta.ReasoningContent != "" {
+					reasoningContent = true
+				}
+				if len(ch.Delta.ReasoningDetails) > 0 {
+					details = true
+				}
+			}
+		}
+		return reasoning, reasoningContent, details
+	}
+
+	t.Run("both", func(t *testing.T) {
+		r, rc, d := collect("both")
+		if !r || !rc || !d {
+			t.Fatalf("both: reasoning=%v reasoning_content=%v details=%v, want all true", r, rc, d)
+		}
+	})
+	t.Run("reasoning only", func(t *testing.T) {
+		r, rc, d := collect("reasoning")
+		if !r || rc || !d {
+			t.Fatalf("reasoning: reasoning=%v reasoning_content=%v details=%v, want true/false/true", r, rc, d)
+		}
+	})
+	t.Run("reasoning_content only", func(t *testing.T) {
+		r, rc, d := collect("reasoning_content")
+		if r || !rc || !d {
+			t.Fatalf("reasoning_content: reasoning=%v reasoning_content=%v details=%v, want false/true/true", r, rc, d)
+		}
+	})
+	t.Run("off", func(t *testing.T) {
+		r, rc, d := collect("off")
+		if r || rc || d {
+			t.Fatalf("off: reasoning=%v reasoning_content=%v details=%v, want all false", r, rc, d)
+		}
+	})
+}
+
+func parseChatStreamChunks(t *testing.T, body string) []openai.ChatCompletionChunk {
+	t.Helper()
+	var chunks []openai.ChatCompletionChunk
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(data) == "[DONE]" {
+			continue
+		}
+		var chunk openai.ChatCompletionChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			t.Fatalf("bad chat SSE frame %q: %v", data, err)
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
 func postChat(t *testing.T, s *Server) string {
 	t.Helper()
 	body := strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
@@ -199,22 +270,168 @@ func TestResponsesStreamEmitsReasoningSummaryBeforeMessage(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	out := w.Body.String()
-	reasoningDelta := strings.Index(out, "event: response.reasoning_summary_text.delta")
-	reasoningDone := strings.Index(out, "event: response.reasoning_summary_text.done")
-	textDelta := strings.Index(out, "event: response.output_text.delta")
-	completed := strings.Index(out, "event: response.completed")
-	if reasoningDelta < 0 || reasoningDone < 0 || textDelta < 0 || completed < 0 {
-		t.Fatalf("missing reasoning/text events:\n%s", out)
+	events := parseResponseStreamEvents(t, w.Body.String())
+	assertMonotonicSequence(t, events)
+
+	types := eventTypes(events)
+	// Full OpenAI reasoning-summary lifecycle, bracketed by the summary part, must
+	// precede the message output item.
+	assertOrderedSubsequence(t, types, []string{
+		"response.output_item.added", // reasoning item
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.done",
+		"response.output_item.done",  // reasoning item
+		"response.output_item.added", // message item
+		"response.output_text.delta",
+		"response.completed",
+	})
+
+	reasoningAdded := firstItemEvent(events, "response.output_item.added", "reasoning")
+	if reasoningAdded == nil || reasoningAdded.OutputIndex == nil || *reasoningAdded.OutputIndex != 0 {
+		t.Fatalf("reasoning item must be announced at output_index 0: %#v", reasoningAdded)
 	}
-	if !(reasoningDelta < reasoningDone && reasoningDone < textDelta && textDelta < completed) {
-		t.Fatalf("expected reasoning summary events before text events:\n%s", out)
+	messageAdded := firstItemEvent(events, "response.output_item.added", "message")
+	if messageAdded == nil || messageAdded.OutputIndex == nil || *messageAdded.OutputIndex != 1 {
+		t.Fatalf("message item must shift to output_index 1 when reasoning present: %#v", messageAdded)
 	}
-	// The message item shifts to output index 1 because reasoning occupies 0.
-	if !strings.Contains(out, `"output_index":1`) {
-		t.Fatalf("expected message item at output_index 1 when reasoning present:\n%s", out)
+	for _, e := range events {
+		if e.Type == "response.reasoning_summary_text.delta" {
+			if e.SummaryIndex == nil || *e.SummaryIndex != 0 || e.Delta == "" {
+				t.Fatalf("summary text delta malformed: %#v", e)
+			}
+		}
 	}
-	if !strings.Contains(out, `"summary_index":0`) {
-		t.Fatalf("expected reasoning summary_index:\n%s", out)
+}
+
+func TestResponsesStreamReconcilesEncryptedOnlyReasoning(t *testing.T) {
+	s := New(config.Config{}, &encryptedReasoningResponseStreamGateway{}, slog.Default())
+	body := strings.NewReader(`{"model":"gpt-5","stream":true,"input":"hi"}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
+	events := parseResponseStreamEvents(t, w.Body.String())
+	assertMonotonicSequence(t, events)
+
+	// The reasoning item has no streamable summary, but it must still be announced
+	// (added + done) so it is never an unannounced item in response.completed.
+	reasoningAdded := firstItemEvent(events, "response.output_item.added", "reasoning")
+	if reasoningAdded == nil || reasoningAdded.OutputIndex == nil || *reasoningAdded.OutputIndex != 0 {
+		t.Fatalf("encrypted-only reasoning item must be reconciled at output_index 0: %#v", reasoningAdded)
+	}
+	if reasoningAdded.Item == nil || reasoningAdded.Item.EncryptedContent != "enc-blob" {
+		t.Fatalf("reconciled reasoning item lost encrypted content: %#v", reasoningAdded.Item)
+	}
+	if firstItemEvent(events, "response.output_item.done", "reasoning") == nil {
+		t.Fatalf("reconciled reasoning item was never closed:\n%s", w.Body.String())
+	}
+	// No summary text means no summary lifecycle events.
+	for _, e := range events {
+		if strings.HasPrefix(e.Type, "response.reasoning_summary") {
+			t.Fatalf("unexpected summary event for encrypted-only reasoning: %#v", e)
+		}
+	}
+	// The function call follows the reasoning item at output_index 1.
+	fc := firstItemEvent(events, "response.output_item.added", "function_call")
+	if fc == nil || fc.OutputIndex == nil || *fc.OutputIndex != 1 {
+		t.Fatalf("function_call must be announced at output_index 1: %#v", fc)
+	}
+}
+
+type encryptedReasoningResponseStreamGateway struct {
+	copilotgw.Gateway
+}
+
+func (g *encryptedReasoningResponseStreamGateway) StreamResponse(_ context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
+	ch := make(chan copilotgw.ResponseStreamEvent, 2)
+	go func() {
+		defer close(ch)
+		// A tool-only turn whose reasoning is encrypted-only: no reasoning_delta
+		// and no content delta are streamed, so the reasoning item only appears in
+		// the terminal response and must be reconciled by the encoder.
+		resp := &openai.Response{
+			ID:        req.ResponseID,
+			Object:    openai.ObjectResponse,
+			CreatedAt: openai.UnixNow(),
+			Status:    "completed",
+			Model:     req.Model,
+			Output: []openai.ResponseOutputItem{
+				{ID: "rs_rid-1", Type: "reasoning", Status: "completed", EncryptedContent: "enc-blob", Summary: []openai.ResponseReasoningSummary{}},
+				{ID: "fc_call_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "lookup", Arguments: `{"q":"x"}`},
+			},
+			ParallelToolCalls: true,
+			Store:             req.Store,
+		}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: resp}
+	}()
+	return ch, nil
+}
+
+// --- SSE parsing helpers (assert structured events, not raw substrings) ---
+
+func parseResponseStreamEvents(t *testing.T, body string) []openai.ResponseStreamEvent {
+	t.Helper()
+	var events []openai.ResponseStreamEvent
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(data) == "[DONE]" {
+			continue
+		}
+		var ev openai.ResponseStreamEvent
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			t.Fatalf("bad SSE data frame %q: %v", data, err)
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+func eventTypes(events []openai.ResponseStreamEvent) []string {
+	types := make([]string, len(events))
+	for i, e := range events {
+		types[i] = e.Type
+	}
+	return types
+}
+
+func assertOrderedSubsequence(t *testing.T, got, want []string) {
+	t.Helper()
+	i := 0
+	for _, g := range got {
+		if i < len(want) && g == want[i] {
+			i++
+		}
+	}
+	if i != len(want) {
+		t.Fatalf("missing ordered events; matched %d/%d of %v\nactual: %v", i, len(want), want, got)
+	}
+}
+
+func assertMonotonicSequence(t *testing.T, events []openai.ResponseStreamEvent) {
+	t.Helper()
+	prev := int64(-1)
+	for _, e := range events {
+		if e.SequenceNumber <= prev {
+			t.Fatalf("sequence_number not strictly increasing: %d after %d (%s)", e.SequenceNumber, prev, e.Type)
+		}
+		prev = e.SequenceNumber
+	}
+}
+
+func firstItemEvent(events []openai.ResponseStreamEvent, eventType, itemType string) *openai.ResponseStreamEvent {
+	for i := range events {
+		e := events[i]
+		if e.Type == eventType && e.Item != nil && e.Item.Type == itemType {
+			return &events[i]
+		}
+	}
+	return nil
 }

@@ -145,11 +145,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 	defer close(r.closed)
 	defer r.closeStreams()
 	var text string
-	var reasoning string
-	var reasoningDeltas strings.Builder
-	var reasoningOpaque string
-	var reasoningEncrypted string
-	var reasoningID string
+	var reason reasoningAccumulator
 	var usage *openai.Usage
 	for event := range r.events {
 		switch d := event.Data.(type) {
@@ -158,10 +154,10 @@ func (r *turnRunner) loop(g *RealGateway) {
 			// thread it through here. Accumulate a plaintext fallback and forward
 			// the delta so encoders can interleave it ahead of content.
 			if d.ReasoningID != "" {
-				reasoningID = d.ReasoningID
+				reason.id = d.ReasoningID
 			}
 			if d.DeltaContent != "" {
-				reasoningDeltas.WriteString(d.DeltaContent)
+				reason.deltas.WriteString(d.DeltaContent)
 				r.emitReasoningDelta(d.DeltaContent, d.ReasoningID)
 			}
 		case *copilot.AssistantMessageDeltaData:
@@ -172,33 +168,37 @@ func (r *turnRunner) loop(g *RealGateway) {
 			// Consolidated reasoning block; in tool-call turns this can arrive
 			// after the message, so the message-data capture below is primary.
 			if d.Content != "" {
-				reasoning = d.Content
+				reason.consolidated = d.Content
 			}
 			if d.ReasoningID != "" {
-				reasoningID = d.ReasoningID
+				reason.id = d.ReasoningID
 			}
 		case *copilot.AssistantMessageData:
 			if d.ReasoningText != nil && *d.ReasoningText != "" {
-				reasoning = *d.ReasoningText
+				reason.consolidated = *d.ReasoningText
 			}
 			if d.ReasoningOpaque != nil {
-				reasoningOpaque = *d.ReasoningOpaque
+				reason.opaque = *d.ReasoningOpaque
 			}
 			if d.EncryptedContent != nil {
-				reasoningEncrypted = *d.EncryptedContent
+				reason.encrypted = *d.EncryptedContent
 			}
-			effectiveReasoning := resolveReasoning(reasoning, reasoningDeltas.String())
 			if len(d.ToolRequests) > 0 {
 				text = d.Content
 				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.responseID, r.kind, r.model, r.updates, r.abort)
 				r.setBatch(batch)
-				res := r.result(text, effectiveReasoning, usage, "tool_calls")
-				res.ReasoningOpaque = reasoningOpaque
-				res.ReasoningEncrypted = reasoningEncrypted
-				res.ReasoningID = reasoningID
+				res := r.result(text, reason.resolve(), usage, "tool_calls")
+				reason.applyTo(res)
 				res.ToolCalls = calls
 				res.PendingBatchID = batch.ID
 				r.emitResult(res)
+				// The runner loop is reused across the client-owned tool-call
+				// continuation, so each tool turn must start a fresh reasoning
+				// block. Without this reset the next turn would inherit (or
+				// concatenate) this turn's reasoning when its own consolidated
+				// block is absent.
+				text = ""
+				reason.reset()
 			} else {
 				text = d.Content
 			}
@@ -213,16 +213,51 @@ func (r *turnRunner) loop(g *RealGateway) {
 			_ = r.session.Disconnect()
 			return
 		case *copilot.SessionIdleData:
-			res := r.result(text, resolveReasoning(reasoning, reasoningDeltas.String()), usage, "stop")
-			res.ReasoningOpaque = reasoningOpaque
-			res.ReasoningEncrypted = reasoningEncrypted
-			res.ReasoningID = reasoningID
+			res := r.result(text, reason.resolve(), usage, "stop")
+			reason.applyTo(res)
 			r.emitResult(res)
 			_ = r.session.Disconnect()
 			return
 		}
 	}
 	r.emitError(openai.Upstream("copilot session event stream ended before idle"))
+}
+
+// reasoningAccumulator gathers the reasoning signals the SDK emits during a
+// single assistant turn: streaming deltas, the consolidated block, and the
+// opaque/encrypted continuation blobs. The runner loop is reused across the
+// client-owned tool-call continuation, so it MUST be reset at each turn
+// boundary; otherwise interleaved thinking leaks (or concatenates) between
+// turns.
+type reasoningAccumulator struct {
+	consolidated string
+	deltas       strings.Builder
+	opaque       string
+	encrypted    string
+	id           string
+}
+
+// resolve returns the best reasoning text for the turn, preferring the
+// consolidated block and falling back to the accumulated streaming deltas
+// (as happens on tool-call turns where the consolidated block lags).
+func (a *reasoningAccumulator) resolve() string {
+	return resolveReasoning(a.consolidated, a.deltas.String())
+}
+
+// applyTo copies the opaque/encrypted/id continuation fields onto a result.
+func (a *reasoningAccumulator) applyTo(res *TurnResult) {
+	res.ReasoningOpaque = a.opaque
+	res.ReasoningEncrypted = a.encrypted
+	res.ReasoningID = a.id
+}
+
+// reset clears all per-turn reasoning state at a turn boundary.
+func (a *reasoningAccumulator) reset() {
+	a.consolidated = ""
+	a.deltas.Reset()
+	a.opaque = ""
+	a.encrypted = ""
+	a.id = ""
 }
 
 // resolveReasoning prefers the consolidated reasoning text and falls back to

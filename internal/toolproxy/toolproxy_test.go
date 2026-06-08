@@ -195,3 +195,62 @@ func TestBatchCompleteUnblocksHandler(t *testing.T) {
 		t.Fatal("handler did not unblock")
 	}
 }
+
+// TestParallelToolCallsRoundTripThroughBatch proves that two concurrent tool
+// invocations are captured in a single batch and that one Complete call unblocks
+// both handlers with their respective outputs — the core of parallel tool-call
+// support.
+func TestParallelToolCallsRoundTripThroughBatch(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := rt.Tools()[0]
+
+	type result struct {
+		out string
+		err error
+	}
+	results := make(map[string]chan result, 2)
+	for _, id := range []string{"call_1", "call_2"} {
+		ch := make(chan result, 1)
+		results[id] = ch
+		callID := id
+		go func() {
+			res, err := tool.Handler(copilot.ToolInvocation{ToolCallID: callID, ToolName: tool.Name, Arguments: map[string]any{}})
+			ch <- result{out: res.TextResultForLLM, err: err}
+		}()
+	}
+
+	var batch *Batch
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		batch, err = broker.FindByCallIDs([]string{"call_1", "call_2"})
+		if err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("both concurrent calls were not grouped into one batch: %v", err)
+	}
+
+	if err := batch.Complete(map[string]string{"call_1": "out-1", "call_2": "out-2"}); err != nil {
+		t.Fatalf("Complete with both outputs failed: %v", err)
+	}
+
+	want := map[string]string{"call_1": "out-1", "call_2": "out-2"}
+	for id, ch := range results {
+		select {
+		case got := <-ch:
+			if got.err != nil {
+				t.Fatalf("%s handler error: %v", id, got.err)
+			}
+			if got.out != want[id] {
+				t.Fatalf("%s output = %q, want %q", id, got.out, want[id])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s handler did not unblock", id)
+		}
+	}
+}

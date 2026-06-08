@@ -186,6 +186,26 @@ type ReasoningDetail struct {
 	Index     *int   `json:"index,omitempty"`
 }
 
+// InboundReasoning returns client-supplied assistant reasoning so it can be
+// replayed when rebuilding a cold session. It prefers the canonical `reasoning`
+// alias, then `reasoning_content`, then the first textual `reasoning_details`
+// block (the OpenRouter round-trip shape). Opaque/encrypted reasoning is
+// session-bound and intentionally not replayed.
+func (m ChatMessage) InboundReasoning() string {
+	if m.Reasoning != "" {
+		return m.Reasoning
+	}
+	if m.ReasoningContent != "" {
+		return m.ReasoningContent
+	}
+	for _, d := range m.ReasoningDetails {
+		if d.Text != "" {
+			return d.Text
+		}
+	}
+	return ""
+}
+
 // ReasoningEmissionPolicy resolves which reasoning fields a surface should
 // emit. reasoning_details is always emitted when the policy is enabled,
 // regardless of which plaintext alias is selected.
@@ -597,15 +617,17 @@ type ResponseStreamEvent struct {
 	SequenceNumber int64               `json:"sequence_number"`
 	Response       *Response           `json:"response,omitempty"`
 	Item           *ResponseOutputItem `json:"item,omitempty"`
-	Part           *ResponseText       `json:"part,omitempty"`
-	ItemID         string              `json:"item_id,omitempty"`
-	OutputIndex    *int                `json:"output_index,omitempty"`
-	ContentIndex   *int                `json:"content_index,omitempty"`
-	SummaryIndex   *int                `json:"summary_index,omitempty"`
-	Delta          string              `json:"delta,omitempty"`
-	Text           string              `json:"text,omitempty"`
-	Arguments      string              `json:"arguments,omitempty"`
-	Name           string              `json:"name,omitempty"`
-	Status         string              `json:"status,omitempty"`
-	Error          *ErrorObject        `json:"error,omitempty"`
+	// Part carries either a content part (*ResponseText) or a reasoning summary
+	// part (ResponseReasoningSummary), depending on the event type.
+	Part         any          `json:"part,omitempty"`
+	ItemID       string       `json:"item_id,omitempty"`
+	OutputIndex  *int         `json:"output_index,omitempty"`
+	ContentIndex *int         `json:"content_index,omitempty"`
+	SummaryIndex *int         `json:"summary_index,omitempty"`
+	Delta        string       `json:"delta,omitempty"`
+	Text         string       `json:"text,omitempty"`
+	Arguments    string       `json:"arguments,omitempty"`
+	Name         string       `json:"name,omitempty"`
+	Status       string       `json:"status,omitempty"`
+	Error        *ErrorObject `json:"error,omitempty"`
 }

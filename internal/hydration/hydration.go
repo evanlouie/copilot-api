@@ -42,19 +42,9 @@ func BuildChatHistory(messages []openai.ChatMessage, opts Options) (Result, erro
 		if err != nil {
 			return Result{}, fmt.Errorf("messages.%d.content: %w", i, err)
 		}
-		inputs = append(inputs, Message{Role: msg.Role, Content: text, Reasoning: inboundReasoning(msg), ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
+		inputs = append(inputs, Message{Role: msg.Role, Content: text, Reasoning: msg.InboundReasoning(), ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
 	}
 	return BuildChatHistoryMessages(inputs, opts)
-}
-
-// inboundReasoning tolerates client-supplied assistant reasoning (the de-facto
-// `reasoning`/`reasoning_content` fields) so it can be replayed when rebuilding
-// a cold session, preferring the canonical `reasoning` alias.
-func inboundReasoning(msg openai.ChatMessage) string {
-	if msg.Reasoning != "" {
-		return msg.Reasoning
-	}
-	return msg.ReasoningContent
 }
 
 func BuildChatHistoryMessages(messages []Message, opts Options) (Result, error) {

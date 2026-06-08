@@ -77,8 +77,29 @@ func TestBuildChatHistoryPrefersReasoningOverReasoningContent(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning":"canonical","reasoning_content":"alias"}`), &assistant); err != nil {
 		t.Fatal(err)
 	}
-	if got := inboundReasoning(assistant); got != "canonical" {
-		t.Fatalf("inboundReasoning = %q, want canonical", got)
+	if got := assistant.InboundReasoning(); got != "canonical" {
+		t.Fatalf("InboundReasoning = %q, want canonical", got)
+	}
+}
+
+func TestBuildChatHistoryReplaysReasoningDetailsText(t *testing.T) {
+	var assistant openai.ChatMessage
+	// OpenRouter-style client that round-trips only reasoning_details.
+	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning_details":[{"type":"reasoning.text","text":"from details","signature":"sig"}]}`), &assistant); err != nil {
+		t.Fatal(err)
+	}
+	if got := assistant.InboundReasoning(); got != "from details" {
+		t.Fatalf("InboundReasoning = %q, want details fallback", got)
+	}
+	res, err := BuildChatHistory([]openai.ChatMessage{
+		{Role: "user", Content: openai.NewTextContent("hi")},
+		assistant,
+	}, Options{SessionID: "synth-details", Model: "claude-sonnet-4.6", Now: time.Unix(1, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(res.JSONL), "from details") {
+		t.Fatalf("reasoning_details text not replayed into JSONL: %s", res.JSONL)
 	}
 }
 
