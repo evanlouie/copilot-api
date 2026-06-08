@@ -21,6 +21,21 @@ func TestResolveReasoningPrefersConsolidated(t *testing.T) {
 	}
 }
 
+func TestTurnRunnerDetachPreventsRequestCancelAbort(t *testing.T) {
+	r := &turnRunner{}
+	if !r.shouldAbortForRequestContext() {
+		t.Fatal("fresh runner should abort on request cancellation")
+	}
+	r.detachFromRequestContext()
+	if r.shouldAbortForRequestContext() {
+		t.Fatal("detached runner should not abort on request cancellation")
+	}
+	r.attachToRequestContext()
+	if !r.shouldAbortForRequestContext() {
+		t.Fatal("reattached runner should abort on request cancellation")
+	}
+}
+
 func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 	turn := &TurnResult{
 		Text:               "the answer",
@@ -29,7 +44,7 @@ func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 		ReasoningID:        "rid-7",
 		FinishReason:       "stop",
 	}
-	resp := responseFromTurn("resp_1", "claude-sonnet-4.6", "", nil, true, turn)
+	resp := responseFromTurn("resp_1", "claude-sonnet-4.6", "", nil, true, turn, false)
 	if len(resp.Output) != 2 {
 		t.Fatalf("output length = %d, want reasoning + message: %#v", len(resp.Output), resp.Output)
 	}
@@ -47,11 +62,24 @@ func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 
 func TestResponseFromTurnWithoutReasoningHasNoReasoningItem(t *testing.T) {
 	turn := &TurnResult{Text: "hi", FinishReason: "stop"}
-	resp := responseFromTurn("resp_1", "gpt-5", "", nil, true, turn)
+	resp := responseFromTurn("resp_1", "gpt-5", "", nil, true, turn, false)
 	for _, item := range resp.Output {
 		if item.Type == "reasoning" {
 			t.Fatalf("unexpected reasoning item: %#v", resp.Output)
 		}
+	}
+}
+
+func TestResponseFromTurnSuppressesReasoningItem(t *testing.T) {
+	turn := &TurnResult{Text: "hi", Reasoning: "hidden", ReasoningEncrypted: "enc", FinishReason: "stop"}
+	resp := responseFromTurn("resp_1", "gpt-5", "", nil, true, turn, true)
+	for _, item := range resp.Output {
+		if item.Type == "reasoning" {
+			t.Fatalf("reasoning item should be suppressed: %#v", resp.Output)
+		}
+	}
+	if len(resp.Output) != 1 || resp.Output[0].Type != "message" {
+		t.Fatalf("output = %#v, want only message", resp.Output)
 	}
 }
 
@@ -66,7 +94,7 @@ func TestResponseFromTurnReasoningPrecedesToolCalls(t *testing.T) {
 			Function: openai.ToolCallFunction{Name: "lookup", Arguments: `{"q":"x"}`},
 		}},
 	}
-	resp := responseFromTurn("resp_1", "claude-sonnet-4.6", "", nil, true, turn)
+	resp := responseFromTurn("resp_1", "claude-sonnet-4.6", "", nil, true, turn, false)
 	if len(resp.Output) != 2 || resp.Output[0].Type != "reasoning" || resp.Output[1].Type != "function_call" {
 		t.Fatalf("output = %#v, want reasoning then function_call", resp.Output)
 	}
@@ -94,16 +122,22 @@ func TestReasoningAccumulatorResetPreventsTurnLeak(t *testing.T) {
 	}
 
 	// Tool-call boundary.
-	acc.reset()
+	acc.markToolBoundary()
 	if acc.resolve() != "" || acc.id != "" || acc.opaque != "" || acc.encrypted != "" {
-		t.Fatalf("reset did not clear state: %#v", acc)
+		t.Fatalf("tool boundary did not clear state: %#v", acc)
+	}
+
+	// The SDK can send the final reasoning block for turn 1 after the tool-call
+	// message. It must be ignored rather than seeding turn 2.
+	acc.addConsolidated("A-late-final", "rid-A")
+	if got := acc.resolve(); got != "" {
+		t.Fatalf("late final reasoning leaked after tool boundary: %q", got)
 	}
 
 	// Turn 2: only streaming deltas (no consolidated block, as can happen on a
 	// continuation turn). Must resolve to the fresh deltas, never the stale "A"
 	// and never the concatenation "A-deltaB-delta".
-	acc.deltas.WriteString("B-delta")
-	acc.id = "rid-B"
+	acc.addDelta("B-delta", "rid-B")
 	res2 := &TurnResult{}
 	if got := acc.resolve(); got != "B-delta" {
 		t.Fatalf("turn 2 resolve = %q, want B-delta (no leak/concat)", got)
@@ -128,7 +162,7 @@ func TestResponsesPersistReasoningItemRoundTrip(t *testing.T) {
 		ReasoningID:        "rid-7",
 		FinishReason:       "stop",
 	}
-	resp := responseFromTurn("resp_persist", "claude-sonnet-4.6", "", nil, true, turn)
+	resp := responseFromTurn("resp_persist", "claude-sonnet-4.6", "", nil, true, turn, false)
 	record := recordFromResponse(resp, "sdk-session", "")
 	if err := store.SaveResponse(record); err != nil {
 		t.Fatal(err)

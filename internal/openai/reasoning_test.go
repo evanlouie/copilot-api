@@ -79,6 +79,17 @@ func TestChatMessageToleratesInboundReasoning(t *testing.T) {
 	}
 }
 
+func TestChatMessageInboundReasoningConcatenatesDetails(t *testing.T) {
+	var msg ChatMessage
+	body := []byte(`{"role":"assistant","content":"hello","reasoning_details":[{"type":"reasoning.text","text":"part one "},{"type":"reasoning.summary","summary":"part two"},{"type":"reasoning.encrypted","data":"enc"}]}`)
+	if err := json.Unmarshal(body, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.InboundReasoning(); got != "part one part two" {
+		t.Fatalf("InboundReasoning = %q, want concatenated text+summary details", got)
+	}
+}
+
 func TestValidateChatAcceptsParallelToolCalls(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		var req ChatCompletionRequest

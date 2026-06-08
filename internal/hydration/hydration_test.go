@@ -103,6 +103,29 @@ func TestBuildChatHistoryReplaysReasoningDetailsText(t *testing.T) {
 	}
 }
 
+func TestBuildChatHistoryReplaysReasoningDetailsSummaryBlocks(t *testing.T) {
+	var assistant openai.ChatMessage
+	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning_details":[{"type":"reasoning.summary","summary":"first "},{"type":"reasoning.text","text":"second"},{"type":"reasoning.encrypted","data":"enc"}]}`), &assistant); err != nil {
+		t.Fatal(err)
+	}
+	if got := assistant.InboundReasoning(); got != "first second" {
+		t.Fatalf("InboundReasoning = %q, want concatenated summary/text details", got)
+	}
+	res, err := BuildChatHistory([]openai.ChatMessage{
+		{Role: "user", Content: openai.NewTextContent("hi")},
+		assistant,
+	}, Options{SessionID: "synth-summary-details", Model: "claude-sonnet-4.6", Now: time.Unix(1, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(res.JSONL), "first second") {
+		t.Fatalf("reasoning_details summary/text not replayed into JSONL: %s", res.JSONL)
+	}
+	if strings.Contains(string(res.JSONL), "enc") {
+		t.Fatalf("encrypted reasoning should not be replayed into cold JSONL: %s", res.JSONL)
+	}
+}
+
 func TestBuildChatHistoryMessagesIncludesUserAttachments(t *testing.T) {
 	data := "AAAA"
 	mimeType := "image/png"

@@ -85,7 +85,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if turn.PendingBatchID != "" {
 		g.rememberRunner(turn.PendingBatchID, runner)
 	}
-	resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, storeVisible, turn)
+	resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, storeVisible, turn, req.SuppressReasoning)
 	record := recordFromResponse(resp, sessionID, retained)
 	record.InputText = req.Input.Text
 	record.PendingBatchID = turn.PendingBatchID
@@ -142,12 +142,14 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
 		if err := batch.CompleteWithSetup(outputs, func() {
-			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, ctx.Done())
+			runner.attachToRequestContext()
+			runner.watchContext(ctx)
+			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, req.SuppressReasoning, ctx.Done())
 			runner.setOnResult(func(turn *TurnResult) error {
 				if turn.PendingBatchID != "" {
 					g.rememberRunner(turn.PendingBatchID, runner)
 				}
-				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn)
+				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 				record.PendingBatchID = turn.PendingBatchID
 				if err := g.store.SaveResponse(record); err != nil {
@@ -237,12 +239,12 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	ch := make(chan ResponseStreamEvent, 32)
 	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
 	runner.watchContext(ctx)
-	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, previous, req.Store, ctx.Done())
+	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, previous, req.Store, req.SuppressReasoning, ctx.Done())
 	runner.setOnResult(func(turn *TurnResult) error {
 		if turn.PendingBatchID != "" {
 			g.rememberRunner(turn.PendingBatchID, runner)
 		}
-		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, req.Store, turn)
+		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, req.Store, turn, req.SuppressReasoning)
 		record := recordFromResponse(resp, sessionID, retained)
 		record.InputText = req.Input.Text
 		record.PendingBatchID = turn.PendingBatchID

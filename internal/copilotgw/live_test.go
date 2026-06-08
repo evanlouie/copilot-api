@@ -1,6 +1,7 @@
 package copilotgw
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"testing"
@@ -123,5 +124,105 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 	}
 	if finalText == "" {
 		t.Fatal("final turn result carried no answer text")
+	}
+}
+
+func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
+	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
+		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
+	}
+	model := os.Getenv("COPILOT_API_LIVE_REASONING_MODEL")
+	if model == "" {
+		model = "claude-sonnet-4.6"
+	}
+	root := t.TempDir()
+	cfg := config.Config{
+		DataDir:        root + "/data",
+		StateDir:       root + "/state",
+		CacheDir:       root + "/cache",
+		ConfigDir:      root + "/config",
+		ToolCallTTL:    time.Minute,
+		ModelsCacheTTL: time.Minute,
+		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
+	}
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err := gw.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer gw.Stop()
+
+	tools := []openai.Tool{{
+		Type: "function",
+		Function: openai.FunctionTool{
+			Name:        "get_weather",
+			Description: "Return the current weather for a city.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+		},
+	}}
+	ch, err := gw.StreamChat(t.Context(), ChatRequest{
+		OpenAIID:        openai.NewID("chatcmpl_"),
+		Model:           model,
+		ReasoningEffort: "high",
+		FinalUser:       openai.ChatMessage{Role: "user", Content: openai.NewTextContent("Use get_weather exactly once for Tokyo, then answer with the weather summary.")},
+		Tools:           tools,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first *TurnResult
+	for ev := range ch {
+		switch ev.Kind {
+		case "result":
+			first = ev.Result
+		case "error":
+			t.Fatalf("first stream error: %v", ev.Error)
+		}
+	}
+	if first == nil || len(first.ToolCalls) == 0 {
+		t.Fatalf("expected first turn to request get_weather, got %#v", first)
+	}
+	if first.Reasoning == "" {
+		t.Fatal("first tool-call turn carried no reasoning")
+	}
+
+	outputs := map[string]string{}
+	for _, call := range first.ToolCalls {
+		outputs[call.ID] = `{"city":"Tokyo","condition":"sunny","temperature_c":22}`
+	}
+	ch2, err := gw.StreamContinueChatToolCalls(t.Context(), ChatContinuationRequest{
+		Model:           model,
+		Outputs:         outputs,
+		Tools:           tools,
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var second *TurnResult
+	sawSecondReasoningDelta := false
+	for ev := range ch2 {
+		switch ev.Kind {
+		case "reasoning_delta":
+			if ev.Delta != "" {
+				sawSecondReasoningDelta = true
+			}
+		case "result":
+			second = ev.Result
+		case "error":
+			t.Fatalf("continuation stream error: %v", ev.Error)
+		}
+	}
+	if second == nil {
+		t.Fatal("continuation stream ended without result")
+	}
+	if !sawSecondReasoningDelta || second.Reasoning == "" {
+		t.Fatalf("continuation did not produce fresh streamed reasoning: sawDelta=%v result=%#v", sawSecondReasoningDelta, second)
+	}
+	if first.ReasoningID != "" && second.ReasoningID != "" && first.ReasoningID == second.ReasoningID {
+		t.Fatalf("continuation reused reasoning id %q", first.ReasoningID)
+	}
+	if second.ReasoningOpaque == "" && second.ReasoningEncrypted == "" {
+		t.Fatalf("continuation reasoning lacked opaque/encrypted continuity fields: %#v", second)
 	}
 }

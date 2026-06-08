@@ -56,6 +56,29 @@ func (g *reasoningChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest
 	}, nil
 }
 
+type reasoningResponseGateway struct {
+	copilotgw.Gateway
+	got copilotgw.ResponseRequest
+}
+
+func (g *reasoningResponseGateway) CreateResponse(_ context.Context, req copilotgw.ResponseRequest) (*copilotgw.ResponseResult, error) {
+	g.got = req
+	turn := &copilotgw.TurnResult{Text: "answer", Reasoning: "thinking", ReasoningEncrypted: "enc-blob", ReasoningID: "rid-1"}
+	resp := &openai.Response{
+		ID:                req.ResponseID,
+		Object:            openai.ObjectResponse,
+		CreatedAt:         openai.UnixNow(),
+		Status:            "completed",
+		Model:             req.Model,
+		OutputText:        turn.Text,
+		Output:            []openai.ResponseOutputItem{{ID: "msg_1", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}}},
+		ParallelToolCalls: true,
+		Store:             req.Store,
+	}
+	resp.Output = append([]openai.ResponseOutputItem{{ID: "rs_rid-1", Type: "reasoning", Status: "completed", Summary: []openai.ResponseReasoningSummary{{Type: "summary_text", Text: turn.Reasoning}}, EncryptedContent: turn.ReasoningEncrypted}}, resp.Output...)
+	return &copilotgw.ResponseResult{Response: resp}, nil
+}
+
 type reasoningResponseStreamGateway struct {
 	copilotgw.Gateway
 }
@@ -100,20 +123,29 @@ func TestChatStreamEmitsReasoningDeltasBeforeContent(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	out := w.Body.String()
-	reasoningIdx := strings.Index(out, `"reasoning":"think-"`)
-	reasoningContentIdx := strings.Index(out, `"reasoning_content":"think-"`)
-	contentIdx := strings.Index(out, `"content":"answer"`)
-	detailsIdx := strings.Index(out, `"reasoning_details"`)
-	finishIdx := strings.Index(out, `"finish_reason":"stop"`)
-	if reasoningIdx < 0 || reasoningContentIdx < 0 || contentIdx < 0 || detailsIdx < 0 || finishIdx < 0 {
-		t.Fatalf("missing expected reasoning/content/details chunks:\n%s", out)
+	chunks := parseChatStreamChunks(t, w.Body.String())
+	if len(chunks) < 6 {
+		t.Fatalf("stream produced %d chunks, want role + reasoning + content + details + finish: %#v", len(chunks), chunks)
 	}
-	if !(reasoningIdx < contentIdx && contentIdx < detailsIdx && detailsIdx < finishIdx) {
-		t.Fatalf("expected reasoning < content < reasoning_details < finish ordering:\n%s", out)
+	if chunks[0].Choices[0].Delta.Role != "assistant" {
+		t.Fatalf("first chunk = %#v, want assistant role", chunks[0])
 	}
-	if !strings.Contains(out, `"signature":"sig-blob"`) || !strings.Contains(out, `"format":"anthropic-claude-v1"`) {
-		t.Fatalf("terminal reasoning_details missing signature/format:\n%s", out)
+	if chunks[1].Choices[0].Delta.Reasoning != "think-" || chunks[1].Choices[0].Delta.ReasoningContent != "think-" {
+		t.Fatalf("first reasoning chunk = %#v", chunks[1])
+	}
+	if chunks[2].Choices[0].Delta.Reasoning != "more" || chunks[2].Choices[0].Delta.ReasoningContent != "more" {
+		t.Fatalf("second reasoning chunk = %#v", chunks[2])
+	}
+	if chunks[3].Choices[0].Delta.Content != "answer" {
+		t.Fatalf("content chunk = %#v", chunks[3])
+	}
+	details := chunks[4].Choices[0].Delta.ReasoningDetails
+	if len(details) != 1 || details[0].Signature != "sig-blob" || details[0].Format != "anthropic-claude-v1" {
+		t.Fatalf("terminal reasoning_details missing signature/format: %#v", chunks[4])
+	}
+	finish := chunks[5].Choices[0].FinishReason
+	if finish == nil || *finish != "stop" {
+		t.Fatalf("finish chunk = %#v, want stop", chunks[5])
 	}
 }
 
@@ -260,6 +292,31 @@ func TestChatAcceptsParallelToolCallsTrue(t *testing.T) {
 	}
 }
 
+func TestResponsesNonStreamingReasoningEmissionOffSuppressesReasoning(t *testing.T) {
+	gw := &reasoningResponseGateway{}
+	s := New(config.Config{ReasoningEmission: "off"}, gw, slog.Default())
+	body := strings.NewReader(`{"model":"gpt-5","input":"hi"}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if !gw.got.SuppressReasoning {
+		t.Fatal("Responses gateway request should suppress reasoning when policy is off")
+	}
+	var resp openai.Response
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range resp.Output {
+		if item.Type == "reasoning" {
+			t.Fatalf("non-streaming response should not include reasoning when policy is off: %#v", resp.Output)
+		}
+	}
+}
+
 func TestResponsesStreamEmitsReasoningSummaryBeforeMessage(t *testing.T) {
 	s := New(config.Config{}, &reasoningResponseStreamGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"claude-sonnet-4.6","stream":true,"input":"hi"}`)
@@ -282,9 +339,9 @@ func TestResponsesStreamEmitsReasoningSummaryBeforeMessage(t *testing.T) {
 		"response.reasoning_summary_text.delta",
 		"response.reasoning_summary_text.done",
 		"response.reasoning_summary_part.done",
-		"response.output_item.done",  // reasoning item
 		"response.output_item.added", // message item
 		"response.output_text.delta",
+		"response.output_item.done", // reasoning item, enriched from terminal response
 		"response.completed",
 	})
 
@@ -300,6 +357,57 @@ func TestResponsesStreamEmitsReasoningSummaryBeforeMessage(t *testing.T) {
 		if e.Type == "response.reasoning_summary_text.delta" {
 			if e.SummaryIndex == nil || *e.SummaryIndex != 0 || e.Delta == "" {
 				t.Fatalf("summary text delta malformed: %#v", e)
+			}
+		}
+	}
+}
+
+func TestResponsesStreamCarriesEncryptedContentOnStreamedReasoningDone(t *testing.T) {
+	s := New(config.Config{}, &encryptedTextReasoningResponseStreamGateway{}, slog.Default())
+	body := strings.NewReader(`{"model":"gpt-5","stream":true,"input":"hi"}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	events := parseResponseStreamEvents(t, w.Body.String())
+	var done *openai.ResponseStreamEvent
+	for i := range events {
+		if events[i].Type == "response.output_item.done" && events[i].Item != nil && events[i].Item.Type == "reasoning" {
+			done = &events[i]
+			break
+		}
+	}
+	if done == nil || done.Item.EncryptedContent != "enc-blob" {
+		t.Fatalf("streamed reasoning done item lost encrypted_content: %#v", done)
+	}
+	if len(done.Item.Summary) != 1 || done.Item.Summary[0].Text != "thinking" {
+		t.Fatalf("streamed reasoning done item lost summary: %#v", done.Item)
+	}
+}
+
+func TestResponsesStreamReasoningEmissionOffSuppressesReasoning(t *testing.T) {
+	s := New(config.Config{ReasoningEmission: "off"}, &reasoningResponseStreamGateway{}, slog.Default())
+	body := strings.NewReader(`{"model":"claude-sonnet-4.6","stream":true,"input":"hi"}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	events := parseResponseStreamEvents(t, w.Body.String())
+	for _, e := range events {
+		if strings.Contains(e.Type, "reasoning") || (e.Item != nil && e.Item.Type == "reasoning") {
+			t.Fatalf("reasoning event/item should be suppressed when policy is off: %#v", e)
+		}
+		if e.Response != nil {
+			for _, item := range e.Response.Output {
+				if item.Type == "reasoning" {
+					t.Fatalf("completed response should not include reasoning when policy is off: %#v", e.Response.Output)
+				}
 			}
 		}
 	}
@@ -341,6 +449,23 @@ func TestResponsesStreamReconcilesEncryptedOnlyReasoning(t *testing.T) {
 	if fc == nil || fc.OutputIndex == nil || *fc.OutputIndex != 1 {
 		t.Fatalf("function_call must be announced at output_index 1: %#v", fc)
 	}
+}
+
+type encryptedTextReasoningResponseStreamGateway struct {
+	copilotgw.Gateway
+}
+
+func (g *encryptedTextReasoningResponseStreamGateway) StreamResponse(_ context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
+	ch := make(chan copilotgw.ResponseStreamEvent, 8)
+	go func() {
+		defer close(ch)
+		ch <- copilotgw.ResponseStreamEvent{Kind: "reasoning_delta", Delta: "thinking", ReasoningID: "rid-1"}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "answer"}
+		resp := responseForReasoningTest(req, &copilotgw.TurnResult{Text: "answer", Reasoning: "thinking", ReasoningID: "rid-1"})
+		resp.Output[0].EncryptedContent = "enc-blob"
+		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: resp}
+	}()
+	return ch, nil
 }
 
 type encryptedReasoningResponseStreamGateway struct {

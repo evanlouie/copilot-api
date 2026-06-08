@@ -142,6 +142,14 @@ func (rt *RequestTools) SetContext(ctx context.Context) {
 	rt.ctx = ctx
 	rt.mu.Unlock()
 }
+func (rt *RequestTools) CancelCurrent(err error) {
+	rt.mu.Lock()
+	batch := rt.batch
+	rt.mu.Unlock()
+	if batch != nil {
+		batch.Cancel(err)
+	}
+}
 func (rt *RequestTools) context() context.Context {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()

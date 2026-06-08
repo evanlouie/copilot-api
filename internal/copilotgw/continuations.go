@@ -31,7 +31,12 @@ func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, req ChatContinu
 		return nil, err
 	}
 	runner := g.runnerForBatch(batch.ID)
-	if err := batch.Complete(req.Outputs); err != nil {
+	if err := batch.CompleteWithSetup(req.Outputs, func() {
+		if runner != nil {
+			runner.attachToRequestContext()
+			runner.watchContext(ctx)
+		}
+	}); err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "messages")
 	}
 	g.broker.Remove(batch)
@@ -81,6 +86,8 @@ func (g *RealGateway) StreamContinueChatToolCalls(ctx context.Context, req ChatC
 	}
 	ch := make(chan StreamEvent, 32)
 	if err := batch.CompleteWithSetup(req.Outputs, func() {
+		runner.attachToRequestContext()
+		runner.watchContext(ctx)
 		runner.enableChatStream(ch, ctx.Done())
 		runner.setOnResult(func(result *TurnResult) error {
 			if result.PendingBatchID != "" {
@@ -222,7 +229,12 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	if err != nil {
 		return nil, err
 	}
-	if err := batch.Complete(outputs); err != nil {
+	if err := batch.CompleteWithSetup(outputs, func() {
+		if runner != nil {
+			runner.attachToRequestContext()
+			runner.watchContext(ctx)
+		}
+	}); err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "input")
 	}
 	g.broker.Remove(batch)
@@ -244,7 +256,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		if !req.StoreSet {
 			storeVisible = previousRecord.Stored
 		}
-		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn)
+		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 		record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 		record.PendingBatchID = turn.PendingBatchID
 		if err := g.store.SaveResponse(record); err != nil {

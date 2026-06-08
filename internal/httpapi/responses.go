@@ -32,7 +32,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, res.Response)
+	writeJSON(w, http.StatusOK, filterResponseReasoning(res.Response, gwReq.SuppressReasoning))
 }
 
 type preparedResponseLogFields struct {
@@ -65,7 +65,23 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 			return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 		}
 	}
-	gwReq := copilotgw.ResponseRequest{ResponseID: responseID, Model: req.Model, Instructions: combineInstructions(req.Instructions, inputInstructions), Input: input, FunctionOutputs: outputs, PreviousResponseID: req.PreviousResponseID, Tools: openai.SupportedTools(req.Tools), ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), Store: store, StoreSet: storeSet, ReasoningEffort: reasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved}
+	gwReq := copilotgw.ResponseRequest{
+		ResponseID:              responseID,
+		Model:                   req.Model,
+		Instructions:            combineInstructions(req.Instructions, inputInstructions),
+		Input:                   input,
+		FunctionOutputs:         outputs,
+		PreviousResponseID:      req.PreviousResponseID,
+		Tools:                   openai.SupportedTools(req.Tools),
+		ToolChoiceNone:          openai.ToolChoiceNone(req.ToolChoice),
+		Store:                   store,
+		StoreSet:                storeSet,
+		ReasoningEffort:         reasoningEffort,
+		DefaultReasoningEffort:  s.cfg.DefaultReasoningEffort,
+		ResolvedReasoningEffort: resolvedEffort,
+		ReasoningEffortResolved: resolved,
+		SuppressReasoning:       !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled(),
+	}
 	return gwReq, preparedResponseLogFields{reasoningEffort: reasoningEffort, resolvedEffort: resolvedEffort, resolved: resolved, continuation: continuation}, nil
 }
 
@@ -132,7 +148,7 @@ func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, filterResponseReasoning(resp, !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled()))
 }
 func (s *Server) deleteResponse(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")

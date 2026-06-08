@@ -30,22 +30,24 @@ type turnRunner struct {
 	updates    chan toolproxy.TurnFinalResult
 	closed     chan struct{}
 
-	chatStream     chan<- StreamEvent
-	chatDone       <-chan struct{}
-	mu             sync.Mutex
-	abortOnce      sync.Once
-	responseStream chan<- ResponseStreamEvent
-	responseMeta   *responseStreamMeta
-	onResult       func(*TurnResult) error
+	chatStream      chan<- StreamEvent
+	chatDone        <-chan struct{}
+	mu              sync.Mutex
+	abortOnce       sync.Once
+	requestDetached bool
+	responseStream  chan<- ResponseStreamEvent
+	responseMeta    *responseStreamMeta
+	onResult        func(*TurnResult) error
 }
 
 type responseStreamMeta struct {
-	responseID   string
-	model        string
-	instructions string
-	previous     *string
-	store        bool
-	done         <-chan struct{}
+	responseID        string
+	model             string
+	instructions      string
+	previous          *string
+	store             bool
+	suppressReasoning bool
+	done              <-chan struct{}
 }
 
 func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session *copilot.Session, rt *toolproxy.RequestTools, events <-chan copilot.SessionEvent, retained string, kind string, responseID string) *turnRunner {
@@ -59,7 +61,11 @@ func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, sessi
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	rt.SetContext(ctx)
+	// Tool-call batches must survive the request that returns the tool_calls
+	// response so clients can continue the live SDK session on the next HTTP
+	// request. Request cancellation is still enforced by watchContext before the
+	// first result, and after a tool-call result the batch TTL owns cleanup.
+	rt.SetContext(context.Background())
 	r := &turnRunner{id: id, model: model, ctx: ctx, session: session, rt: rt, events: events, retained: retained, kind: kind, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), created: openai.UnixNow()}
 	go r.loop(g)
 	return r
@@ -73,14 +79,35 @@ func (r *turnRunner) watchContext(ctx context.Context) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			r.abort()
+			if r.shouldAbortForRequestContext() {
+				r.abort()
+			}
 		case <-r.closed:
 		}
 	}()
 }
 
+func (r *turnRunner) shouldAbortForRequestContext() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.requestDetached
+}
+
+func (r *turnRunner) attachToRequestContext() {
+	r.mu.Lock()
+	r.requestDetached = false
+	r.mu.Unlock()
+}
+
+func (r *turnRunner) detachFromRequestContext() {
+	r.mu.Lock()
+	r.requestDetached = true
+	r.mu.Unlock()
+}
+
 func (r *turnRunner) abort() {
 	r.abortOnce.Do(func() {
+		r.rt.CancelCurrent(context.Canceled)
 		if batch := r.currentBatch(); batch != nil {
 			batch.Cancel(context.Canceled)
 		}
@@ -130,7 +157,7 @@ func (r *turnRunner) enableChatStream(ch chan<- StreamEvent, done <-chan struct{
 	r.chatDone = done
 }
 
-func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, responseID, model, instructions string, previous *string, store bool, done <-chan struct{}) {
+func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, responseID, model, instructions string, previous *string, store bool, suppressReasoning bool, done <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.responseStream = ch
@@ -138,7 +165,7 @@ func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, respons
 		r.responseMeta = nil
 		return
 	}
-	r.responseMeta = &responseStreamMeta{responseID: responseID, model: model, instructions: instructions, previous: previous, store: store, done: done}
+	r.responseMeta = &responseStreamMeta{responseID: responseID, model: model, instructions: instructions, previous: previous, store: store, suppressReasoning: suppressReasoning, done: done}
 }
 
 func (r *turnRunner) loop(g *RealGateway) {
@@ -149,15 +176,16 @@ func (r *turnRunner) loop(g *RealGateway) {
 	var usage *openai.Usage
 	for event := range r.events {
 		switch d := event.Data.(type) {
+		case *copilot.AssistantTurnStartData:
+			reason.reset()
+			text = ""
+			usage = nil
 		case *copilot.AssistantReasoningDeltaData:
 			// Streaming reasoning is dropped by the SDK->wire reduction unless we
 			// thread it through here. Accumulate a plaintext fallback and forward
 			// the delta so encoders can interleave it ahead of content.
-			if d.ReasoningID != "" {
-				reason.id = d.ReasoningID
-			}
+			reason.addDelta(d.DeltaContent, d.ReasoningID)
 			if d.DeltaContent != "" {
-				reason.deltas.WriteString(d.DeltaContent)
 				r.emitReasoningDelta(d.DeltaContent, d.ReasoningID)
 			}
 		case *copilot.AssistantMessageDeltaData:
@@ -166,13 +194,9 @@ func (r *turnRunner) loop(g *RealGateway) {
 			}
 		case *copilot.AssistantReasoningData:
 			// Consolidated reasoning block; in tool-call turns this can arrive
-			// after the message, so the message-data capture below is primary.
-			if d.Content != "" {
-				reason.consolidated = d.Content
-			}
-			if d.ReasoningID != "" {
-				reason.id = d.ReasoningID
-			}
+			// after the message. If we already emitted that tool-call turn, do not
+			// let its late final block seed the next continuation turn.
+			reason.addConsolidated(d.Content, d.ReasoningID)
 		case *copilot.AssistantMessageData:
 			if d.ReasoningText != nil && *d.ReasoningText != "" {
 				reason.consolidated = *d.ReasoningText
@@ -198,7 +222,8 @@ func (r *turnRunner) loop(g *RealGateway) {
 				// concatenate) this turn's reasoning when its own consolidated
 				// block is absent.
 				text = ""
-				reason.reset()
+				usage = nil
+				reason.markToolBoundary()
 			} else {
 				text = d.Content
 			}
@@ -230,11 +255,42 @@ func (r *turnRunner) loop(g *RealGateway) {
 // boundary; otherwise interleaved thinking leaks (or concatenates) between
 // turns.
 type reasoningAccumulator struct {
-	consolidated string
-	deltas       strings.Builder
-	opaque       string
-	encrypted    string
-	id           string
+	consolidated      string
+	deltas            strings.Builder
+	opaque            string
+	encrypted         string
+	id                string
+	ignoreLateFinal   bool
+	ignoreLateFinalID string
+}
+
+func (a *reasoningAccumulator) addDelta(delta, id string) {
+	if a.ignoreLateFinal && (a.ignoreLateFinalID == "" || (id != "" && id != a.ignoreLateFinalID)) {
+		a.ignoreLateFinal = false
+		a.ignoreLateFinalID = ""
+	}
+	if id != "" {
+		a.id = id
+	}
+	if delta != "" {
+		a.deltas.WriteString(delta)
+	}
+}
+
+func (a *reasoningAccumulator) addConsolidated(content, id string) {
+	if a.ignoreLateFinal {
+		if a.ignoreLateFinalID == "" || id == "" || id == a.ignoreLateFinalID {
+			return
+		}
+		a.ignoreLateFinal = false
+		a.ignoreLateFinalID = ""
+	}
+	if content != "" {
+		a.consolidated = content
+	}
+	if id != "" {
+		a.id = id
+	}
 }
 
 // resolve returns the best reasoning text for the turn, preferring the
@@ -251,6 +307,16 @@ func (a *reasoningAccumulator) applyTo(res *TurnResult) {
 	res.ReasoningID = a.id
 }
 
+// markToolBoundary clears this turn's reasoning after emitting a tool-call
+// result, while remembering that the SDK may still send the just-emitted turn's
+// final AssistantReasoningData. That late final must not seed the next turn.
+func (a *reasoningAccumulator) markToolBoundary() {
+	ignoreID := a.id
+	a.reset()
+	a.ignoreLateFinal = true
+	a.ignoreLateFinalID = ignoreID
+}
+
 // reset clears all per-turn reasoning state at a turn boundary.
 func (a *reasoningAccumulator) reset() {
 	a.consolidated = ""
@@ -258,6 +324,8 @@ func (a *reasoningAccumulator) reset() {
 	a.opaque = ""
 	a.encrypted = ""
 	a.id = ""
+	a.ignoreLateFinal = false
+	a.ignoreLateFinalID = ""
 }
 
 // resolveReasoning prefers the consolidated reasoning text and falls back to
@@ -314,12 +382,12 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 			return
 		}
 	}
-	r.updates <- toolproxy.TurnFinalResult{Value: res}
 	r.mu.Lock()
 	chatStream := r.chatStream
 	chatDone := r.chatDone
 	responseStream := r.responseStream
 	meta := r.responseMeta
+	streaming := chatStream != nil || responseStream != nil
 	if res.FinishReason == "tool_calls" {
 		r.chatStream = nil
 		r.chatDone = nil
@@ -327,9 +395,17 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 		r.responseMeta = nil
 	}
 	r.mu.Unlock()
+	if res.FinishReason == "tool_calls" && !streaming {
+		// Non-streaming callers receive the parked tool-call result through
+		// r.updates; detach before publishing so the handler's deferred request
+		// cancellation does not abort the live SDK session needed for continuation.
+		r.detachFromRequestContext()
+	}
+	r.updates <- toolproxy.TurnFinalResult{Value: res}
 	if chatStream != nil {
 		sent := sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "result", Result: res})
 		if res.FinishReason == "tool_calls" && sent {
+			r.detachFromRequestContext()
 			close(chatStream)
 		}
 	}
@@ -338,6 +414,7 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 		model := r.model
 		instructions := ""
 		store := true
+		suppressReasoning := false
 		var previous *string
 		if meta != nil {
 			if meta.responseID != "" {
@@ -349,9 +426,11 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 			instructions = meta.instructions
 			previous = meta.previous
 			store = meta.store
+			suppressReasoning = meta.suppressReasoning
 		}
-		sent := sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "response", Response: responseFromTurn(responseID, model, instructions, previous, store, res)})
+		sent := sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "response", Response: responseFromTurn(responseID, model, instructions, previous, store, res, suppressReasoning)})
 		if res.FinishReason == "tool_calls" && sent {
+			r.detachFromRequestContext()
 			close(responseStream)
 		}
 	}
@@ -459,13 +538,15 @@ func usageFromSDK(d *copilot.AssistantUsageData) *openai.Usage {
 	return usage
 }
 
-func responseFromTurn(id, model, instructions string, previous *string, store bool, turn *TurnResult) *openai.Response {
+func responseFromTurn(id, model, instructions string, previous *string, store bool, turn *TurnResult, suppressReasoning bool) *openai.Response {
 	if id == "" {
 		id = openai.NewID("resp_")
 	}
 	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: time.Now().Unix(), Status: "completed", Model: model, Instructions: instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: previous, Store: store, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
-	if item, ok := reasoningOutputItem(turn); ok {
-		resp.Output = append(resp.Output, item)
+	if !suppressReasoning {
+		if item, ok := reasoningOutputItem(turn); ok {
+			resp.Output = append(resp.Output, item)
+		}
 	}
 	if turn.Text != "" || len(turn.ToolCalls) == 0 {
 		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: openai.NewID("msg_"), Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}})

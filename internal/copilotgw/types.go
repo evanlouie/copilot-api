@@ -118,6 +118,7 @@ type ResponseRequest struct {
 	DefaultReasoningEffort  string
 	ResolvedReasoningEffort string
 	ReasoningEffortResolved bool
+	SuppressReasoning       bool
 }
 
 type ResponseResult struct {

@@ -74,7 +74,8 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 	// reasoning is present the message item shifts to output index 1.
 	reasoningItemID := ""
 	reasoningStarted := false
-	reasoningDone := false
+	reasoningSummaryDone := false
+	reasoningItemDone := false
 	var reasoningText strings.Builder
 	messageOutputIndex := 0
 	var final *openai.Response
@@ -94,24 +95,40 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 		// stream accumulators have a part[0] to attach the text deltas to.
 		return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_part.added", OutputIndex: &idx, SummaryIndex: &summaryIdx, ItemID: reasoningItemID, Part: openai.ResponseReasoningSummary{Type: "summary_text", Text: ""}})
 	}
-	closeReasoning := func() error {
-		if !reasoningStarted || reasoningDone {
+	closeReasoningSummary := func() error {
+		if !reasoningStarted || reasoningSummaryDone {
 			return nil
 		}
-		reasoningDone = true
+		reasoningSummaryDone = true
 		idx := 0
 		summaryIdx := 0
 		text := reasoningText.String()
 		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_text.done", OutputIndex: &idx, SummaryIndex: &summaryIdx, ItemID: reasoningItemID, Text: text}); err != nil {
 			return err
 		}
-		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_part.done", OutputIndex: &idx, SummaryIndex: &summaryIdx, ItemID: reasoningItemID, Part: openai.ResponseReasoningSummary{Type: "summary_text", Text: text}}); err != nil {
+		return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_part.done", OutputIndex: &idx, SummaryIndex: &summaryIdx, ItemID: reasoningItemID, Part: openai.ResponseReasoningSummary{Type: "summary_text", Text: text}})
+	}
+	finishReasoningItem := func(resp *openai.Response) error {
+		if !reasoningStarted || reasoningItemDone {
+			return nil
+		}
+		if err := closeReasoningSummary(); err != nil {
 			return err
 		}
-		item := openai.ResponseOutputItem{ID: reasoningItemID, Type: "reasoning", Status: "completed", Summary: []openai.ResponseReasoningSummary{}}
-		if text != "" {
+		idx := 0
+		text := reasoningText.String()
+		item, ok := finalReasoningItem(resp)
+		if ok {
+			setFinalReasoningItemID(resp, reasoningItemID)
+			item.ID = reasoningItemID
+		} else {
+			item = openai.ResponseOutputItem{ID: reasoningItemID, Type: "reasoning", Status: "completed", Summary: []openai.ResponseReasoningSummary{}}
+		}
+		item.Status = "completed"
+		if len(item.Summary) == 0 && text != "" {
 			item.Summary = []openai.ResponseReasoningSummary{{Type: "summary_text", Text: text}}
 		}
+		reasoningItemDone = true
 		return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item, Status: item.Status})
 	}
 	// reconcileUnstreamedReasoning announces a final reasoning item that produced
@@ -128,7 +145,8 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 			return nil
 		}
 		reasoningStarted = true
-		reasoningDone = true
+		reasoningSummaryDone = true
+		reasoningItemDone = true
 		messageOutputIndex = 1
 		idx := 0
 		added := item
@@ -150,6 +168,9 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 			}
 			switch ev.Kind {
 			case "reasoning_delta":
+				if req.SuppressReasoning {
+					continue
+				}
 				if ev.Delta == "" {
 					continue
 				}
@@ -170,7 +191,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 			case "delta":
-				if err := closeReasoning(); err != nil {
+				if err := closeReasoningSummary(); err != nil {
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 				if messageText.Len()+len(ev.Delta) > maxResponseStreamTextBytes {
@@ -201,7 +222,8 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 			case "response":
-				if err := closeReasoning(); err != nil {
+				ev.Response = filterResponseReasoning(ev.Response, req.SuppressReasoning)
+				if err := finishReasoningItem(ev.Response); err != nil {
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 				if err := reconcileUnstreamedReasoning(ev.Response); err != nil {
@@ -235,7 +257,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 				final = ev.Response
 			case "error":
-				if err := closeReasoning(); err != nil {
+				if err := finishReasoningItem(final); err != nil {
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 				if messageStarted && !messageDone {
@@ -278,6 +300,32 @@ func finalReasoningItem(resp *openai.Response) (openai.ResponseOutputItem, bool)
 		}
 	}
 	return openai.ResponseOutputItem{}, false
+}
+
+func setFinalReasoningItemID(resp *openai.Response, id string) {
+	if resp == nil || id == "" {
+		return
+	}
+	for i := range resp.Output {
+		if resp.Output[i].Type == "reasoning" {
+			resp.Output[i].ID = id
+			return
+		}
+	}
+}
+
+func filterResponseReasoning(resp *openai.Response, suppress bool) *openai.Response {
+	if !suppress || resp == nil {
+		return resp
+	}
+	filtered := *resp
+	filtered.Output = make([]openai.ResponseOutputItem, 0, len(resp.Output))
+	for _, item := range resp.Output {
+		if item.Type != "reasoning" {
+			filtered.Output = append(filtered.Output, item)
+		}
+	}
+	return &filtered
 }
 
 func writeResponseOutputEvents(writer responseEventWriter, resp *openai.Response) error {

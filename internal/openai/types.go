@@ -188,9 +188,9 @@ type ReasoningDetail struct {
 
 // InboundReasoning returns client-supplied assistant reasoning so it can be
 // replayed when rebuilding a cold session. It prefers the canonical `reasoning`
-// alias, then `reasoning_content`, then the first textual `reasoning_details`
-// block (the OpenRouter round-trip shape). Opaque/encrypted reasoning is
-// session-bound and intentionally not replayed.
+// alias, then `reasoning_content`, then concatenated textual/summary
+// `reasoning_details` blocks (the OpenRouter round-trip shape).
+// Opaque/encrypted reasoning is session-bound and intentionally not replayed.
 func (m ChatMessage) InboundReasoning() string {
 	if m.Reasoning != "" {
 		return m.Reasoning
@@ -198,12 +198,16 @@ func (m ChatMessage) InboundReasoning() string {
 	if m.ReasoningContent != "" {
 		return m.ReasoningContent
 	}
+	parts := make([]string, 0, len(m.ReasoningDetails))
 	for _, d := range m.ReasoningDetails {
-		if d.Text != "" {
-			return d.Text
+		switch {
+		case d.Text != "":
+			parts = append(parts, d.Text)
+		case d.Summary != "":
+			parts = append(parts, d.Summary)
 		}
 	}
-	return ""
+	return strings.Join(parts, "")
 }
 
 // ReasoningEmissionPolicy resolves which reasoning fields a surface should
