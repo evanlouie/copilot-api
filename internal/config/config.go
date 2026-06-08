@@ -19,6 +19,18 @@ const (
 	DefaultMaxRequestBodyBytes   = 100 << 20
 	DefaultWebSocketIdleTimeout  = 2 * time.Minute
 	DefaultWebSocketPingInterval = 30 * time.Second
+	DefaultReasoningEmission     = "both"
+)
+
+// Reasoning emission policy values control which de-facto-standard reasoning
+// fields the OpenAI-compatible surfaces expose. "both" maximizes client
+// compatibility; the narrower values let operators silence clients that render
+// reasoning twice.
+const (
+	ReasoningEmissionBoth             = "both"
+	ReasoningEmissionReasoning        = "reasoning"
+	ReasoningEmissionReasoningContent = "reasoning_content"
+	ReasoningEmissionOff              = "off"
 )
 
 type Config struct {
@@ -39,6 +51,7 @@ type Config struct {
 	CacheDir               string
 	ConfigDir              string
 	StrictCompat           bool
+	ReasoningEmission      string
 	LogContent             bool
 	LogLevel               slog.Level
 }
@@ -80,6 +93,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.StrictCompat, err = parseBoolEnv("COPILOT_STRICT_COMPAT", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.ReasoningEmission, err = parseReasoningEmissionEnv("COPILOT_REASONING_EMISSION", DefaultReasoningEmission); err != nil {
 		return Config{}, err
 	}
 	if cfg.LogContent, err = parseBoolEnv("COPILOT_LOG_CONTENT", false); err != nil {
@@ -154,6 +170,19 @@ func parseBytesEnv(key string, def int64) (int64, error) {
 		return 0, fmt.Errorf("%s must be a non-negative integer byte count", key)
 	}
 	return n, nil
+}
+
+func parseReasoningEmissionEnv(key, def string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return def, nil
+	}
+	switch v {
+	case ReasoningEmissionBoth, ReasoningEmissionReasoning, ReasoningEmissionReasoningContent, ReasoningEmissionOff:
+		return v, nil
+	default:
+		return "", fmt.Errorf("%s must be one of both, reasoning, reasoning_content, or off", key)
+	}
 }
 
 func parseBoolEnv(key string, def bool) (bool, error) {

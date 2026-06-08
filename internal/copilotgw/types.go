@@ -78,24 +78,28 @@ type ChatContinuationRequest struct {
 }
 
 type TurnResult struct {
-	ID             string
-	Created        int64
-	Model          string
-	SDKSessionID   string
-	Text           string
-	Reasoning      string
-	ToolCalls      []openai.ChatToolCall
-	Usage          *openai.Usage
-	FinishReason   string
-	RetainedPath   string
-	PendingBatchID string
+	ID                 string
+	Created            int64
+	Model              string
+	SDKSessionID       string
+	Text               string
+	Reasoning          string
+	ReasoningOpaque    string
+	ReasoningEncrypted string
+	ReasoningID        string
+	ToolCalls          []openai.ChatToolCall
+	Usage              *openai.Usage
+	FinishReason       string
+	RetainedPath       string
+	PendingBatchID     string
 }
 
 type StreamEvent struct {
-	Kind   string
-	Delta  string
-	Result *TurnResult
-	Error  error
+	Kind        string
+	Delta       string
+	ReasoningID string
+	Result      *TurnResult
+	Error       error
 }
 
 type ResponseRequest struct {
@@ -127,9 +131,10 @@ type WarmResponseResult struct {
 }
 
 type ResponseStreamEvent struct {
-	Kind     string
-	Delta    string
-	Response *openai.Response
-	Item     *openai.ResponseOutputItem
-	Error    error
+	Kind        string
+	Delta       string
+	ReasoningID string
+	Response    *openai.Response
+	Item        *openai.ResponseOutputItem
+	Error       error
 }

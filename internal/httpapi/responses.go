@@ -86,7 +86,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	_ = writeResponseStreamEvents(ctx, sseResponseEventWriter{writer: writer}, req, ch)
 	_ = writer.Done()
 }
-func streamedMessageItem(resp *openai.Response, id, text string) (*openai.ResponseOutputItem, int) {
+func streamedMessageItem(resp *openai.Response, id, text string, insertIndex int) (*openai.ResponseOutputItem, int) {
 	if resp == nil {
 		return nil, 0
 	}
@@ -106,8 +106,19 @@ func streamedMessageItem(resp *openai.Response, id, text string) (*openai.Respon
 			break
 		}
 	}
-	resp.Output = append([]openai.ResponseOutputItem{item}, resp.Output...)
-	return &resp.Output[0], 0
+	// Insert the message at the same output index used for the streamed
+	// output_item.added event so a leading reasoning item keeps index 0 and the
+	// message follows it.
+	if insertIndex < 0 {
+		insertIndex = 0
+	}
+	if insertIndex > len(resp.Output) {
+		insertIndex = len(resp.Output)
+	}
+	resp.Output = append(resp.Output, openai.ResponseOutputItem{})
+	copy(resp.Output[insertIndex+1:], resp.Output[insertIndex:])
+	resp.Output[insertIndex] = item
+	return &resp.Output[insertIndex], insertIndex
 }
 
 func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {

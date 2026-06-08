@@ -143,10 +143,20 @@ func (g *RealGateway) resolveChatHistory(ctx context.Context, model string, mess
 			if err != nil {
 				return nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 			}
-			out = append(out, hydration.Message{Role: msg.Role, Content: text, ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
+			out = append(out, hydration.Message{Role: msg.Role, Content: text, Reasoning: inboundChatReasoning(msg), ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
 		default:
 			return nil, openai.InvalidRequest(fmt.Sprintf("unsupported message role %q", msg.Role), fmt.Sprintf("messages.%d.role", i))
 		}
 	}
 	return out, nil
+}
+
+// inboundChatReasoning tolerates client-supplied assistant reasoning so it can
+// be replayed when rebuilding a cold synthetic session, preferring the
+// canonical `reasoning` alias over `reasoning_content`.
+func inboundChatReasoning(msg openai.ChatMessage) string {
+	if msg.Reasoning != "" {
+		return msg.Reasoning
+	}
+	return msg.ReasoningContent
 }

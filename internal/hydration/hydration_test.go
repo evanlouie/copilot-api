@@ -42,6 +42,46 @@ func TestBuildChatHistoryRejectsUnknownToolResult(t *testing.T) {
 	}
 }
 
+func TestBuildChatHistoryReplaysInboundReasoning(t *testing.T) {
+	assistant := openai.ChatMessage{Role: "assistant", Content: openai.NewTextContent("done")}
+	// Simulate a client round-tripping our own reasoning output back to us.
+	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning":"I considered the options"}`), &assistant); err != nil {
+		t.Fatal(err)
+	}
+	res, err := BuildChatHistory([]openai.ChatMessage{
+		{Role: "user", Content: openai.NewTextContent("hi")},
+		assistant,
+	}, Options{SessionID: "synth-reasoning", Model: "claude-sonnet-4.6", Now: time.Unix(1, 0).UTC()})
+	if err != nil {
+		t.Fatalf("inbound reasoning must not error: %v", err)
+	}
+	found := false
+	for _, ev := range res.Events {
+		if msg, ok := ev.Data.(*copilot.AssistantMessageData); ok {
+			if msg.ReasoningText == nil || *msg.ReasoningText != "I considered the options" {
+				t.Fatalf("assistant reasoning not replayed: %#v", msg.ReasoningText)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no assistant message event produced")
+	}
+	if !strings.Contains(string(res.JSONL), "I considered the options") {
+		t.Fatalf("reasoning text missing from JSONL: %s", res.JSONL)
+	}
+}
+
+func TestBuildChatHistoryPrefersReasoningOverReasoningContent(t *testing.T) {
+	var assistant openai.ChatMessage
+	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning":"canonical","reasoning_content":"alias"}`), &assistant); err != nil {
+		t.Fatal(err)
+	}
+	if got := inboundReasoning(assistant); got != "canonical" {
+		t.Fatalf("inboundReasoning = %q, want canonical", got)
+	}
+}
+
 func TestBuildChatHistoryMessagesIncludesUserAttachments(t *testing.T) {
 	data := "AAAA"
 	mimeType := "image/png"

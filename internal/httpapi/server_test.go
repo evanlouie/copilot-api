@@ -1276,7 +1276,7 @@ func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
 
 func TestStreamedMessageItemKeepsTextAtStableIndex(t *testing.T) {
 	resp := &openai.Response{Output: []openai.ResponseOutputItem{{ID: "fc_call_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "lookup", Arguments: `{}`}}}
-	item, idx := streamedMessageItem(resp, "msg_stream", "hello")
+	item, idx := streamedMessageItem(resp, "msg_stream", "hello", 0)
 	if idx != 0 || item == nil || item.ID != "msg_stream" || item.Type != "message" {
 		t.Fatalf("streamedMessageItem = (%#v, %d), want message at index 0", item, idx)
 	}
@@ -1295,12 +1295,6 @@ func TestHTTPValidationErrorsAreOpenAIShaped(t *testing.T) {
 		body  string
 		param string
 	}{
-		{
-			name:  "chat parallel tool calls",
-			path:  "/v1/chat/completions",
-			body:  `{"model":"gpt-5","parallel_tool_calls":true,"messages":[{"role":"user","content":"hi"}]}`,
-			param: "parallel_tool_calls",
-		},
 		{
 			name:  "responses parallel tool calls false",
 			path:  "/v1/responses",

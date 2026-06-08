@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interleaved Thinking &amp; Tool Calls — Implementation Plan</title>
+  <style>
+    :root {
+      --ink: #17120d;
+      --muted: #675c4e;
+      --paper: #f4ead7;
+      --paper-bright: #fff8e9;
+      --paper-deep: #ead8b8;
+      --line: #d4bd91;
+      --line-strong: #9f7741;
+      --rust: #99401f;
+      --amber: #cf821c;
+      --green: #326c50;
+      --blue: #255978;
+      --violet: #5e4963;
+      --red: #a73628;
+      --shadow: 0 28px 80px rgba(49, 32, 11, 0.18);
+      --radius: 24px;
+      --mono: "Berkeley Mono", "SF Mono", Menlo, Consolas, monospace;
+      --serif: "Iowan Old Style", Charter, "Palatino Linotype", Georgia, serif;
+      --sans: Avenir, "Avenir Next", Optima, Candara, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(207, 130, 28, 0.18), transparent 30rem),
+        radial-gradient(circle at 88% 18%, rgba(37, 89, 120, 0.13), transparent 25rem),
+        linear-gradient(135deg, var(--paper), #efe0c5 58%, #e8d0aa);
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      font-family: var(--sans);
+      line-height: 1.6;
+      letter-spacing: 0.005em;
+      overflow-x: clip;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.28;
+      mix-blend-mode: multiply;
+      background-image:
+        linear-gradient(rgba(23, 18, 13, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 18, 13, 0.035) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 78%);
+    }
+
+    a { color: var(--blue); text-underline-offset: 0.18em; }
+    code, pre { font-family: var(--mono); }
+
+    .shell {
+      width: min(1200px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 10px);
+      padding: clamp(28px, 5vw, 66px);
+      background:
+        linear-gradient(135deg, rgba(255, 248, 233, 0.97), rgba(238, 218, 181, 0.9)),
+        repeating-linear-gradient(-35deg, rgba(153, 64, 31, 0.08) 0 1px, transparent 1px 16px);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 390px;
+      height: 390px;
+      right: -120px;
+      top: -145px;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(207, 130, 28, 0.24), transparent 62%),
+        conic-gradient(from 45deg, rgba(153, 64, 31, 0.18), rgba(37, 89, 120, 0.13), rgba(50, 108, 80, 0.16), rgba(153, 64, 31, 0.18));
+      filter: blur(1px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 18px;
+      padding: 6px 12px;
+      border: 1px solid rgba(153, 64, 31, 0.25);
+      border-radius: 999px;
+      color: var(--rust);
+      background: rgba(255, 248, 233, 0.72);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.05;
+      letter-spacing: -0.035em;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: clamp(2.6rem, 7vw, 5.9rem);
+      overflow-wrap: anywhere;
+      text-wrap: balance;
+    }
+
+    h2 { font-size: clamp(1.9rem, 4vw, 3rem); }
+    h3 { font-size: clamp(1.35rem, 2.4vw, 1.9rem); }
+
+    .subtitle {
+      max-width: 820px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.08rem, 2vw, 1.34rem);
+    }
+
+    .meta-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .meta-card {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      border-radius: 17px;
+      background: rgba(255, 248, 233, 0.74);
+      overflow-wrap: anywhere;
+    }
+
+    .meta-card b {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 270px) minmax(0, 1fr);
+      gap: 30px;
+      align-items: start;
+      margin-top: 30px;
+      min-width: 0;
+    }
+
+    nav {
+      position: sticky;
+      top: 20px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 248, 233, 0.8);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 16px 50px rgba(49, 32, 11, 0.08);
+    }
+
+    nav strong {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    nav a {
+      display: block;
+      padding: 9px 10px;
+      border-radius: 12px;
+      color: var(--ink);
+      font-size: 0.94rem;
+      text-decoration: none;
+    }
+
+    nav a:hover {
+      background: rgba(207, 130, 28, 0.14);
+      color: var(--rust);
+    }
+
+    main {
+      display: grid;
+      gap: 22px;
+      min-width: 0;
+    }
+
+    section {
+      padding: clamp(22px, 4vw, 38px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 248, 233, 0.86);
+      box-shadow: 0 18px 60px rgba(49, 32, 11, 0.08);
+      min-width: 0;
+    }
+
+    section > p:first-of-type { margin-top: 14px; }
+    p, li { color: var(--muted); }
+    strong { color: var(--ink); }
+
+    .callout {
+      margin: 20px 0;
+      padding: 18px 20px;
+      border: 1px solid rgba(37, 89, 120, 0.25);
+      border-left: 5px solid var(--blue);
+      border-radius: 18px;
+      background: rgba(37, 89, 120, 0.08);
+    }
+
+    .warning {
+      border-color: rgba(167, 54, 40, 0.25);
+      border-left-color: var(--red);
+      background: rgba(167, 54, 40, 0.07);
+    }
+
+    .success {
+      border-color: rgba(50, 108, 80, 0.25);
+      border-left-color: var(--green);
+      background: rgba(50, 108, 80, 0.08);
+    }
+
+    .grid-2,
+    .grid-3 {
+      display: grid;
+      gap: 14px;
+      margin: 20px 0;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card {
+      padding: 18px;
+      border: 1px solid rgba(159, 119, 65, 0.32);
+      border-radius: 18px;
+      background: rgba(255, 253, 247, 0.62);
+      min-width: 0;
+    }
+
+    .card h3,
+    .card h4 { margin-bottom: 8px; }
+    .card p { margin: 0; }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      color: var(--rust);
+      background: rgba(153, 64, 31, 0.09);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .status.ok {
+      color: var(--green);
+      background: rgba(50, 108, 80, 0.1);
+    }
+
+    .status.wait {
+      color: var(--blue);
+      background: rgba(37, 89, 120, 0.1);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0 6px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 253, 247, 0.58);
+    }
+
+    th, td {
+      padding: 13px 14px;
+      border-bottom: 1px solid rgba(212, 189, 145, 0.7);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--rust);
+      background: rgba(153, 64, 31, 0.08);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    td code, li code, p code {
+      padding: 0.12em 0.35em;
+      border: 1px solid rgba(159, 119, 65, 0.26);
+      border-radius: 7px;
+      background: rgba(255, 248, 233, 0.8);
+      color: #3a2414;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 18px 0;
+      padding: 18px;
+      overflow: auto;
+      border: 1px solid rgba(159, 119, 65, 0.38);
+      border-radius: 18px;
+      background: #21170f;
+      color: #fbe7bd;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+
+    pre code { font-size: 0.86rem; }
+
+    .phase {
+      counter-increment: phase;
+      position: relative;
+      padding-left: 72px;
+    }
+
+    .phase::before {
+      content: counter(phase);
+      position: absolute;
+      left: 0;
+      top: 2px;
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border-radius: 16px;
+      color: var(--paper-bright);
+      background: linear-gradient(135deg, var(--rust), var(--amber));
+      font-family: var(--mono);
+      font-weight: 700;
+      box-shadow: 0 10px 28px rgba(153, 64, 31, 0.22);
+    }
+
+    .phase + .phase {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px dashed rgba(159, 119, 65, 0.46);
+    }
+
+    .phase h3 { margin-bottom: 8px; }
+
+    .file-map {
+      display: grid;
+      gap: 10px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .file-map li {
+      padding: 12px 14px;
+      border: 1px solid rgba(159, 119, 65, 0.25);
+      border-radius: 14px;
+      background: rgba(255, 253, 247, 0.54);
+    }
+
+    .decision {
+      border-left: 4px solid var(--amber);
+    }
+
+    .mermaid-wrap {
+      margin-top: 18px;
+    }
+
+    footer {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      text-align: center;
+    }
+
+    @media (max-width: 920px) {
+      .layout { grid-template-columns: 1fr; }
+      nav { position: static; }
+      .meta-grid, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .phase { padding-left: 0; padding-top: 62px; }
+      .phase::before { top: 0; }
+    }
+
+    @media print {
+      html { background: white; }
+      body::before, .hero::after, nav { display: none; }
+      .shell { width: auto; padding: 0; }
+      .hero, section { box-shadow: none; background: white; }
+      a { color: inherit; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <p class="eyebrow">Implementation plan · Chat Completions + Responses</p>
+      <h1>Interleaved thinking &amp; interleaved tool calls</h1>
+      <p class="subtitle">
+        A phased plan to surface streamed reasoning, preserve interleaved thinking across tool calls, and emit de-facto-standard <code>reasoning</code> / <code>reasoning_content</code> / <code>reasoning_details</code> fields on the OpenAI-compatible surfaces — grounded in a live probe of the GitHub Copilot SDK event stream.
+      </p>
+      <div class="meta-grid" aria-label="Plan metadata">
+        <div class="meta-card"><b>Primary surface</b><code>POST /v1/chat/completions</code></div>
+        <div class="meta-card"><b>Secondary surface</b><code>POST /v1/responses</code></div>
+        <div class="meta-card"><b>Current state</b>Reasoning captured, never emitted</div>
+        <div class="meta-card"><b>Spike</b>Passed — SDK streams reasoning</div>
+        <div class="meta-card"><b>Date</b>2026-06-08</div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="Table of contents">
+        <strong>Contents</strong>
+        <a href="#summary">Summary</a>
+        <a href="#evidence">Spike evidence</a>
+        <a href="#decisions">Locked decisions</a>
+        <a href="#current-state">Current state</a>
+        <a href="#wire">Wire contract</a>
+        <a href="#phases">Implementation phases</a>
+        <a href="#tests">Testing plan</a>
+        <a href="#risks">Risks &amp; gotchas</a>
+        <a href="#acceptance">Acceptance criteria</a>
+        <a href="#refs">References</a>
+      </nav>
+
+      <main>
+        <section id="summary">
+          <h2>Summary</h2>
+          <p>
+            The Copilot SDK already streams model reasoning as incremental deltas and exposes encrypted "opaque" thinking on every turn, but <code>copilot-api</code> collapses it into a single hidden <code>TurnResult.Reasoning</code> string that is never emitted, streamed, or replayed. This plan threads that reasoning through to the wire using the fields real clients already understand (Open WebUI, Jan, OpenCode, Pi), preserves interleaved thinking across the standard multi-request tool loop, and lifts the artificial <code>parallel_tool_calls=true</code> rejection.
+          </p>
+          <div class="callout success">
+            <strong>Recommended strategy:</strong> change the internal event model in <code>internal/copilotgw/turn_runner.go</code> first (it is the choke point that flattens SDK events), then extend <code>internal/openai</code> wire types and the two HTTP encoders. Chat Completions is the primary target; Responses gets the higher-fidelity ordered-items mapping. Reasoning ordering is preserved by SSE chunk order — exactly how OpenRouter, Ollama, vLLM, and DeepSeek do it.
+          </div>
+          <div class="grid-3">
+            <div class="card">
+              <h3>Reuse</h3>
+              <p>The ordered SDK event callback, <code>toolproxy</code> batch/continuation model (already multi-call), session hardening, reasoning-effort resolution, and SSE writers.</p>
+            </div>
+            <div class="card">
+              <h3>Add</h3>
+              <p><code>reasoning_delta</code> stream events, <code>reasoning</code> / <code>reasoning_content</code> / <code>reasoning_details</code> wire fields, opaque-thinking capture, and an emission-policy knob.</p>
+            </div>
+            <div class="card">
+              <h3>Defer</h3>
+              <p>Portable stateless <code>store:false</code> encrypted-reasoning round-trip (SDK strips opaque reasoning on resume); document as a known limitation.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="evidence">
+          <h2>Spike evidence</h2>
+          <p>
+            A live probe instrumented the real <code>turn_runner</code> event loop (<code>COPILOT_SPIKE_TRACE=1</code>) and drove two turns through the gateway against <code>claude-sonnet-4.6</code> with <code>reasoning_effort=high</code> and a <code>get_weather</code> tool. The raw <code>copilot.SessionEvent</code> ordering was captured and the instrumentation reverted afterward.
+          </p>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Turn 1 — reasoning → text → tool</h3>
+              <pre><code>AssistantTurnStart
+AssistantReasoningDeltaData ×36   ← streams, stable ReasoningID   [DROPPED today]
+AssistantMessageStart
+AssistantMessageDeltaData ×N      ← visible text after reasoning
+AssistantMessageData (FINAL)
+  contentLen=377 toolReqs=1
+  ReasoningText=true ReasoningOpaque=true
+AssistantReasoningData (FINAL)    ← consolidated reasoning, same ID
+ToolExecutionStart → … → idle</code></pre>
+            </div>
+            <div class="card">
+              <h3>Turn 2 — tool result → NEW reasoning → text</h3>
+              <pre><code>AssistantReasoningDeltaData ×38   ← FRESH block, new ReasoningID,
+                                     AFTER the tool result
+AssistantMessageDeltaData ×N      ← then the visible answer
+AssistantMessageData (FINAL)
+  contentLen=879 toolReqs=0
+  ReasoningText=true ReasoningOpaque=true</code></pre>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Finding</th><th>Evidence</th><th>Consequence</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Reasoning streams incrementally</td>
+                <td><code>AssistantReasoningDeltaData{DeltaContent, ReasoningID}</code> — 36 then 38 deltas across two turns.</td>
+                <td>Live <code>delta.reasoning</code> is achievable; the loop just has no <code>case</code> for it today.</td>
+              </tr>
+              <tr>
+                <td>Interleaved thinking across tools is real</td>
+                <td>Turn 2 emits a new reasoning block (distinct <code>ReasoningID</code>) before its message, after the tool result.</td>
+                <td>Preserved automatically by the standard Chat multi-request loop — no special transport needed.</td>
+              </tr>
+              <tr>
+                <td>Opaque/encrypted thinking is exposed</td>
+                <td><code>AssistantMessageData.ReasoningOpaque != nil</code> on every turn (Anthropic signature blob).</td>
+                <td><code>reasoning_details</code> with signed/encrypted continuity is feasible, not just plaintext.</td>
+              </tr>
+              <tr>
+                <td>Within a turn: reasoning, then text, then tool</td>
+                <td>Reasoning deltas complete before <code>AssistantMessageStart</code>; tool request is in the final message.</td>
+                <td>Emit reasoning chunks before content/tool chunks (Ollama's split pattern).</td>
+              </tr>
+              <tr>
+                <td><code>AssistantStreamingDeltaData</code> is noise</td>
+                <td>Carries only <code>TotalResponseSizeBytes</code> (a byte-count heartbeat).</td>
+                <td>Ignore it explicitly; do not treat as content.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="decisions">
+          <h2>Locked decisions</h2>
+          <table>
+            <thead><tr><th>Dimension</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td>Motivation</td><td>Visibility + continuity + fidelity (all three).</td></tr>
+              <tr><td>Surfaces</td><td>Chat Completions <strong>primary</strong>; Responses secondary (ordered items).</td></tr>
+              <tr><td>Emission</td><td>Max compatibility: emit <code>reasoning</code> + <code>reasoning_content</code> (+ <code>reasoning_details</code> when available), <strong>always-on</strong>, with a config knob to narrow.</td></tr>
+              <tr><td><code>reasoning_details</code></td><td>Ship in v1 — spike confirmed <code>ReasoningOpaque</code>/<code>EncryptedContent</code> are present.</td></tr>
+              <tr><td>Continuity</td><td>Server-side session; tolerate inbound reasoning, replay only when rebuilding cold history.</td></tr>
+              <tr><td><code>parallel_tool_calls=true</code></td><td>Accept it — the rejection is an artificial default; <code>toolproxy</code> already handles multi-call batches.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="current-state">
+          <h2>Current state</h2>
+          <table>
+            <thead>
+              <tr><th>Area</th><th>Existing implementation</th><th>Change implication</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Event reduction</td>
+                <td><code>turn_runner.loop</code> handles message deltas, overwrites reasoning into one string, finalizes tool requests.</td>
+                <td>Add reasoning-delta handling and opaque-thinking capture; this is the load-bearing change.</td>
+              </tr>
+              <tr>
+                <td>Stream model</td>
+                <td><code>StreamEvent{Kind:"delta"|"result"}</code> carries text only.</td>
+                <td>Add <code>Kind:"reasoning_delta"</code> with <code>Delta</code> + <code>ReasoningID</code>.</td>
+              </tr>
+              <tr>
+                <td>Wire types</td>
+                <td><code>internal/openai/types.go</code> has no reasoning output fields.</td>
+                <td>Add reasoning fields to chat message, chunk delta, and a <code>ReasoningDetail</code> struct.</td>
+              </tr>
+              <tr>
+                <td>Chat encoder</td>
+                <td><code>chat.go</code> emits role → content deltas → terminal tool_calls.</td>
+                <td>Interleave reasoning deltas; attach aggregate reasoning to the final message.</td>
+              </tr>
+              <tr>
+                <td>Validation</td>
+                <td><code>validation.go</code> rejects <code>parallel_tool_calls=true</code> (no rationale in git history).</td>
+                <td>Remove the rejection; keep schema validation.</td>
+              </tr>
+              <tr>
+                <td>Responses encoder</td>
+                <td><code>responses_stream.go</code> emits text then function_call items at completion.</td>
+                <td>Add ordered <code>reasoning</code> output items + reasoning stream events.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="wire">
+          <h2>Wire contract</h2>
+          <p>
+            Ordering between reasoning, content, and tool-call deltas is conveyed entirely by SSE chunk order. Reasoning continuity round-trips by replaying the assistant message (including reasoning fields) before tool results — the same mechanism documented by OpenRouter, DeepSeek, and Ollama.
+          </p>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Streaming chunk delta</h3>
+              <pre><code>{
+  "choices": [{
+    "index": 0,
+    "delta": {
+      "reasoning": "partial thinking…",
+      "reasoning_content": "partial thinking…",
+      "reasoning_details": [{
+        "type": "reasoning.text",
+        "text": "…",
+        "signature": null,
+        "id": "8f2827d7",
+        "format": "anthropic-claude-v1",
+        "index": 0
+      }]
+    }
+  }]
+}</code></pre>
+            </div>
+            <div class="card">
+              <h3>Final assistant message</h3>
+              <pre><code>{
+  "role": "assistant",
+  "content": "visible answer or null",
+  "reasoning": "full reasoning…",
+  "reasoning_content": "full reasoning…",
+  "reasoning_details": [
+    {"type": "reasoning.text", "text": "…",
+     "signature": "…", "format": "anthropic-claude-v1"},
+    {"type": "reasoning.encrypted", "data": "…"}
+  ],
+  "tool_calls": [{"id": "call_1", "type": "function",
+    "function": {"name": "get_weather",
+                 "arguments": "{\"city\":\"Tokyo\"}"}}]
+}</code></pre>
+            </div>
+          </div>
+          <table>
+            <thead><tr><th>Field</th><th>Maps from SDK</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>reasoning</code> / <code>reasoning_content</code></td><td><code>AssistantReasoningDeltaData.DeltaContent</code> → final <code>AssistantReasoningData.Content</code> / <code>ReasoningText</code></td><td>Identical text; both emitted for max compatibility (knob to narrow).</td></tr>
+              <tr><td><code>reasoning_details[].text</code> + <code>signature</code></td><td><code>ReasoningText</code> + <code>ReasoningOpaque</code></td><td>Anthropic signed thinking; preserve byte-for-byte, never reorder.</td></tr>
+              <tr><td><code>reasoning_details[].data</code> (encrypted)</td><td><code>EncryptedContent</code></td><td>OpenAI-style encrypted reasoning when present.</td></tr>
+              <tr><td><code>tool_calls[]</code></td><td><code>AssistantMessageData.ToolRequests</code> via <code>toolproxy.CaptureRequests</code></td><td>Already ordered; supports multiple/parallel calls in one batch.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="phases">
+          <h2>Implementation phases</h2>
+          <div style="counter-reset: phase;">
+            <article class="phase">
+              <h3>Internal event model — capture &amp; stream reasoning</h3>
+              <p>
+                Change the choke point so reasoning is no longer dropped. This is the prerequisite for every wire change.
+              </p>
+              <ul>
+                <li>In <code>internal/copilotgw/turn_runner.go</code>, add <code>case *copilot.AssistantReasoningDeltaData</code> → emit a new internal reasoning-delta event.</li>
+                <li>On <code>AssistantMessageData</code>, capture <code>ReasoningText</code>, <code>ReasoningOpaque</code>, and <code>EncryptedContent</code> into <code>TurnResult</code> (new fields).</li>
+                <li>Explicitly ignore <code>AssistantStreamingDeltaData</code> (heartbeat).</li>
+                <li>In <code>internal/copilotgw/types.go</code>, add <code>StreamEvent{Kind:"reasoning_delta", Delta, ReasoningID}</code> and reasoning/opaque fields on <code>TurnResult</code>.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>OpenAI wire types — reasoning fields</h3>
+              <p>Add the de-facto-standard fields and a structured detail type; accept them inbound tolerantly.</p>
+              <ul>
+                <li>In <code>internal/openai/types.go</code>, add <code>reasoning</code>, <code>reasoning_content</code>, and <code>reasoning_details []ReasoningDetail</code> to the assistant message and the chunk delta.</li>
+                <li>Define <code>ReasoningDetail{Type, Text, Signature, Data, Summary, ID, Format, Index}</code> with <code>omitempty</code> semantics per type.</li>
+                <li>Parse inbound assistant-message reasoning without erroring (tolerate <code>reasoning</code>/<code>reasoning_content</code>/<code>reasoning_details</code>).</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Chat Completions encoder — interleave &amp; aggregate</h3>
+              <p>Primary surface. Stream reasoning before content/tool deltas; attach aggregate reasoning to the final message.</p>
+              <ul>
+                <li>In <code>internal/httpapi/chat.go</code>, handle <code>reasoning_delta</code> → emit <code>delta.reasoning</code> (+ <code>delta.reasoning_content</code>) chunks, ordered ahead of content/tool deltas (Ollama split pattern).</li>
+                <li>On the terminal message, populate <code>reasoning</code>, <code>reasoning_content</code>, and <code>reasoning_details</code> alongside <code>content</code> and <code>tool_calls</code>.</li>
+                <li>Wire the emission-policy knob: <code>both</code> (default) | <code>reasoning</code> | <code>reasoning_content</code> | <code>off</code>.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Validation — accept parallel tool calls</h3>
+              <p>Remove the artificial rejection; keep structural validation intact.</p>
+              <ul>
+                <li>In <code>internal/openai/validation.go</code>, drop the <code>parallel_tool_calls=true</code> Chat rejection.</li>
+                <li>Confirm <code>toolproxy</code> multi-call batch + <code>Broker.FindByCallIDs</code> behavior is unchanged; add a regression test.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Responses surface — ordered reasoning items</h3>
+              <p>Higher-fidelity mapping for <code>/v1/responses</code>.</p>
+              <ul>
+                <li>In <code>internal/httpapi/responses_stream.go</code>, emit ordered <code>reasoning</code> output items and reasoning stream events alongside <code>function_call</code> items.</li>
+                <li>Carry <code>reasoning_details</code>-equivalent content into the reasoning item (<code>content</code> + <code>encrypted_content</code> when present).</li>
+                <li>Preserve item order and stable IDs from the SDK <code>ReasoningID</code>.</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>History hydration &amp; continuation</h3>
+              <p>Make the round-trip lossless without depending on the client.</p>
+              <ul>
+                <li>In <code>internal/hydration/hydration.go</code>, tolerate inbound assistant reasoning; replay it only when reconstructing a cold/stateless session.</li>
+                <li>Prefer the live Copilot session for continuity; never 400 on client-supplied reasoning.</li>
+                <li>Document that portable <code>store:false</code> encrypted-reasoning round-trip is unsupported (SDK strips opaque reasoning on resume).</li>
+              </ul>
+            </article>
+
+            <article class="phase">
+              <h3>Tests, docs &amp; config</h3>
+              <p>Lock behavior and surface the new knobs.</p>
+              <ul>
+                <li>Unit tests: reasoning-delta mapping, final-message aggregation, <code>reasoning_details</code> shape, parallel tool_calls acceptance, emission-policy knob.</li>
+                <li>Formalize the throwaway probe as a gated live test (<code>COPILOT_API_LIVE_TESTS=1</code>) asserting reasoning deltas precede content.</li>
+                <li>README compatibility matrix + new env var for the emission policy.</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+
+        <section id="tests">
+          <h2>Testing plan</h2>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Deterministic (unit)</h3>
+              <ul>
+                <li>Fake SDK event sequence → assert ordered <code>reasoning_delta</code> then content then tool_calls.</li>
+                <li>Final message carries <code>reasoning</code>/<code>reasoning_content</code>/<code>reasoning_details</code>.</li>
+                <li>Inbound reasoning tolerated; cold-history replay path.</li>
+                <li><code>parallel_tool_calls=true</code> accepted; multi-call batch preserved.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Live (gated)</h3>
+              <ul>
+                <li>Reasoning streams as deltas before content (claude-sonnet-4.x, reasoning_effort high).</li>
+                <li>Second turn produces a fresh reasoning block after a tool result.</li>
+                <li><code>ReasoningOpaque</code> present and surfaced into <code>reasoning_details</code>.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="risks">
+          <h2>Risks &amp; gotchas</h2>
+          <div class="callout warning">
+            <strong>Duplicate reasoning display.</strong> Some clients render both <code>reasoning</code> and <code>reasoning_content</code>. Default to emitting both, but ship the narrowing knob and validate against Open WebUI / Jan / OpenCode / Pi.
+          </div>
+          <div class="callout warning">
+            <strong>Opaque reasoning is session-bound.</strong> The SDK strips <code>ReasoningOpaque</code>/<code>EncryptedContent</code> on resume. Portable stateless continuity would require our own encryption envelope — out of scope for v1; document the limitation.
+          </div>
+          <div class="callout">
+            <strong>Provider drift.</strong> vLLM moved <code>reasoning_content</code> → <code>reasoning</code>; keep an adapter seam rather than hard-coding one field.
+          </div>
+          <div class="callout">
+            <strong>Client-proxied tool execution.</strong> The SDK's own tool handler reports <code>success=false</code> for parked client tools (expected). Interleaving across tools happens across HTTP requests, not inside one stream.
+          </div>
+        </section>
+
+        <section id="acceptance">
+          <h2>Acceptance criteria</h2>
+          <div class="grid-2">
+            <div class="card">
+              <h3><span class="status ok">Must ship</span></h3>
+              <ul>
+                <li>Streaming Chat emits ordered reasoning deltas before content/tool deltas.</li>
+                <li>Non-streaming Chat attaches <code>reasoning</code>/<code>reasoning_content</code>/<code>reasoning_details</code>.</li>
+                <li>Interleaved thinking preserved across the tool-call loop.</li>
+                <li><code>parallel_tool_calls=true</code> accepted on Chat.</li>
+                <li>Emission-policy knob with a sane max-compat default.</li>
+                <li>Deterministic tests + gated live test green; README updated.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3><span class="status wait">May defer</span></h3>
+              <ul>
+                <li>Responses ordered reasoning items (Phase 5) if scheduled separately.</li>
+                <li>Portable <code>store:false</code> encrypted-reasoning round-trip.</li>
+                <li>Per-format <code>reasoning_details</code> normalization beyond Anthropic.</li>
+              </ul>
+            </div>
+          </div>
+          <div class="callout success">
+            <strong>Definition of done:</strong> a Chat-Completions client receives streamed, ordered reasoning interleaved with tool calls, can replay it for continuity, and sees coherent interleaved thinking across a multi-step tool loop — documented in the README compatibility matrix and covered by deterministic and gated live tests.
+          </div>
+        </section>
+
+        <section id="refs">
+          <h2>References</h2>
+          <ul>
+            <li>Copilot Go SDK session events — <code>AssistantReasoningDeltaData</code>, <code>AssistantMessageData</code> (<code>ReasoningText</code>/<code>ReasoningOpaque</code>/<code>EncryptedContent</code>): <a href="https://github.com/github/copilot-sdk/blob/main/go/rpc/zsession_events.go">zsession_events.go</a></li>
+            <li>Copilot Go SDK README — reasoning effort, streaming reasoning events: <a href="https://github.com/github/copilot-sdk/blob/main/go/README.md">go/README.md</a></li>
+            <li>OpenRouter reasoning tokens — <code>reasoning</code>, <code>reasoning_content</code> alias, <code>reasoning_details</code> round-trip: <a href="https://openrouter.ai/docs/guides/best-practices/reasoning-tokens">reasoning-tokens</a></li>
+            <li>DeepSeek thinking mode — tool-call reasoning round-trip requirement: <a href="https://api-docs.deepseek.com/guides/thinking_mode">thinking_mode</a></li>
+            <li>Ollama OpenAI adapter — <code>reasoning</code> mapping + mixed-chunk split: <a href="https://github.com/ollama/ollama/blob/main/openai/openai.go">openai/openai.go</a></li>
+            <li>vLLM reasoning outputs — <code>reasoning</code> (formerly <code>reasoning_content</code>): <a href="https://docs.vllm.ai/en/latest/features/reasoning_outputs/">reasoning_outputs</a></li>
+            <li>Anthropic extended thinking — interleaved thinking, signatures, redacted thinking: <a href="https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking">extended-thinking</a></li>
+          </ul>
+        </section>
+      </main>
+    </div>
+
+    <footer>
+      <p>Prepared for <code>copilot-api</code>. This document is an implementation plan, not an implementation. Spike findings captured 2026-06-08 against <code>claude-sonnet-4.6</code> via an instrumented, since-reverted probe.</p>
+    </footer>
+  </div>
+</body>
+</html>

@@ -29,6 +29,7 @@ type Options struct {
 type Message struct {
 	Role        string
 	Content     string
+	Reasoning   string
 	ToolCallID  string
 	ToolCalls   []openai.ChatToolCall
 	Attachments []copilot.Attachment
@@ -41,9 +42,19 @@ func BuildChatHistory(messages []openai.ChatMessage, opts Options) (Result, erro
 		if err != nil {
 			return Result{}, fmt.Errorf("messages.%d.content: %w", i, err)
 		}
-		inputs = append(inputs, Message{Role: msg.Role, Content: text, ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
+		inputs = append(inputs, Message{Role: msg.Role, Content: text, Reasoning: inboundReasoning(msg), ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
 	}
 	return BuildChatHistoryMessages(inputs, opts)
+}
+
+// inboundReasoning tolerates client-supplied assistant reasoning (the de-facto
+// `reasoning`/`reasoning_content` fields) so it can be replayed when rebuilding
+// a cold session, preferring the canonical `reasoning` alias.
+func inboundReasoning(msg openai.ChatMessage) string {
+	if msg.Reasoning != "" {
+		return msg.Reasoning
+	}
+	return msg.ReasoningContent
 }
 
 func BuildChatHistoryMessages(messages []Message, opts Options) (Result, error) {
@@ -78,6 +89,13 @@ func BuildChatHistoryMessages(messages []Message, opts Options) (Result, error) 
 			turn++
 			b.add(copilot.SessionEventTypeAssistantTurnStart, &copilot.AssistantTurnStartData{TurnID: turnID})
 			data := &copilot.AssistantMessageData{Content: msg.Content, MessageID: uuid.NewString()}
+			if msg.Reasoning != "" {
+				// Replay plaintext reasoning when reconstructing a cold session.
+				// Opaque/encrypted reasoning is session-bound and stripped by the
+				// SDK on resume, so only the readable text round-trips here.
+				reasoning := msg.Reasoning
+				data.ReasoningText = &reasoning
+			}
 			for _, tc := range msg.ToolCalls {
 				if tc.ID == "" {
 					return Result{}, fmt.Errorf("messages.%d.tool_calls: tool call id is required", i)

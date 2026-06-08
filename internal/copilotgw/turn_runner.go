@@ -3,6 +3,7 @@ package copilotgw
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -145,27 +146,65 @@ func (r *turnRunner) loop(g *RealGateway) {
 	defer r.closeStreams()
 	var text string
 	var reasoning string
+	var reasoningDeltas strings.Builder
+	var reasoningOpaque string
+	var reasoningEncrypted string
+	var reasoningID string
 	var usage *openai.Usage
 	for event := range r.events {
 		switch d := event.Data.(type) {
+		case *copilot.AssistantReasoningDeltaData:
+			// Streaming reasoning is dropped by the SDK->wire reduction unless we
+			// thread it through here. Accumulate a plaintext fallback and forward
+			// the delta so encoders can interleave it ahead of content.
+			if d.ReasoningID != "" {
+				reasoningID = d.ReasoningID
+			}
+			if d.DeltaContent != "" {
+				reasoningDeltas.WriteString(d.DeltaContent)
+				r.emitReasoningDelta(d.DeltaContent, d.ReasoningID)
+			}
 		case *copilot.AssistantMessageDeltaData:
 			if d.DeltaContent != "" {
 				r.emitDelta(d.DeltaContent)
 			}
 		case *copilot.AssistantReasoningData:
-			reasoning = d.Content
+			// Consolidated reasoning block; in tool-call turns this can arrive
+			// after the message, so the message-data capture below is primary.
+			if d.Content != "" {
+				reasoning = d.Content
+			}
+			if d.ReasoningID != "" {
+				reasoningID = d.ReasoningID
+			}
 		case *copilot.AssistantMessageData:
+			if d.ReasoningText != nil && *d.ReasoningText != "" {
+				reasoning = *d.ReasoningText
+			}
+			if d.ReasoningOpaque != nil {
+				reasoningOpaque = *d.ReasoningOpaque
+			}
+			if d.EncryptedContent != nil {
+				reasoningEncrypted = *d.EncryptedContent
+			}
+			effectiveReasoning := resolveReasoning(reasoning, reasoningDeltas.String())
 			if len(d.ToolRequests) > 0 {
 				text = d.Content
 				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.responseID, r.kind, r.model, r.updates, r.abort)
 				r.setBatch(batch)
-				res := r.result(text, reasoning, usage, "tool_calls")
+				res := r.result(text, effectiveReasoning, usage, "tool_calls")
+				res.ReasoningOpaque = reasoningOpaque
+				res.ReasoningEncrypted = reasoningEncrypted
+				res.ReasoningID = reasoningID
 				res.ToolCalls = calls
 				res.PendingBatchID = batch.ID
 				r.emitResult(res)
 			} else {
 				text = d.Content
 			}
+		case *copilot.AssistantStreamingDeltaData:
+			// Heartbeat carrying only a cumulative byte count; intentionally
+			// ignored so it is never mistaken for content.
 		case *copilot.AssistantUsageData:
 			usage = usageFromSDK(d)
 		case *copilot.SessionErrorData:
@@ -174,13 +213,26 @@ func (r *turnRunner) loop(g *RealGateway) {
 			_ = r.session.Disconnect()
 			return
 		case *copilot.SessionIdleData:
-			res := r.result(text, reasoning, usage, "stop")
+			res := r.result(text, resolveReasoning(reasoning, reasoningDeltas.String()), usage, "stop")
+			res.ReasoningOpaque = reasoningOpaque
+			res.ReasoningEncrypted = reasoningEncrypted
+			res.ReasoningID = reasoningID
 			r.emitResult(res)
 			_ = r.session.Disconnect()
 			return
 		}
 	}
 	r.emitError(openai.Upstream("copilot session event stream ended before idle"))
+}
+
+// resolveReasoning prefers the consolidated reasoning text and falls back to
+// the accumulated streaming deltas when the SDK has not yet emitted the
+// consolidated block (as happens on tool-call turns).
+func resolveReasoning(consolidated, deltas string) string {
+	if consolidated != "" {
+		return consolidated
+	}
+	return deltas
 }
 
 func (r *turnRunner) emitDelta(delta string) {
@@ -195,6 +247,24 @@ func (r *turnRunner) emitDelta(delta string) {
 	}
 	if responseStream != nil {
 		sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "delta", Delta: delta})
+	}
+}
+
+func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {
+	if delta == "" {
+		return
+	}
+	r.mu.Lock()
+	chatStream := r.chatStream
+	chatDone := r.chatDone
+	responseStream := r.responseStream
+	meta := r.responseMeta
+	r.mu.Unlock()
+	if chatStream != nil {
+		_ = sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "reasoning_delta", Delta: delta, ReasoningID: reasoningID})
+	}
+	if responseStream != nil {
+		sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "reasoning_delta", Delta: delta, ReasoningID: reasoningID})
 	}
 }
 
@@ -359,6 +429,9 @@ func responseFromTurn(id, model, instructions string, previous *string, store bo
 		id = openai.NewID("resp_")
 	}
 	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: time.Now().Unix(), Status: "completed", Model: model, Instructions: instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: previous, Store: store, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
+	if item, ok := reasoningOutputItem(turn); ok {
+		resp.Output = append(resp.Output, item)
+	}
 	if turn.Text != "" || len(turn.ToolCalls) == 0 {
 		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: openai.NewID("msg_"), Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}})
 	}
@@ -366,6 +439,29 @@ func responseFromTurn(id, model, instructions string, previous *string, store bo
 		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: "fc_" + tc.ID, Type: "function_call", Status: "completed", CallID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 	}
 	return resp
+}
+
+// reasoningItemID derives a stable Responses reasoning item ID from the SDK
+// reasoning block ID so streamed and final items agree.
+func reasoningItemID(turn *TurnResult) string {
+	if turn.ReasoningID != "" {
+		return "rs_" + turn.ReasoningID
+	}
+	return openai.NewID("rs_")
+}
+
+// reasoningOutputItem builds the Responses `reasoning` output item from a turn,
+// carrying the plaintext summary plus any OpenAI-style encrypted continuation
+// blob. It reports false when the turn produced no reasoning.
+func reasoningOutputItem(turn *TurnResult) (openai.ResponseOutputItem, bool) {
+	if turn.Reasoning == "" && turn.ReasoningEncrypted == "" {
+		return openai.ResponseOutputItem{}, false
+	}
+	item := openai.ResponseOutputItem{ID: reasoningItemID(turn), Type: "reasoning", Status: "completed", EncryptedContent: turn.ReasoningEncrypted}
+	if turn.Reasoning != "" {
+		item.Summary = []openai.ResponseReasoningSummary{{Type: "summary_text", Text: turn.Reasoning}}
+	}
+	return item, true
 }
 
 func recordFromResponse(resp *openai.Response, sessionID, retained string) sessionstore.ResponseRecord {

@@ -69,7 +69,42 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 	messageDone := false
 	contentPartStarted := false
 	var messageText strings.Builder
+	// Reasoning streaming state. Reasoning summary events are emitted ahead of
+	// the message item (the SDK completes reasoning before content), so when
+	// reasoning is present the message item shifts to output index 1.
+	reasoningItemID := ""
+	reasoningStarted := false
+	reasoningDone := false
+	var reasoningText strings.Builder
+	messageOutputIndex := 0
 	var final *openai.Response
+	emitReasoningStart := func() error {
+		if reasoningStarted {
+			return nil
+		}
+		reasoningStarted = true
+		messageOutputIndex = 1
+		idx := 0
+		item := openai.ResponseOutputItem{ID: reasoningItemID, Type: "reasoning", Status: "in_progress", Summary: []openai.ResponseReasoningSummary{}}
+		return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item, Status: item.Status})
+	}
+	closeReasoning := func() error {
+		if !reasoningStarted || reasoningDone {
+			return nil
+		}
+		reasoningDone = true
+		idx := 0
+		summaryIdx := 0
+		text := reasoningText.String()
+		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_text.done", OutputIndex: &idx, SummaryIndex: &summaryIdx, ItemID: reasoningItemID, Text: text}); err != nil {
+			return err
+		}
+		item := openai.ResponseOutputItem{ID: reasoningItemID, Type: "reasoning", Status: "completed", Summary: []openai.ResponseReasoningSummary{}}
+		if text != "" {
+			item.Summary = []openai.ResponseReasoningSummary{{Type: "summary_text", Text: text}}
+		}
+		return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item, Status: item.Status})
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -79,8 +114,30 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				return responseStreamWriteResult{Response: final}
 			}
 			switch ev.Kind {
+			case "reasoning_delta":
+				if ev.Delta == "" {
+					continue
+				}
+				if reasoningItemID == "" {
+					if ev.ReasoningID != "" {
+						reasoningItemID = "rs_" + ev.ReasoningID
+					} else {
+						reasoningItemID = openai.NewID("rs_")
+					}
+				}
+				if err := emitReasoningStart(); err != nil {
+					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+				}
+				idx := 0
+				summaryIdx := 0
+				reasoningText.WriteString(ev.Delta)
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_text.delta", OutputIndex: &idx, SummaryIndex: &summaryIdx, ItemID: reasoningItemID, Delta: ev.Delta}); err != nil {
+					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+				}
 			case "delta":
-				zero := 0
+				if err := closeReasoning(); err != nil {
+					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+				}
 				if messageText.Len()+len(ev.Delta) > maxResponseStreamTextBytes {
 					err := openai.Internal("response output exceeded stream text limit")
 					if writeErr := writeResponseFailedEvent(writer, req, err); writeErr != nil {
@@ -88,39 +145,45 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					}
 					return responseStreamWriteResult{Response: final, Err: err}
 				}
+				msgIdx := messageOutputIndex
+				contentIdx := 0
 				if !messageStarted {
 					item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "in_progress", Role: "assistant", Content: []openai.ResponseText{}}
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &zero, Item: &item, Status: item.Status}); err != nil {
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &msgIdx, Item: &item, Status: item.Status}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
 					messageStarted = true
 				}
 				if !contentPartStarted {
 					part := openai.ResponseText{Type: "output_text", Text: ""}
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.added", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Part: &part}); err != nil {
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.added", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Part: &part}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
 					contentPartStarted = true
 				}
 				messageText.WriteString(ev.Delta)
-				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Delta: ev.Delta}); err != nil {
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Delta: ev.Delta}); err != nil {
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 			case "response":
+				if err := closeReasoning(); err != nil {
+					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+				}
 				if messageStarted {
 					text := messageText.String()
-					zero := 0
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: text}); err != nil {
+					msgIdx := messageOutputIndex
+					contentIdx := 0
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Text: text}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
 					if contentPartStarted {
 						part := openai.ResponseText{Type: "output_text", Text: text}
-						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Part: &part}); err != nil {
+						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.done", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Part: &part}); err != nil {
 							return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 						}
 					}
 					messageDone = true
-					if item, idx := streamedMessageItem(ev.Response, messageID, text); item != nil {
+					if item, idx := streamedMessageItem(ev.Response, messageID, text, messageOutputIndex); item != nil {
 						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: item, Status: item.Status}); err != nil {
 							return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 						}
@@ -134,20 +197,24 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 				final = ev.Response
 			case "error":
+				if err := closeReasoning(); err != nil {
+					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
+				}
 				if messageStarted && !messageDone {
-					zero := 0
+					msgIdx := messageOutputIndex
+					contentIdx := 0
 					text := messageText.String()
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Text: text}); err != nil {
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.done", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Text: text}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
 					if contentPartStarted {
 						part := openai.ResponseText{Type: "output_text", Text: text}
-						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.done", OutputIndex: &zero, ContentIndex: &zero, ItemID: messageID, Part: &part}); err != nil {
+						if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.content_part.done", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Part: &part}); err != nil {
 							return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 						}
 					}
 					item := openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "incomplete", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: text}}}
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &zero, Item: &item, Status: item.Status}); err != nil {
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &msgIdx, Item: &item, Status: item.Status}); err != nil {
 						return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 					}
 				}

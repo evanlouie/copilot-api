@@ -41,6 +41,41 @@ func TestDefaultReasoningEffortEnvOverride(t *testing.T) {
 	}
 }
 
+func TestReasoningEmissionDefaultsBoth(t *testing.T) {
+	setLoadEnv(t)
+	t.Setenv("COPILOT_REASONING_EMISSION", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReasoningEmission != ReasoningEmissionBoth {
+		t.Fatalf("ReasoningEmission default = %q, want both", cfg.ReasoningEmission)
+	}
+}
+
+func TestReasoningEmissionEnvOverride(t *testing.T) {
+	setLoadEnv(t)
+	t.Setenv("COPILOT_REASONING_EMISSION", " Reasoning_Content ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReasoningEmission != ReasoningEmissionReasoningContent {
+		t.Fatalf("ReasoningEmission = %q, want reasoning_content", cfg.ReasoningEmission)
+	}
+}
+
+func TestReasoningEmissionRejectsUnknown(t *testing.T) {
+	setLoadEnv(t)
+	t.Setenv("COPILOT_REASONING_EMISSION", "verbose")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected unknown COPILOT_REASONING_EMISSION value to be rejected")
+	}
+}
+
 func setLoadEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -50,6 +85,7 @@ func setLoadEnv(t *testing.T) {
 		"COPILOT_REQUEST_TIMEOUT",
 		"COPILOT_MAX_REQUEST_BODY_BYTES",
 		"COPILOT_LOG_CONTENT",
+		"COPILOT_REASONING_EMISSION",
 	} {
 		t.Setenv(key, "")
 	}

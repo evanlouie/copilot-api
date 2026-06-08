@@ -158,13 +158,79 @@ func (r *ChatCompletionRequest) UnmarshalJSON(data []byte) error {
 }
 
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    Content         `json:"content,omitempty"`
-	Name       string          `json:"name,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	ToolCalls  []ChatToolCall  `json:"tool_calls,omitempty"`
-	Refusal    *string         `json:"refusal,omitempty"`
-	Raw        json.RawMessage `json:"-"`
+	Role             string            `json:"role"`
+	Content          Content           `json:"content,omitempty"`
+	Name             string            `json:"name,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	ToolCalls        []ChatToolCall    `json:"tool_calls,omitempty"`
+	Reasoning        string            `json:"reasoning,omitempty"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
+	Refusal          *string           `json:"refusal,omitempty"`
+	Raw              json.RawMessage   `json:"-"`
+}
+
+// ReasoningDetail is a structured reasoning block following the de-facto
+// OpenRouter/Anthropic `reasoning_details` convention. The fields are emitted
+// with omitempty semantics so each block only carries the keys meaningful for
+// its type (`reasoning.text` carries text/signature, `reasoning.encrypted`
+// carries data). Inbound blocks are tolerated for continuity round-trips.
+type ReasoningDetail struct {
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Format    string `json:"format,omitempty"`
+	Index     *int   `json:"index,omitempty"`
+}
+
+// ReasoningEmissionPolicy resolves which reasoning fields a surface should
+// emit. reasoning_details is always emitted when the policy is enabled,
+// regardless of which plaintext alias is selected.
+type ReasoningEmissionPolicy struct {
+	EmitReasoning        bool
+	EmitReasoningContent bool
+}
+
+func (p ReasoningEmissionPolicy) Enabled() bool {
+	return p.EmitReasoning || p.EmitReasoningContent
+}
+
+// ResolveReasoningEmission maps a config policy string to the concrete fields
+// to emit. Unknown/empty values default to the max-compatibility "both".
+func ResolveReasoningEmission(policy string) ReasoningEmissionPolicy {
+	switch policy {
+	case "off":
+		return ReasoningEmissionPolicy{}
+	case "reasoning":
+		return ReasoningEmissionPolicy{EmitReasoning: true}
+	case "reasoning_content":
+		return ReasoningEmissionPolicy{EmitReasoningContent: true}
+	default:
+		return ReasoningEmissionPolicy{EmitReasoning: true, EmitReasoningContent: true}
+	}
+}
+
+// BuildReasoningDetails assembles the structured reasoning_details array from
+// the plaintext thinking, the Anthropic signed/opaque blob, and the OpenAI
+// encrypted blob. The signed text and encrypted payloads are preserved
+// byte-for-byte so clients can replay them for continuity.
+func BuildReasoningDetails(text, signature, encrypted, id string) []ReasoningDetail {
+	var details []ReasoningDetail
+	if text != "" || signature != "" {
+		detail := ReasoningDetail{Type: "reasoning.text", Text: text, ID: id}
+		if signature != "" {
+			detail.Signature = signature
+			detail.Format = "anthropic-claude-v1"
+		}
+		details = append(details, detail)
+	}
+	if encrypted != "" {
+		details = append(details, ReasoningDetail{Type: "reasoning.encrypted", Data: encrypted, ID: id})
+	}
+	return details
 }
 
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
@@ -399,9 +465,12 @@ type ChatChunkChoice struct {
 }
 
 type ChatChunkDelta struct {
-	Role      string          `json:"role,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+	Role             string            `json:"role,omitempty"`
+	Content          string            `json:"content,omitempty"`
+	Reasoning        string            `json:"reasoning,omitempty"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
+	ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
 }
 
 type ToolCallDelta struct {
@@ -471,15 +540,24 @@ type Response struct {
 }
 
 type ResponseOutputItem struct {
-	ID        string          `json:"id,omitempty"`
-	Type      string          `json:"type"`
-	Status    string          `json:"status,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   []ResponseText  `json:"content,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Output    json.RawMessage `json:"output,omitempty"`
+	ID               string                     `json:"id,omitempty"`
+	Type             string                     `json:"type"`
+	Status           string                     `json:"status,omitempty"`
+	Role             string                     `json:"role,omitempty"`
+	Content          []ResponseText             `json:"content,omitempty"`
+	Summary          []ResponseReasoningSummary `json:"summary,omitempty"`
+	EncryptedContent string                     `json:"encrypted_content,omitempty"`
+	CallID           string                     `json:"call_id,omitempty"`
+	Name             string                     `json:"name,omitempty"`
+	Arguments        string                     `json:"arguments,omitempty"`
+	Output           json.RawMessage            `json:"output,omitempty"`
+}
+
+// ResponseReasoningSummary is a single summary block inside a Responses
+// `reasoning` output item.
+type ResponseReasoningSummary struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 type ResponseText struct {
@@ -523,6 +601,7 @@ type ResponseStreamEvent struct {
 	ItemID         string              `json:"item_id,omitempty"`
 	OutputIndex    *int                `json:"output_index,omitempty"`
 	ContentIndex   *int                `json:"content_index,omitempty"`
+	SummaryIndex   *int                `json:"summary_index,omitempty"`
 	Delta          string              `json:"delta,omitempty"`
 	Text           string              `json:"text,omitempty"`
 	Arguments      string              `json:"arguments,omitempty"`

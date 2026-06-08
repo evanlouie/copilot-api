@@ -45,7 +45,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		turn.ID = openai.NewID("chatcmpl_")
 		turn.Created = openai.UnixNow()
-		writeJSON(w, http.StatusOK, chatCompletionFromTurn(turn))
+		writeJSON(w, http.StatusOK, s.chatCompletionFromTurn(turn))
 		return
 	}
 	if len(messages) == 0 {
@@ -83,7 +83,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, chatCompletionFromTurn(turn))
+	writeJSON(w, http.StatusOK, s.chatCompletionFromTurn(turn))
 }
 func (s *Server) streamChatContinuation(w http.ResponseWriter, r *http.Request, req copilotgw.ChatContinuationRequest) {
 	writer, ok := openai.NewSSEWriter(w)
@@ -106,6 +106,10 @@ func (s *Server) streamChatContinuation(w http.ResponseWriter, r *http.Request, 
 	}
 	for ev := range ch {
 		switch ev.Kind {
+		case "reasoning_delta":
+			if err := s.writeChatReasoningDelta(writer, streamID, created, req.Model, ev.Delta, req.IncludeUsageChunk); err != nil {
+				return
+			}
 		case "delta":
 			if err := writer.Data(openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: req.IncludeUsageChunk}); err != nil {
 				return
@@ -142,6 +146,10 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req copilotg
 	}
 	for ev := range ch {
 		switch ev.Kind {
+		case "reasoning_delta":
+			if err := s.writeChatReasoningDelta(writer, req.OpenAIID, created, req.Model, ev.Delta, req.IncludeUsageChunk); err != nil {
+				return
+			}
 		case "delta":
 			if err := writer.Data(openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: req.IncludeUsageChunk}); err != nil {
 				return
@@ -172,11 +180,36 @@ func (s *Server) writeChatStreamFromTurn(writer *openai.SSEWriter, turn *copilot
 	}
 	return writer.Done()
 }
+func (s *Server) writeChatReasoningDelta(writer *openai.SSEWriter, id string, created int64, model, delta string, includeUsage bool) error {
+	if delta == "" {
+		return nil
+	}
+	policy := openai.ResolveReasoningEmission(s.cfg.ReasoningEmission)
+	if !policy.Enabled() {
+		return nil
+	}
+	chunkDelta := openai.ChatChunkDelta{}
+	if policy.EmitReasoning {
+		chunkDelta.Reasoning = delta
+	}
+	if policy.EmitReasoningContent {
+		chunkDelta.ReasoningContent = delta
+	}
+	return writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: chunkDelta}}, IncludeUsage: includeUsage})
+}
 func (s *Server) writeChatTerminal(writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) error {
 	return s.writeChatTerminalWithID(writer, turn.ID, turn.Created, turn.Model, turn, includeUsage)
 }
 func (s *Server) writeChatTerminalWithID(writer *openai.SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) error {
 	finish := turn.FinishReason
+	if details := s.chatReasoningDetails(turn); len(details) > 0 {
+		// The plaintext reasoning was already streamed as deltas; this terminal
+		// chunk carries the structured details (signature + encrypted blob) so
+		// clients can replay reasoning for continuity.
+		if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ReasoningDetails: details}}}, IncludeUsage: includeUsage}); err != nil {
+			return err
+		}
+	}
 	if len(turn.ToolCalls) > 0 {
 		deltas := make([]openai.ToolCallDelta, 0, len(turn.ToolCalls))
 		for i, tc := range turn.ToolCalls {
@@ -196,12 +229,35 @@ func (s *Server) writeChatTerminalWithID(writer *openai.SSEWriter, id string, cr
 	}
 	return nil
 }
-func chatCompletionFromTurn(turn *copilotgw.TurnResult) openai.ChatCompletion {
+func (s *Server) chatCompletionFromTurn(turn *copilotgw.TurnResult) openai.ChatCompletion {
 	msg := openai.ChatMessage{Role: "assistant", Content: openai.NewTextContent(turn.Text), ToolCalls: turn.ToolCalls}
 	if turn.Text == "" && len(turn.ToolCalls) > 0 {
 		msg.Content = openai.Content{Present: true, IsNull: true}
 	}
+	policy := openai.ResolveReasoningEmission(s.cfg.ReasoningEmission)
+	if policy.Enabled() {
+		if turn.Reasoning != "" {
+			if policy.EmitReasoning {
+				msg.Reasoning = turn.Reasoning
+			}
+			if policy.EmitReasoningContent {
+				msg.ReasoningContent = turn.Reasoning
+			}
+		}
+		if details := s.chatReasoningDetails(turn); len(details) > 0 {
+			msg.ReasoningDetails = details
+		}
+	}
 	return openai.ChatCompletion{ID: turn.ID, Object: openai.ObjectChatCompletion, Created: turn.Created, Model: turn.Model, Choices: []openai.ChatCompletionChoice{{Index: 0, Message: msg, FinishReason: turn.FinishReason}}, Usage: turn.Usage, SystemFingerprint: nil}
+}
+
+// chatReasoningDetails builds the structured reasoning_details for a turn,
+// honoring the emission policy (an "off" policy suppresses them entirely).
+func (s *Server) chatReasoningDetails(turn *copilotgw.TurnResult) []openai.ReasoningDetail {
+	if !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled() {
+		return nil
+	}
+	return openai.BuildReasoningDetails(turn.Reasoning, turn.ReasoningOpaque, turn.ReasoningEncrypted, turn.ReasoningID)
 }
 func isToolContinuation(messages []openai.ChatMessage) bool {
 	return len(messages) > 0 && messages[len(messages)-1].Role == "tool"
