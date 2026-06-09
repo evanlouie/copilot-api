@@ -253,11 +253,16 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		return nil
 	})
-	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
-		_ = session.Disconnect()
-		return nil, openai.Upstream(err.Error())
-	}
 	go runner.discardInitial()
+	go func() {
+		runner.debug(g, "copilot send started", "prompt_bytes", len(prompt.Text), "attachment_count", len(prompt.Attachments))
+		if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
+			runner.debug(g, "copilot send failed", "error", err.Error())
+			runner.failSend(events, err)
+			return
+		}
+		runner.debug(g, "copilot send returned")
+	}()
 	return ch, nil
 }
 func (g *RealGateway) responseContinuationPrompt(previous sessionstore.ResponseRecord, current resolvedPrompt) resolvedPrompt {

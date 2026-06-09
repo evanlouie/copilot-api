@@ -94,13 +94,14 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 	ch, err := s.gw.StreamResponse(ctx, req)
+	responseWriter := sseResponseEventWriter{server: s, ctx: ctx, writer: writer}
 	if err != nil {
-		_ = writeResponseFailedEvent(newResponseStreamEncoder(sseResponseEventWriter{writer: writer}), req, err)
-		_ = writer.Done()
+		_ = writeResponseFailedEvent(newResponseStreamEncoder(responseWriter), req, err)
+		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 		return
 	}
-	_ = writeResponseStreamEvents(ctx, sseResponseEventWriter{writer: writer}, req, ch)
-	_ = writer.Done()
+	_ = writeResponseStreamEvents(ctx, responseWriter, req, ch)
+	_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 }
 func streamedMessageItem(resp *openai.Response, id, text string, insertIndex int) (*openai.ResponseOutputItem, int) {
 	if resp == nil {

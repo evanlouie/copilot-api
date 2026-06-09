@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -101,30 +102,32 @@ func (s *Server) streamChatContinuation(w http.ResponseWriter, r *http.Request, 
 	}
 	streamID := openai.NewID("chatcmpl_")
 	created := openai.UnixNow()
-	if err := writer.Data(openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: req.IncludeUsageChunk}); err != nil {
+	if err := s.writeSSEData(ctx, writer, "chat.role", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: req.IncludeUsageChunk}, "stream_kind", "chat", "chunk_kind", "role"); err != nil {
 		return
 	}
 	for ev := range ch {
+		s.logChatStreamEvent(ctx, ev)
 		switch ev.Kind {
 		case "reasoning_delta":
-			if err := s.writeChatReasoningDelta(writer, streamID, created, req.Model, ev.Delta, req.IncludeUsageChunk); err != nil {
+			if err := s.writeChatReasoningDelta(ctx, writer, streamID, created, req.Model, ev.Delta, req.IncludeUsageChunk); err != nil {
 				return
 			}
 		case "delta":
-			if err := writer.Data(openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: req.IncludeUsageChunk}); err != nil {
+			if err := s.writeSSEData(ctx, writer, "chat.content_delta", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: req.IncludeUsageChunk}, s.chatChunkAttrs(ctx, "content", ev.Delta)...); err != nil {
 				return
 			}
 		case "result":
-			if err := s.writeChatTerminalWithID(writer, streamID, created, req.Model, ev.Result, req.IncludeUsageChunk); err != nil {
+			if err := s.writeChatTerminalWithID(ctx, writer, streamID, created, req.Model, ev.Result, req.IncludeUsageChunk); err != nil {
 				return
 			}
 		case "error":
-			if err := writer.Data(openai.ErrorEnvelope{Error: errorObject(ev.Error)}); err != nil {
+			if err := s.writeSSEData(ctx, writer, "chat.error", openai.ErrorEnvelope{Error: errorObject(ev.Error)}, "stream_kind", "chat", "chunk_kind", "error"); err != nil {
 				return
 			}
 		}
 	}
-	_ = writer.Done()
+	s.debugStream(ctx, "chat stream channel closed", "stream_kind", "chat", "stream_id", streamID)
+	_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
 }
 func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req copilotgw.ChatRequest) {
 	writer, ok := openai.NewSSEWriter(w)
@@ -141,51 +144,40 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req copilotg
 		return
 	}
 	created := openai.UnixNow()
-	if err := writer.Data(openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: req.IncludeUsageChunk}); err != nil {
+	if err := s.writeSSEData(ctx, writer, "chat.role", openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: req.IncludeUsageChunk}, "stream_kind", "chat", "chunk_kind", "role"); err != nil {
 		return
 	}
 	for ev := range ch {
+		s.logChatStreamEvent(ctx, ev)
 		switch ev.Kind {
 		case "reasoning_delta":
-			if err := s.writeChatReasoningDelta(writer, req.OpenAIID, created, req.Model, ev.Delta, req.IncludeUsageChunk); err != nil {
+			if err := s.writeChatReasoningDelta(ctx, writer, req.OpenAIID, created, req.Model, ev.Delta, req.IncludeUsageChunk); err != nil {
 				return
 			}
 		case "delta":
-			if err := writer.Data(openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: req.IncludeUsageChunk}); err != nil {
+			if err := s.writeSSEData(ctx, writer, "chat.content_delta", openai.ChatCompletionChunk{ID: req.OpenAIID, Object: openai.ObjectChatChunk, Created: created, Model: req.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: req.IncludeUsageChunk}, s.chatChunkAttrs(ctx, "content", ev.Delta)...); err != nil {
 				return
 			}
 		case "result":
-			if err := s.writeChatTerminal(writer, ev.Result, req.IncludeUsageChunk); err != nil {
+			if err := s.writeChatTerminal(ctx, writer, ev.Result, req.IncludeUsageChunk); err != nil {
 				return
 			}
 		case "error":
-			if err := writer.Data(openai.ErrorEnvelope{Error: errorObject(ev.Error)}); err != nil {
+			if err := s.writeSSEData(ctx, writer, "chat.error", openai.ErrorEnvelope{Error: errorObject(ev.Error)}, "stream_kind", "chat", "chunk_kind", "error"); err != nil {
 				return
 			}
 		}
 	}
-	_ = writer.Done()
+	s.debugStream(ctx, "chat stream channel closed", "stream_kind", "chat", "stream_id", req.OpenAIID)
+	_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
 }
-func (s *Server) writeChatStreamFromTurn(writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) error {
-	if err := writer.Data(openai.ChatCompletionChunk{ID: turn.ID, Object: openai.ObjectChatChunk, Created: turn.Created, Model: turn.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: includeUsage}); err != nil {
-		return err
-	}
-	if turn.Text != "" {
-		if err := writer.Data(openai.ChatCompletionChunk{ID: turn.ID, Object: openai.ObjectChatChunk, Created: turn.Created, Model: turn.Model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: turn.Text}}}, IncludeUsage: includeUsage}); err != nil {
-			return err
-		}
-	}
-	if err := s.writeChatTerminal(writer, turn, includeUsage); err != nil {
-		return err
-	}
-	return writer.Done()
-}
-func (s *Server) writeChatReasoningDelta(writer *openai.SSEWriter, id string, created int64, model, delta string, includeUsage bool) error {
+func (s *Server) writeChatReasoningDelta(ctx context.Context, writer *openai.SSEWriter, id string, created int64, model, delta string, includeUsage bool) error {
 	if delta == "" {
 		return nil
 	}
 	policy := openai.ResolveReasoningEmission(s.cfg.ReasoningEmission)
 	if !policy.Enabled() {
+		s.debugStream(ctx, "chat reasoning delta suppressed", s.chatChunkAttrs(ctx, "reasoning", delta)...)
 		return nil
 	}
 	chunkDelta := openai.ChatChunkDelta{}
@@ -195,18 +187,18 @@ func (s *Server) writeChatReasoningDelta(writer *openai.SSEWriter, id string, cr
 	if policy.EmitReasoningContent {
 		chunkDelta.ReasoningContent = delta
 	}
-	return writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: chunkDelta}}, IncludeUsage: includeUsage})
+	return s.writeSSEData(ctx, writer, "chat.reasoning_delta", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: chunkDelta}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "reasoning", delta)...)
 }
-func (s *Server) writeChatTerminal(writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) error {
-	return s.writeChatTerminalWithID(writer, turn.ID, turn.Created, turn.Model, turn, includeUsage)
+func (s *Server) writeChatTerminal(ctx context.Context, writer *openai.SSEWriter, turn *copilotgw.TurnResult, includeUsage bool) error {
+	return s.writeChatTerminalWithID(ctx, writer, turn.ID, turn.Created, turn.Model, turn, includeUsage)
 }
-func (s *Server) writeChatTerminalWithID(writer *openai.SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) error {
+func (s *Server) writeChatTerminalWithID(ctx context.Context, writer *openai.SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) error {
 	finish := turn.FinishReason
 	if details := s.chatReasoningDetails(turn); len(details) > 0 {
 		// The plaintext reasoning was already streamed as deltas; this terminal
 		// chunk carries the structured details (signature + encrypted blob) so
 		// clients can replay reasoning for continuity.
-		if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ReasoningDetails: details}}}, IncludeUsage: includeUsage}); err != nil {
+		if err := s.writeSSEData(ctx, writer, "chat.reasoning_details", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ReasoningDetails: details}}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "reasoning_details", "reasoning_detail_count", len(details)); err != nil {
 			return err
 		}
 	}
@@ -215,15 +207,15 @@ func (s *Server) writeChatTerminalWithID(writer *openai.SSEWriter, id string, cr
 		for i, tc := range turn.ToolCalls {
 			deltas = append(deltas, openai.ToolCallDelta{Index: i, ID: tc.ID, Type: "function", Function: &openai.ToolCallDeltaFunction{Name: tc.Function.Name, Arguments: tc.Function.Arguments}})
 		}
-		if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ToolCalls: deltas}}}, IncludeUsage: includeUsage}); err != nil {
+		if err := s.writeSSEData(ctx, writer, "chat.tool_calls", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ToolCalls: deltas}}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "tool_calls", "tool_call_count", len(turn.ToolCalls)); err != nil {
 			return err
 		}
 	}
-	if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{}, FinishReason: &finish}}, IncludeUsage: includeUsage}); err != nil {
+	if err := s.writeSSEData(ctx, writer, "chat.finish", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{}, FinishReason: &finish}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "finish", "finish_reason", finish); err != nil {
 		return err
 	}
 	if includeUsage {
-		if err := writer.Data(openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{}, Usage: turn.Usage, IncludeUsage: true}); err != nil {
+		if err := s.writeSSEData(ctx, writer, "chat.usage", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{}, Usage: turn.Usage, IncludeUsage: true}, "stream_kind", "chat", "chunk_kind", "usage"); err != nil {
 			return err
 		}
 	}

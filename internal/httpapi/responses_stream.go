@@ -13,11 +13,20 @@ type responseEventWriter interface {
 }
 
 type sseResponseEventWriter struct {
+	server *Server
+	ctx    context.Context
 	writer *openai.SSEWriter
 }
 
 func (w sseResponseEventWriter) WriteResponseEvent(ev openai.ResponseStreamEvent) error {
-	return w.writer.Event(ev.Type, ev)
+	if w.server == nil {
+		return w.writer.Event(ev.Type, ev)
+	}
+	var attrs []any
+	if w.server.debugEnabled(w.ctx) {
+		attrs = responseStreamEventAttrs(ev)
+	}
+	return w.server.writeSSEEvent(w.ctx, w.writer, ev.Type, ev, attrs...)
 }
 
 const maxResponseStreamTextBytes = 100 << 20

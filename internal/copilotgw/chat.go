@@ -106,6 +106,9 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 	if err != nil {
 		return nil, openai.Upstream(err.Error())
 	}
+	if session == nil {
+		return nil, openai.Upstream("copilot SDK returned nil session")
+	}
 	ch := make(chan StreamEvent, 32)
 	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, session, rt, events, retained, "chat", "")
 	runner.watchContext(ctx)
@@ -117,11 +120,16 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 		_ = g.store.SaveSessionMetadata(sessionID, sessionstore.SessionMetadata{ID: sessionID, Kind: "chat", OpenAIID: result.ID, SDKSessionID: sessionID, Model: req.Model, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), RetainedPath: retained, FinishReason: result.FinishReason, PendingBatchID: result.PendingBatchID})
 		return nil
 	})
-	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
-		_ = session.Disconnect()
-		return nil, openai.Upstream(err.Error())
-	}
 	go runner.discardInitial()
+	go func() {
+		runner.debug(g, "copilot send started", "prompt_bytes", len(final.Text), "attachment_count", len(final.Attachments))
+		if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: final.Text, Attachments: final.Attachments}); err != nil {
+			runner.debug(g, "copilot send failed", "error", err.Error())
+			runner.failSend(events, err)
+			return
+		}
+		runner.debug(g, "copilot send returned")
+	}()
 	return ch, nil
 }
 func (g *RealGateway) resolveChatHistory(ctx context.Context, model string, messages []openai.ChatMessage) ([]hydration.Message, error) {

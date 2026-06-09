@@ -3,10 +3,12 @@ package copilotgw
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/observability"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
@@ -174,22 +176,36 @@ func (r *turnRunner) loop(g *RealGateway) {
 	var text string
 	var reason reasoningAccumulator
 	var usage *openai.Usage
+	stats := newTurnDebugStats()
+	debugEnabled := g != nil && g.log != nil && g.log.Enabled(r.ctx, slog.LevelDebug)
 	for event := range r.events {
 		switch d := event.Data.(type) {
 		case *copilot.AssistantTurnStartData:
 			reason.reset()
 			text = ""
 			usage = nil
+			stats.reset()
+			r.debug(g, "copilot turn started")
+		case *copilot.AssistantMessageStartData:
+			r.debug(g, "copilot assistant message started", "message_id", d.MessageID, "phase", optionalString(d.Phase), "ms_since_turn_start", stats.msSinceTurnStart())
 		case *copilot.AssistantReasoningDeltaData:
 			// Streaming reasoning is dropped by the SDK->wire reduction unless we
 			// thread it through here. Accumulate a plaintext fallback and forward
 			// the delta so encoders can interleave it ahead of content.
 			reason.addDelta(d.DeltaContent, d.ReasoningID)
 			if d.DeltaContent != "" {
+				if debugEnabled {
+					deltaStats := stats.observeReasoningDelta(d.DeltaContent)
+					r.debugDelta(g, "copilot reasoning delta", d.DeltaContent, deltaStats, "reasoning_id", d.ReasoningID)
+				}
 				r.emitReasoningDelta(d.DeltaContent, d.ReasoningID)
 			}
 		case *copilot.AssistantMessageDeltaData:
 			if d.DeltaContent != "" {
+				if debugEnabled {
+					deltaStats := stats.observeContentDelta(d.DeltaContent)
+					r.debugDelta(g, "copilot content delta", d.DeltaContent, deltaStats, "message_id", d.MessageID)
+				}
 				r.emitDelta(d.DeltaContent)
 			}
 		case *copilot.AssistantReasoningData:
@@ -197,6 +213,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			// after the message. If we already emitted that tool-call turn, do not
 			// let its late final block seed the next continuation turn.
 			reason.addConsolidated(d.Content, d.ReasoningID)
+			r.debug(g, "copilot final reasoning block", "reasoning_id", d.ReasoningID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "ms_since_turn_start", stats.msSinceTurnStart())
 		case *copilot.AssistantMessageData:
 			if d.ReasoningText != nil && *d.ReasoningText != "" {
 				reason.consolidated = *d.ReasoningText
@@ -207,6 +224,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			if d.EncryptedContent != nil {
 				reason.encrypted = *d.EncryptedContent
 			}
+			r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
 			if len(d.ToolRequests) > 0 {
 				text = d.Content
 				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.responseID, r.kind, r.model, r.updates, r.abort)
@@ -224,28 +242,181 @@ func (r *turnRunner) loop(g *RealGateway) {
 				text = ""
 				usage = nil
 				reason.markToolBoundary()
+				stats.reset()
 			} else {
 				text = d.Content
 			}
 		case *copilot.AssistantStreamingDeltaData:
-			// Heartbeat carrying only a cumulative byte count; intentionally
-			// ignored so it is never mistaken for content.
+			stats.observeStreamProgress(d.TotalResponseSizeBytes)
+			r.debug(g, "copilot stream progress", "total_response_size_bytes", d.TotalResponseSizeBytes, "stream_progress_count", stats.streamProgressCount, "ms_since_turn_start", stats.msSinceTurnStart())
 		case *copilot.AssistantUsageData:
 			usage = usageFromSDK(d)
+			r.debug(g, "copilot usage received", "input_tokens", optionalInt(d.InputTokens), "output_tokens", optionalInt(d.OutputTokens), "reasoning_tokens", optionalInt(d.ReasoningTokens), "ms_since_turn_start", stats.msSinceTurnStart())
 		case *copilot.SessionErrorData:
 			err := openai.Upstream(d.Message)
+			r.debug(g, "copilot session error", "error", d.Message, "ms_since_turn_start", stats.msSinceTurnStart())
 			r.emitError(err)
 			_ = r.session.Disconnect()
 			return
 		case *copilot.SessionIdleData:
 			res := r.result(text, reason.resolve(), usage, "stop")
 			reason.applyTo(res)
+			r.debug(g, "copilot session idle", append([]any{"finish_reason", res.FinishReason, "final_text_bytes", len(res.Text), "final_text_runes", len([]rune(res.Text)), "final_reasoning_bytes", len(res.Reasoning)}, stats.summaryAttrs()...)...)
 			r.emitResult(res)
 			_ = r.session.Disconnect()
 			return
 		}
 	}
+	r.debug(g, "copilot session event stream ended before idle")
 	r.emitError(openai.Upstream("copilot session event stream ended before idle"))
+}
+
+type turnDebugStats struct {
+	turnStarted             time.Time
+	lastDelta               time.Time
+	contentDeltaCount       int
+	contentDeltaBytes       int
+	maxContentDeltaBytes    int
+	reasoningDeltaCount     int
+	reasoningDeltaBytes     int
+	maxReasoningDeltaBytes  int
+	streamProgressCount     int
+	lastStreamProgressBytes int64
+}
+
+type deltaDebugStats struct {
+	index            int
+	cumulativeBytes  int
+	maxBytes         int
+	msSinceTurnStart int64
+	msSincePrevDelta int64
+}
+
+func newTurnDebugStats() *turnDebugStats {
+	s := &turnDebugStats{}
+	s.reset()
+	return s
+}
+
+func (s *turnDebugStats) reset() {
+	*s = turnDebugStats{turnStarted: time.Now()}
+}
+
+func (s *turnDebugStats) observeContentDelta(delta string) deltaDebugStats {
+	now := time.Now()
+	gap := elapsedMillisSince(s.lastDelta, now)
+	s.lastDelta = now
+	s.contentDeltaCount++
+	s.contentDeltaBytes += len(delta)
+	if len(delta) > s.maxContentDeltaBytes {
+		s.maxContentDeltaBytes = len(delta)
+	}
+	return deltaDebugStats{index: s.contentDeltaCount, cumulativeBytes: s.contentDeltaBytes, maxBytes: s.maxContentDeltaBytes, msSinceTurnStart: elapsedMillisSince(s.turnStarted, now), msSincePrevDelta: gap}
+}
+
+func (s *turnDebugStats) observeReasoningDelta(delta string) deltaDebugStats {
+	now := time.Now()
+	gap := elapsedMillisSince(s.lastDelta, now)
+	s.lastDelta = now
+	s.reasoningDeltaCount++
+	s.reasoningDeltaBytes += len(delta)
+	if len(delta) > s.maxReasoningDeltaBytes {
+		s.maxReasoningDeltaBytes = len(delta)
+	}
+	return deltaDebugStats{index: s.reasoningDeltaCount, cumulativeBytes: s.reasoningDeltaBytes, maxBytes: s.maxReasoningDeltaBytes, msSinceTurnStart: elapsedMillisSince(s.turnStarted, now), msSincePrevDelta: gap}
+}
+
+func (s *turnDebugStats) observeStreamProgress(total int64) {
+	s.streamProgressCount++
+	s.lastStreamProgressBytes = total
+}
+
+func (s *turnDebugStats) msSinceTurnStart() int64 {
+	return elapsedMillisSince(s.turnStarted, time.Now())
+}
+
+// summaryAttrs returns the cumulative per-turn streaming metrics shared by the
+// end-of-turn debug logs (final assistant message and session idle).
+func (s *turnDebugStats) summaryAttrs() []any {
+	return []any{
+		"content_delta_count", s.contentDeltaCount,
+		"content_delta_bytes", s.contentDeltaBytes,
+		"max_content_delta_bytes", s.maxContentDeltaBytes,
+		"reasoning_delta_count", s.reasoningDeltaCount,
+		"reasoning_delta_bytes", s.reasoningDeltaBytes,
+		"max_reasoning_delta_bytes", s.maxReasoningDeltaBytes,
+		"stream_progress_count", s.streamProgressCount,
+		"last_stream_progress_bytes", s.lastStreamProgressBytes,
+		"ms_since_turn_start", s.msSinceTurnStart(),
+	}
+}
+
+func elapsedMillisSince(start, end time.Time) int64 {
+	if start.IsZero() {
+		return -1
+	}
+	return end.Sub(start).Milliseconds()
+}
+
+func (r *turnRunner) debug(g *RealGateway, msg string, attrs ...any) {
+	if g == nil || g.log == nil || !g.log.Enabled(r.ctx, slog.LevelDebug) {
+		return
+	}
+	base := []any{"session_id", r.sessionID(), "openai_id", r.id, "stream_kind", r.kind, "model", r.model}
+	base = append(base, attrs...)
+	observability.Logger(r.ctx, g.log).DebugContext(r.ctx, msg, base...)
+}
+
+func (r *turnRunner) debugDelta(g *RealGateway, msg, delta string, stats deltaDebugStats, attrs ...any) {
+	if g == nil || g.log == nil || !g.log.Enabled(r.ctx, slog.LevelDebug) {
+		return
+	}
+	base := []any{
+		"session_id", r.sessionID(),
+		"openai_id", r.id,
+		"stream_kind", r.kind,
+		"model", r.model,
+		"delta_index", stats.index,
+		"delta_bytes", len(delta),
+		"delta_runes", len([]rune(delta)),
+		"cumulative_delta_bytes", stats.cumulativeBytes,
+		"max_delta_bytes", stats.maxBytes,
+		"ms_since_turn_start", stats.msSinceTurnStart,
+		"ms_since_previous_delta", stats.msSincePrevDelta,
+	}
+	if g.cfg.LogContent {
+		base = append(base, "delta_preview", observability.TruncateForLog(delta, 160))
+	}
+	base = append(base, attrs...)
+	observability.Logger(r.ctx, g.log).DebugContext(r.ctx, msg, base...)
+}
+
+func (r *turnRunner) sessionID() string {
+	if r.session == nil {
+		return ""
+	}
+	return r.session.SessionID
+}
+
+func optionalString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func optionalStringByteLen(v *string) int {
+	if v == nil {
+		return 0
+	}
+	return len(*v)
+}
+
+func optionalInt(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 // reasoningAccumulator gathers the reasoning signals the SDK emits during a
@@ -457,6 +628,19 @@ func (r *turnRunner) emitError(err error) {
 		if sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "error", Error: err}) {
 			close(responseStream)
 		}
+	}
+}
+
+// failSend surfaces an async session.Send failure through the runner loop as a
+// synthetic SessionError event, rather than emitting from the Send goroutine.
+// Routing it through the loop keeps emitError/emitResult/closeStreams
+// single-owner (loop-only), so an async send failure cannot race the loop's
+// concurrent stream sends and channel closes. The select on r.closed avoids
+// blocking if the loop has already terminated (turn completed).
+func (r *turnRunner) failSend(events chan<- copilot.SessionEvent, err error) {
+	select {
+	case events <- copilot.SessionEvent{Data: &copilot.SessionErrorData{Message: err.Error()}}:
+	case <-r.closed:
 	}
 }
 
