@@ -103,22 +103,25 @@ type StreamEvent struct {
 }
 
 type ResponseRequest struct {
-	ResponseID              string
-	Model                   string
-	Instructions            string
-	Input                   openai.PromptContent
-	FunctionOutputs         map[string]string
-	PreviousResponseID      string
-	WarmSession             *WarmResponseSession
-	Tools                   []openai.Tool
-	ToolChoiceNone          bool
-	Store                   bool
-	StoreSet                bool
-	ReasoningEffort         string
-	DefaultReasoningEffort  string
-	ResolvedReasoningEffort string
-	ReasoningEffortResolved bool
-	SuppressReasoning       bool
+	ResponseID                         string
+	Model                              string
+	Instructions                       string
+	Input                              openai.PromptContent
+	FunctionOutputs                    map[string]string
+	FunctionOutputFallbackInput        openai.PromptContent
+	FunctionOutputFallbackInstructions string
+	FunctionOutputFallbackAvailable    bool
+	PreviousResponseID                 string
+	WarmSession                        *WarmResponseSession
+	Tools                              []openai.Tool
+	ToolChoiceNone                     bool
+	Store                              bool
+	StoreSet                           bool
+	ReasoningEffort                    string
+	DefaultReasoningEffort             string
+	ResolvedReasoningEffort            string
+	ReasoningEffortResolved            bool
+	SuppressReasoning                  bool
 }
 
 type ResponseResult struct {

@@ -782,6 +782,66 @@ func TestResponsesRequestAllowsMixedFunctionOutputsAndNewInput(t *testing.T) {
 	}
 }
 
+func TestResponsesRequestBuildsTranscriptFallbackForStatelessFunctionOutputHistory(t *testing.T) {
+	gw := &captureResponseGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := strings.NewReader(`{
+		"model":"gpt-5",
+		"instructions":"base",
+		"input":[
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"desktop context"}]},
+			{"type":"message","role":"user","content":"look up alpha"},
+			{"type":"function_call","call_id":"call_old","name":"lookup","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_old","output":"alpha result"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Now summarize it."}]}
+		]
+	}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if !gw.got.FunctionOutputFallbackAvailable {
+		t.Fatal("expected transcript fallback for stateless function output history")
+	}
+	if gw.got.FunctionOutputFallbackInstructions != "base\n\nDeveloper:\ndesktop context" {
+		t.Fatalf("fallback instructions = %q", gw.got.FunctionOutputFallbackInstructions)
+	}
+	fallback := gw.got.FunctionOutputFallbackInput.Text
+	for _, want := range []string{"User:\nlook up alpha", "Assistant function call lookup call_old", "Function output call_old:\nalpha result", "User:\nNow summarize it."} {
+		if !strings.Contains(fallback, want) {
+			t.Fatalf("fallback transcript missing %q:\n%s", want, fallback)
+		}
+	}
+	if gw.got.Input.Text != "Now summarize it." {
+		t.Fatalf("live-continuation input = %q, want only post-output follow-up", gw.got.Input.Text)
+	}
+}
+
+func TestResponsesRequestDoesNotBuildFallbackForOutputOnlyWithoutHistory(t *testing.T) {
+	gw := &captureResponseGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := strings.NewReader(`{
+		"model":"gpt-5",
+		"input":[{"type":"function_call_output","call_id":"call_orphan","output":"orphan result"}]
+	}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gw.got.FunctionOutputFallbackAvailable || gw.got.FunctionOutputFallbackInput.Text != "" || gw.got.FunctionOutputFallbackInstructions != "" {
+		t.Fatalf("unexpected output-only fallback: %#v", gw.got)
+	}
+	if got := gw.got.FunctionOutputs["call_orphan"]; got != "orphan result" {
+		t.Fatalf("FunctionOutputs[call_orphan] = %q", got)
+	}
+}
+
 func TestResponsesStreamEmitsFunctionCallEventsAndCompletedResponse(t *testing.T) {
 	gw := &functionCallStreamGateway{}
 	s := New(config.Config{}, gw, slog.Default())
@@ -1398,9 +1458,80 @@ func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
 	if got := outputs["call_text_parts"]; got != "alpha beta" {
 		t.Fatalf("text content-part output = %q, want alpha beta", got)
 	}
-	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_file","output":[{"type":"file","file_id":"file_1"}]}]`))
-	if err == nil || !strings.Contains(err.Error(), "file content arrays") {
-		t.Fatalf("expected file content array rejection, got %v", err)
+	_, outputs, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_image","output":[{"type":"input_text","text":"chart generated"},{"type":"input_image","detail":"low","image_url":"data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outputs["call_image"]; !strings.Contains(got, "chart generated") || !strings.Contains(got, "[Image: data:image/png;base64, redacted") || !strings.Contains(got, "detail=low") || strings.Contains(got, "AAAA") {
+		t.Fatalf("image content-part output = %q, want text plus redacted image marker", got)
+	}
+	_, outputs, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_file","output":[{"type":"input_file","filename":"/tmp/report.pdf","file_id":"file_1"}]}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outputs["call_file"]; got != "[File: filename=report.pdf, file_id present]" {
+		t.Fatalf("file content-part output = %q, want redacted file marker", got)
+	}
+	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_bad","output":[{"type":"mystery","file_data":"secret"}]}]`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported function_call_output content part type") {
+		t.Fatalf("expected unsupported content-part rejection, got %v", err)
+	}
+	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_missing_type","output":[{"file_data":"secret"}]}]`))
+	if err == nil || !strings.Contains(err.Error(), "content parts require type") {
+		t.Fatalf("expected missing content-part type rejection, got %v", err)
+	}
+	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_mixed","output":[{"kind":"generic"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]`))
+	if err == nil || !strings.Contains(err.Error(), "cannot mix content parts") {
+		t.Fatalf("expected mixed content/raw rejection, got %v", err)
+	}
+	_, outputs, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_signed_url","output":[{"type":"input_image","image_url":"https://user:pass@example.com/private/chart.png?token=secret"}]}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outputs["call_signed_url"]; got != "[Image: https://example.com/…]" {
+		t.Fatalf("signed URL output = %q, want host-only redacted URL", got)
+	}
+}
+
+func TestParseResponsesInputUsesOnlyPostOutputItemsAsContinuationInput(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"message","role":"user","content":"look up alpha"},
+		{"type":"function_call","call_id":"call_old","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_old","output":"old result"},
+		{"type":"function_call","call_id":"call_current","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_current","output":"current result"},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"Now summarize it."}]}
+	]`)
+	prompt, outputs, instructions, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instructions != "" {
+		t.Fatalf("instructions = %q, want empty", instructions)
+	}
+	if outputs["call_old"] != "old result" || outputs["call_current"] != "current result" {
+		t.Fatalf("outputs = %#v, want both function outputs", outputs)
+	}
+	if prompt.Text != "Now summarize it." {
+		t.Fatalf("prompt text = %q, want only post-output user input", prompt.Text)
+	}
+}
+
+func TestParseResponsesInputDropsStatelessHistoryBeforeFunctionOutput(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"message","role":"user","content":"look up alpha"},
+		{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_1","output":"alpha result"}
+	]`)
+	prompt, outputs, instructions, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instructions != "" || prompt.Text != "" || len(prompt.Images) != 0 {
+		t.Fatalf("prompt/instructions = %#v/%q, want empty continuation input", prompt, instructions)
+	}
+	if got := outputs["call_1"]; got != "alpha result" {
+		t.Fatalf("outputs[call_1] = %q, want alpha result", got)
 	}
 }
 

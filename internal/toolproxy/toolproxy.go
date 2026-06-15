@@ -51,29 +51,61 @@ func (b *Broker) Register(batch *Batch) {
 }
 
 func (b *Broker) FindByCallIDs(ids []string) (*Batch, error) {
-	b.mu.Lock()
-	var found *Batch
-	for _, id := range ids {
-		batch := b.byCall[id]
-		if batch == nil {
-			b.mu.Unlock()
-			return nil, ErrNotFound
-		}
-		if found != nil && found.ID != batch.ID {
-			b.mu.Unlock()
-			return nil, fmt.Errorf("tool_call_ids belong to different pending batches")
-		}
-		found = batch
+	found, matched, err := b.findByCallIDs(ids, true)
+	if err != nil {
+		return nil, err
 	}
-	b.mu.Unlock()
-	if found == nil {
-		return nil, ErrNotFound
-	}
-	if !found.isOpen() {
-		b.Remove(found)
+	if len(matched) == 0 {
 		return nil, ErrNotFound
 	}
 	return found, nil
+}
+
+// FindByAnyCallIDs returns the single live batch referenced by any of ids, plus
+// the subset of ids that belong to it. Missing ids are ignored. If ids point to
+// multiple live batches, the request is ambiguous and an error is returned.
+func (b *Broker) FindByAnyCallIDs(ids []string) (*Batch, []string, error) {
+	return b.findByCallIDs(ids, false)
+}
+
+func (b *Broker) findByCallIDs(ids []string, requireAll bool) (*Batch, []string, error) {
+	b.mu.Lock()
+	var found *Batch
+	matched := make([]string, 0, len(ids))
+	stale := make([]*Batch, 0)
+	missingRequired := false
+	for _, id := range ids {
+		batch := b.byCall[id]
+		if batch == nil {
+			if requireAll {
+				missingRequired = true
+				break
+			}
+			continue
+		}
+		if !batch.isOpen() {
+			stale = append(stale, batch)
+			if requireAll {
+				missingRequired = true
+				break
+			}
+			continue
+		}
+		if found != nil && found.ID != batch.ID {
+			b.mu.Unlock()
+			return nil, nil, fmt.Errorf("tool_call_ids belong to different pending batches")
+		}
+		found = batch
+		matched = append(matched, id)
+	}
+	b.mu.Unlock()
+	for _, batch := range stale {
+		b.Remove(batch)
+	}
+	if missingRequired || found == nil {
+		return nil, nil, ErrNotFound
+	}
+	return found, matched, nil
 }
 
 func (b *Broker) Remove(batch *Batch) {

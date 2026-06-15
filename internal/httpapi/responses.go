@@ -51,6 +51,18 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 	if err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 	}
+	var fallbackInput openai.PromptContent
+	fallbackInstructions := ""
+	fallbackAvailable := false
+	if len(outputs) > 0 && req.PreviousResponseID == "" {
+		fallbackInput, fallbackInstructions, fallbackAvailable, err = parseResponsesFallbackInput(req.Input)
+		if err != nil {
+			return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+		}
+		if fallbackAvailable {
+			fallbackInstructions = combineInstructions(req.Instructions, fallbackInstructions)
+		}
+	}
 	store := true
 	storeSet := req.Store != nil
 	if req.Store != nil {
@@ -66,21 +78,24 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 		}
 	}
 	gwReq := copilotgw.ResponseRequest{
-		ResponseID:              responseID,
-		Model:                   req.Model,
-		Instructions:            combineInstructions(req.Instructions, inputInstructions),
-		Input:                   input,
-		FunctionOutputs:         outputs,
-		PreviousResponseID:      req.PreviousResponseID,
-		Tools:                   openai.SupportedTools(req.Tools),
-		ToolChoiceNone:          openai.ToolChoiceNone(req.ToolChoice),
-		Store:                   store,
-		StoreSet:                storeSet,
-		ReasoningEffort:         reasoningEffort,
-		DefaultReasoningEffort:  s.cfg.DefaultReasoningEffort,
-		ResolvedReasoningEffort: resolvedEffort,
-		ReasoningEffortResolved: resolved,
-		SuppressReasoning:       !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled(),
+		ResponseID:                         responseID,
+		Model:                              req.Model,
+		Instructions:                       combineInstructions(req.Instructions, inputInstructions),
+		Input:                              input,
+		FunctionOutputs:                    outputs,
+		FunctionOutputFallbackInput:        fallbackInput,
+		FunctionOutputFallbackInstructions: fallbackInstructions,
+		FunctionOutputFallbackAvailable:    fallbackAvailable,
+		PreviousResponseID:                 req.PreviousResponseID,
+		Tools:                              openai.SupportedTools(req.Tools),
+		ToolChoiceNone:                     openai.ToolChoiceNone(req.ToolChoice),
+		Store:                              store,
+		StoreSet:                           storeSet,
+		ReasoningEffort:                    reasoningEffort,
+		DefaultReasoningEffort:             s.cfg.DefaultReasoningEffort,
+		ResolvedReasoningEffort:            resolvedEffort,
+		ReasoningEffortResolved:            resolved,
+		SuppressReasoning:                  !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled(),
 	}
 	return gwReq, preparedResponseLogFields{reasoningEffort: reasoningEffort, resolvedEffort: resolvedEffort, resolved: resolved, continuation: continuation}, nil
 }

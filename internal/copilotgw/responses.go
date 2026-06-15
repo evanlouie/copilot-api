@@ -98,14 +98,16 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
+	if req.ResponseID == "" {
+		req.ResponseID = openai.NewID("resp_")
+	}
 	if len(req.FunctionOutputs) > 0 {
-		ids := make([]string, 0, len(req.FunctionOutputs))
-		for id := range req.FunctionOutputs {
-			ids = append(ids, id)
-		}
-		batch, err := g.broker.FindByCallIDs(ids)
+		batch, activeOutputs, err := g.responseContinuationBatch(req.FunctionOutputs)
 		if err != nil {
-			return g.streamToolResponseFromRecord(ctx, req)
+			if errors.Is(err, toolproxy.ErrNotFound) {
+				return g.streamToolResponseFromRecord(ctx, req)
+			}
+			return nil, err
 		}
 		previousResponseID := req.PreviousResponseID
 		if previousResponseID == "" {
@@ -135,7 +137,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		if !req.StoreSet {
 			storeVisible = previousRecord.Stored
 		}
-		outputs, err := functionOutputsWithContinuationInput(req.FunctionOutputs, req.Input)
+		outputs, err := functionOutputsWithContinuationInput(activeOutputs, req.Input)
 		if err != nil {
 			return nil, err
 		}
@@ -169,9 +171,6 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
 	if err != nil {
 		return nil, err
-	}
-	if req.ResponseID == "" {
-		req.ResponseID = openai.NewID("resp_")
 	}
 	events := make(chan copilot.SessionEvent, 256)
 	var session *copilot.Session

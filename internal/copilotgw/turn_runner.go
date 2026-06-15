@@ -130,6 +130,28 @@ func (r *turnRunner) currentBatch() *toolproxy.Batch {
 	return r.batch
 }
 
+// currentResponseID follows active continuation metadata so a reused runner
+// parks tool calls under the continuation response id, not the id from the
+// original request that created the SDK session.
+func (r *turnRunner) currentResponseID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.responseMeta != nil && r.responseMeta.responseID != "" {
+		return r.responseMeta.responseID
+	}
+	return r.responseID
+}
+
+func (r *turnRunner) setCurrentResponseID(id string) {
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	r.id = id
+	r.responseID = id
+	r.mu.Unlock()
+}
+
 func (r *turnRunner) setOnResult(fn func(*TurnResult) error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -227,7 +249,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
 			if len(d.ToolRequests) > 0 {
 				text = d.Content
-				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.responseID, r.kind, r.model, r.updates, r.abort)
+				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
 				r.setBatch(batch)
 				res := r.result(text, reason.resolve(), usage, "tool_calls")
 				reason.applyTo(res)

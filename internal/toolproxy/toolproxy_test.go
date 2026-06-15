@@ -100,6 +100,73 @@ func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
 	}
 }
 
+func TestFindByAnyCallIDsIgnoresStaleHistoryIDs(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBatch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	if err := oldBatch.Complete(map[string]string{"call_old": "old"}); err != nil {
+		t.Fatal(err)
+	}
+	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_current", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_current", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	found, matched, err := broker.FindByAnyCallIDs([]string{"call_old", "call_missing", "call_current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ID != batch.ID {
+		t.Fatalf("found batch = %q, want %q", found.ID, batch.ID)
+	}
+	if len(matched) != 1 || matched[0] != "call_current" {
+		t.Fatalf("matched = %#v, want only current call", matched)
+	}
+}
+
+func TestFindByAnyCallIDsReturnsAllMatchedLiveIDs(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBatch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	if err := oldBatch.Complete(map[string]string{"call_old": "old"}); err != nil {
+		t.Fatal(err)
+	}
+	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{
+		{ToolCallID: "call_current_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}},
+		{ToolCallID: "call_current_2", Name: rt.Tools()[0].Name, Arguments: map[string]any{}},
+	}, "resp_current", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	found, matched, err := broker.FindByAnyCallIDs([]string{"call_old", "call_current_1", "call_current_2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ID != batch.ID {
+		t.Fatalf("found batch = %q, want %q", found.ID, batch.ID)
+	}
+	if len(matched) != 2 || matched[0] != "call_current_1" || matched[1] != "call_current_2" {
+		t.Fatalf("matched = %#v, want both current calls", matched)
+	}
+}
+
+func TestFindByAnyCallIDsRejectsMultipleLiveBatches(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	rt2, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = rt2.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_2", Name: rt2.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_2", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	_, _, err = broker.FindByAnyCallIDs([]string{"call_1", "call_2"})
+	if err == nil || !strings.Contains(err.Error(), "different pending batches") {
+		t.Fatalf("error = %v, want different pending batches", err)
+	}
+}
+
 func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
 	broker := NewBroker(10 * time.Millisecond)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)

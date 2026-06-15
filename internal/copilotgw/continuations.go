@@ -2,6 +2,7 @@ package copilotgw
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"sort"
 	"strings"
@@ -199,13 +200,12 @@ func functionOutputsWithContinuationInput(outputs map[string]string, input opena
 }
 
 func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error) {
-	ids := make([]string, 0, len(req.FunctionOutputs))
-	for id := range req.FunctionOutputs {
-		ids = append(ids, id)
-	}
-	batch, err := g.broker.FindByCallIDs(ids)
+	batch, activeOutputs, err := g.responseContinuationBatch(req.FunctionOutputs)
 	if err != nil {
-		return g.continueToolResponseFromRecord(ctx, req)
+		if errors.Is(err, toolproxy.ErrNotFound) {
+			return g.continueToolResponseFromRecord(ctx, req)
+		}
+		return nil, err
 	}
 	previousResponseID := req.PreviousResponseID
 	if previousResponseID == "" {
@@ -225,12 +225,13 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		return nil, openai.PreviousResponseNotFound(previousResponseID)
 	}
 	runner := g.runnerForBatch(batch.ID)
-	outputs, err := functionOutputsWithContinuationInput(req.FunctionOutputs, req.Input)
+	outputs, err := functionOutputsWithContinuationInput(activeOutputs, req.Input)
 	if err != nil {
 		return nil, err
 	}
 	if err := batch.CompleteWithSetup(outputs, func() {
 		if runner != nil {
+			runner.setCurrentResponseID(req.ResponseID)
 			runner.attachToRequestContext()
 			runner.watchContext(ctx)
 		}
@@ -268,6 +269,33 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	}
 }
 
+func (g *RealGateway) responseContinuationBatch(outputs map[string]string) (*toolproxy.Batch, map[string]string, error) {
+	ids := make([]string, 0, len(outputs))
+	for id := range outputs {
+		ids = append(ids, id)
+	}
+	batch, err := g.broker.FindByCallIDs(ids)
+	if err == nil {
+		return batch, outputs, nil
+	}
+	// Codex's HTTP transport can resend the full stateless Responses input,
+	// including old function_call_output items whose live batches were already
+	// consumed. If exactly one current live batch is present, continue with just
+	// that batch's outputs and ignore stale history items.
+	batch, matched, subsetErr := g.broker.FindByAnyCallIDs(ids)
+	if subsetErr != nil {
+		if errors.Is(subsetErr, toolproxy.ErrNotFound) {
+			return nil, nil, err
+		}
+		return nil, nil, openai.InvalidRequest(subsetErr.Error(), "input")
+	}
+	active := make(map[string]string, len(matched))
+	for _, id := range matched {
+		active[id] = outputs[id]
+	}
+	return batch, active, nil
+}
+
 func (g *RealGateway) continueToolResponseFromRecord(ctx context.Context, req ResponseRequest) (*ResponseResult, error) {
 	fallback, err := g.responseFallbackRequestFromFunctionOutputs(req)
 	if err != nil {
@@ -286,6 +314,16 @@ func (g *RealGateway) streamToolResponseFromRecord(ctx context.Context, req Resp
 
 func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseRequest) (ResponseRequest, error) {
 	if req.PreviousResponseID == "" {
+		if req.FunctionOutputFallbackAvailable {
+			fallback := req
+			fallback.FunctionOutputs = nil
+			fallback.FunctionOutputFallbackInput = openai.PromptContent{}
+			fallback.FunctionOutputFallbackInstructions = ""
+			fallback.FunctionOutputFallbackAvailable = false
+			fallback.Input = req.FunctionOutputFallbackInput
+			fallback.Instructions = req.FunctionOutputFallbackInstructions
+			return fallback, nil
+		}
 		return ResponseRequest{}, openai.InvalidRequest("previous_response_id is required when function_call_output is no longer attached to a live pending batch", "previous_response_id")
 	}
 	previousRecord, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)

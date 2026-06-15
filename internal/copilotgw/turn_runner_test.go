@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 )
 
@@ -57,6 +59,57 @@ func TestFailSendUnblocksWhenRunnerClosed(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("failSend blocked even though the runner is closed")
 	}
+}
+
+func TestCurrentResponseIDUsesContinuationMetadata(t *testing.T) {
+	r := &turnRunner{responseID: "resp_initial"}
+	if got := r.currentResponseID(); got != "resp_initial" {
+		t.Fatalf("currentResponseID without meta = %q, want resp_initial", got)
+	}
+	r.setCurrentResponseID("resp_nonstream_continuation")
+	if got := r.currentResponseID(); got != "resp_nonstream_continuation" {
+		t.Fatalf("currentResponseID with non-stream continuation = %q, want resp_nonstream_continuation", got)
+	}
+	r.enableResponseStream(make(chan ResponseStreamEvent, 1), "resp_stream_continuation", "gpt-test", "", nil, true, false, nil)
+	if got := r.currentResponseID(); got != "resp_stream_continuation" {
+		t.Fatalf("currentResponseID with stream meta = %q, want resp_stream_continuation", got)
+	}
+}
+
+func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
+	broker := toolproxy.NewBroker(time.Minute)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan copilot.SessionEvent, 4)
+	session := &copilot.Session{SessionID: "sdk_test"}
+	runner := (&RealGateway{}).newTurnRunner(context.Background(), "resp_initial", "gpt-test", session, rt, events, t.TempDir(), "response", "resp_initial")
+	runner.setCurrentResponseID("resp_continuation")
+	alias := rt.AliasFor("lookup")
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: alias, Arguments: map[string]any{"q": "alpha"}}}}}
+
+	select {
+	case update := <-runner.updates:
+		if update.Err != nil {
+			t.Fatal(update.Err)
+		}
+		turn, ok := update.Value.(*TurnResult)
+		if !ok || turn.FinishReason != "tool_calls" {
+			t.Fatalf("update = %#v, want tool_calls TurnResult", update.Value)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not emit tool-call result")
+	}
+	batch, err := broker.FindByCallIDs([]string{"call_next"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.ResponseID != "resp_continuation" {
+		t.Fatalf("batch.ResponseID = %q, want resp_continuation", batch.ResponseID)
+	}
+	batch.Cancel(context.Canceled)
+	close(events)
 }
 
 func TestTurnDebugStatsObserve(t *testing.T) {

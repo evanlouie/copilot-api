@@ -1,10 +1,17 @@
 package copilotgw
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolproxy"
+	copilot "github.com/github/copilot-sdk/go"
 )
 
 func TestFunctionOutputsWithContinuationInputAppendsFollowupDeterministically(t *testing.T) {
@@ -28,6 +35,151 @@ func TestFunctionOutputsWithContinuationInputRejectsImages(t *testing.T) {
 	_, err := functionOutputsWithContinuationInput(map[string]string{"call_1": "ok"}, openai.PromptContent{Images: []openai.ImageInput{{URL: "data:image/png;base64,AAAA"}}})
 	if err == nil {
 		t.Fatal("expected image follow-up rejection")
+	}
+}
+
+func TestResponseContinuationBatchSelectsLiveSubsetFromCodexHistory(t *testing.T) {
+	broker := toolproxy.NewBroker(time.Minute)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBatch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	if err := oldBatch.Complete(map[string]string{"call_old": "old"}); err != nil {
+		t.Fatal(err)
+	}
+	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_current", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_current", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	g := &RealGateway{broker: broker}
+	found, active, err := g.responseContinuationBatch(map[string]string{"call_old": "old", "call_missing": "missing", "call_current": "current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ID != batch.ID {
+		t.Fatalf("found batch = %q, want %q", found.ID, batch.ID)
+	}
+	if len(active) != 1 || active["call_current"] != "current" {
+		t.Fatalf("active outputs = %#v, want only current call", active)
+	}
+}
+
+func TestResponseContinuationBatchKeepsAllLiveParallelOutputs(t *testing.T) {
+	broker := toolproxy.NewBroker(time.Minute)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBatch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	if err := oldBatch.Complete(map[string]string{"call_old": "old"}); err != nil {
+		t.Fatal(err)
+	}
+	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{
+		{ToolCallID: "call_current_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{"q": "one"}},
+		{ToolCallID: "call_current_2", Name: rt.Tools()[0].Name, Arguments: map[string]any{"q": "two"}},
+	}, "resp_current", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	g := &RealGateway{broker: broker}
+	found, active, err := g.responseContinuationBatch(map[string]string{"call_old": "old", "call_current_1": "one", "call_current_2": "two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ID != batch.ID {
+		t.Fatalf("found batch = %q, want %q", found.ID, batch.ID)
+	}
+	if len(active) != 2 || active["call_current_1"] != "one" || active["call_current_2"] != "two" {
+		t.Fatalf("active outputs = %#v, want both current calls", active)
+	}
+}
+
+func TestResponseContinuationBatchRejectsAmbiguousLiveBatches(t *testing.T) {
+	broker := toolproxy.NewBroker(time.Minute)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBatch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	if err := oldBatch.Complete(map[string]string{"call_old": "old"}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_live_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_live_1", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	// Simulate a second independent live pending batch from another response.
+	rt2, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = rt2.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_live_2", Name: rt2.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_live_2", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	g := &RealGateway{broker: broker}
+	_, _, err = g.responseContinuationBatch(map[string]string{"call_old": "old", "call_live_1": "one", "call_live_2": "two"})
+	if err == nil || errors.Is(err, toolproxy.ErrNotFound) || !strings.Contains(err.Error(), "different pending batches") {
+		t.Fatalf("error = %v, want ambiguous live batch invalid request", err)
+	}
+}
+
+func TestResponseFallbackWithoutPreviousResponseUsesTranscriptInput(t *testing.T) {
+	g := &RealGateway{}
+	fallback, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{
+		Model:                              "gpt-test",
+		Instructions:                       "continuation-only",
+		FunctionOutputs:                    map[string]string{"call_old": "old"},
+		FunctionOutputFallbackAvailable:    true,
+		FunctionOutputFallbackInput:        openai.PromptContent{Text: "User:\nlook up alpha\n\nFunction output call_old:\nold\n\nUser:\nnow summarize"},
+		FunctionOutputFallbackInstructions: "base\n\nDeveloper:\ndesktop context",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallback.PreviousResponseID != "" || len(fallback.FunctionOutputs) != 0 || fallback.FunctionOutputFallbackAvailable {
+		t.Fatalf("fallback continuation fields not cleared: %#v", fallback)
+	}
+	if fallback.Input.Text == "" || !strings.Contains(fallback.Input.Text, "Function output call_old") || !strings.Contains(fallback.Input.Text, "now summarize") {
+		t.Fatalf("fallback input = %q, want transcript input", fallback.Input.Text)
+	}
+	if fallback.Instructions != "base\n\nDeveloper:\ndesktop context" {
+		t.Fatalf("fallback instructions = %q, want transcript instructions", fallback.Instructions)
+	}
+}
+
+func TestStreamingResponseContinuationDefaultsMissingResponseID(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	g := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
+	g.modelsFetcher = func(context.Context) ([]Model, error) { return []Model{{ID: "gpt-test"}}, nil }
+
+	previous := responseFromTurn("resp_prev", "gpt-test", "", nil, true, &TurnResult{Text: "need lookup", FinishReason: "tool_calls"}, false)
+	if err := store.SaveResponse(recordFromResponse(previous, "sdk-session", "")); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := toolproxy.NewRequestTools(g.broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_prev", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	runner := &turnRunner{responseID: "resp_prev", updates: make(chan toolproxy.TurnFinalResult, 1), closed: make(chan struct{})}
+	defer close(runner.closed)
+	g.rememberRunner(batch.ID, runner)
+
+	ch, err := g.StreamResponse(context.Background(), ResponseRequest{Model: "gpt-test", FunctionOutputs: map[string]string{"call_1": "ok"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch == nil {
+		t.Fatal("StreamResponse returned nil channel")
+	}
+	runner.updates <- toolproxy.TurnFinalResult{Value: &TurnResult{}}
+	got := runner.currentResponseID()
+	if got == "" || got == "resp_prev" || !strings.HasPrefix(got, "resp_") {
+		t.Fatalf("streaming continuation response id = %q, want generated continuation id", got)
+	}
+}
+
+func TestResponseFallbackWithoutPreviousResponseRejectsUnavailableTranscript(t *testing.T) {
+	g := &RealGateway{}
+	_, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{
+		Model:           "gpt-test",
+		FunctionOutputs: map[string]string{"call_orphan": "orphan result"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "previous_response_id is required") {
+		t.Fatalf("error = %v, want previous_response_id requirement", err)
 	}
 }
 
