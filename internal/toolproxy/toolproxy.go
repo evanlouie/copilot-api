@@ -118,29 +118,26 @@ func (b *Broker) Remove(batch *Batch) {
 }
 
 type RequestTools struct {
-	broker        *Broker
-	aliasToPublic map[string]string
-	publicToAlias map[string]string
-	tools         []copilot.Tool
-	available     []string
-	choiceNone    bool
-	mu            sync.Mutex
-	ctx           context.Context
-	batch         *Batch
+	broker    *Broker
+	permitted map[string]struct{}
+	tools     []copilot.Tool
+	available []string
+	mu        sync.Mutex
+	ctx       context.Context
+	batch     *Batch
 }
 
 func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*RequestTools, error) {
 	tools = openai.SupportedTools(tools)
-	rt := &RequestTools{broker: broker, aliasToPublic: map[string]string{}, publicToAlias: map[string]string{}, choiceNone: choiceNone, ctx: context.Background()}
+	rt := &RequestTools{broker: broker, permitted: map[string]struct{}{}, ctx: context.Background()}
 	if choiceNone || len(tools) == 0 {
 		rt.available = []string{NoToolsSentinel}
 		return rt, nil
 	}
+	available := copilot.NewToolSet()
 	for _, t := range tools {
 		public := t.Function.Name
-		alias := makeAlias(public)
-		rt.aliasToPublic[alias] = public
-		rt.publicToAlias[public] = alias
+		rt.permitted[public] = struct{}{}
 		params := map[string]any{}
 		if len(t.Function.Parameters) > 0 {
 			if err := json.Unmarshal(t.Function.Parameters, &params); err != nil {
@@ -149,18 +146,20 @@ func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*Req
 		} else {
 			params = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
-		aliasCopy := alias
+		publicCopy := public
 		rt.tools = append(rt.tools, copilot.Tool{
-			Name:        alias,
-			Description: t.Function.Description,
-			Parameters:  params,
+			Name:                 public,
+			Description:          t.Function.Description,
+			Parameters:           params,
+			OverridesBuiltInTool: true,
 			Handler: func(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
-				inv.ToolName = aliasCopy
+				inv.ToolName = publicCopy
 				return rt.handleInvocation(inv)
 			},
 		})
-		rt.available = append(rt.available, alias)
+		available.AddCustom(public)
 	}
+	rt.available = available.ToSlice()
 	return rt, nil
 }
 
@@ -190,23 +189,16 @@ func (rt *RequestTools) context() context.Context {
 	}
 	return rt.ctx
 }
-func (rt *RequestTools) PublicName(alias string) string {
-	if p := rt.aliasToPublic[alias]; p != "" {
-		return p
-	}
-	return alias
-}
-func (rt *RequestTools) AliasFor(public string) string { return rt.publicToAlias[public] }
 
 func (rt *RequestTools) PermissionHandler() copilot.PermissionHandlerFunc {
-	allowed := map[string]struct{}{}
-	for _, name := range rt.available {
+	allowed := make(map[string]struct{}, len(rt.permitted))
+	for name := range rt.permitted {
 		allowed[name] = struct{}{}
 	}
 	return func(request copilot.PermissionRequest, invocation copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
 		if request.Kind() == copilot.PermissionRequestKindCustomTool {
 			if name, ok := permissionToolName(request); ok {
-				if _, allowedTool := allowed[name]; allowedTool && name != NoToolsSentinel {
+				if _, allowedTool := allowed[name]; allowedTool {
 					return &rpc.PermissionDecisionApproveOnce{}, nil
 				}
 			}
@@ -239,10 +231,9 @@ func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolReque
 	}
 	calls := make([]openai.ChatToolCall, 0, len(reqs))
 	for _, req := range reqs {
-		public := rt.PublicName(req.Name)
 		args := rawArgs(req.Arguments)
-		call := rt.batch.ensureCall(req.ToolCallID, public, req.Name, args)
-		calls = append(calls, openai.ChatToolCall{ID: call.OpenAIID, Type: "function", Function: openai.ToolCallFunction{Name: public, Arguments: string(args)}})
+		call := rt.batch.ensureCall(req.ToolCallID, req.Name, args)
+		calls = append(calls, openai.ChatToolCall{ID: call.OpenAIID, Type: "function", Function: openai.ToolCallFunction{Name: req.Name, Arguments: string(args)}})
 	}
 	rt.broker.Register(rt.batch)
 	rt.batch.startTimer()
@@ -250,14 +241,13 @@ func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolReque
 }
 
 func (rt *RequestTools) handleInvocation(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
-	public := rt.PublicName(inv.ToolName)
 	args := rawArgs(inv.Arguments)
 	rt.mu.Lock()
 	if rt.batch == nil || !rt.batch.isOpen() {
 		rt.batch = newBatch(rt.broker.ttl, "", "", "", nil, nil, rt.ctx)
 	}
 	batch := rt.batch
-	call := batch.ensureCall(inv.ToolCallID, public, inv.ToolName, args)
+	call := batch.ensureCall(inv.ToolCallID, inv.ToolName, args)
 	rt.broker.Register(batch)
 	batch.startTimer()
 	rt.mu.Unlock()
@@ -351,7 +341,7 @@ func (b *Batch) configure(responseID, kind string, model string, done <-chan Tur
 	}
 }
 
-func (b *Batch) ensureCall(sdkID, public, alias string, args json.RawMessage) *Call {
+func (b *Batch) ensureCall(sdkID, public string, args json.RawMessage) *Call {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	openaiID := sdkID
@@ -364,7 +354,7 @@ func (b *Batch) ensureCall(sdkID, public, alias string, args json.RawMessage) *C
 		}
 		return call
 	}
-	call := &Call{OpenAIID: openaiID, SDKID: sdkID, PublicName: public, AliasName: alias, ArgumentsJSON: append(json.RawMessage{}, args...), outCh: make(chan string, 1), errCh: make(chan error, 1)}
+	call := &Call{OpenAIID: openaiID, SDKID: sdkID, PublicName: public, ArgumentsJSON: append(json.RawMessage{}, args...), outCh: make(chan string, 1), errCh: make(chan error, 1)}
 	b.Calls[openaiID] = call
 	return call
 }
@@ -486,7 +476,6 @@ type Call struct {
 	OpenAIID      string
 	SDKID         string
 	PublicName    string
-	AliasName     string
 	ArgumentsJSON json.RawMessage
 	output        string
 	outCh         chan string
@@ -523,24 +512,4 @@ func rawArgs(v any) json.RawMessage {
 		return json.RawMessage(`{}`)
 	}
 	return b
-}
-
-func makeAlias(public string) string {
-	base := strings.Builder{}
-	for _, r := range public {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-			base.WriteRune(r)
-		case r == '-':
-			base.WriteByte('_')
-		}
-	}
-	if base.Len() == 0 {
-		base.WriteString("tool")
-	}
-	name := "capi_" + strings.Trim(base.String(), "_")
-	if len(name) > 50 {
-		name = name[:50]
-	}
-	return name + "_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
 }

@@ -86,8 +86,7 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 	session := &copilot.Session{SessionID: "sdk_test"}
 	runner := (&RealGateway{}).newTurnRunner(context.Background(), "resp_initial", "gpt-test", session, rt, events, t.TempDir(), "response", "resp_initial")
 	runner.setCurrentResponseID("resp_continuation")
-	alias := rt.AliasFor("lookup")
-	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: alias, Arguments: map[string]any{"q": "alpha"}}}}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}}
 
 	select {
 	case update := <-runner.updates:

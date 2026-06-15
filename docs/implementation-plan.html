@@ -562,7 +562,7 @@
               <h4>Tools</h4>
               <ul>
                 <li>Copilot SDK built-in tools, proxy-hosted MCP, config discovery, skills, memory, shell, file, and repository tools are disabled by default.</li>
-                <li>Clients may define OpenAI function tools. The proxy registers opaque request-scoped SDK aliases and yields tool calls back to clients; it never executes client business logic.</li>
+                <li>Clients may define OpenAI function tools. The proxy registers public client tool names with request-scoped custom-tool filters and yields tool calls back to clients; it never executes client business logic.</li>
                 <li>Client-hosted MCP is supported when the client exposes MCP tools as OpenAI function tools. Proxy-hosted MCP is not part of MVP.</li>
                 <li>MVP supports <span class="kbd">tool_choice</span> omitted/<span class="kbd">auto</span> and <span class="kbd">none</span>. Forced function and <span class="kbd">required</span> are rejected because the SDK/CLI does not enforce them.</li>
                 <li>Tool outputs are string-first. JSON object/array outputs are accepted as a convenience and serialized to JSON text; binary/multimodal outputs are rejected in MVP.</li>
@@ -605,7 +605,7 @@
               <ul>
                 <li>OpenAI Chat Completions and Responses structs, validation, IDs, usage, and error mapping.</li>
                 <li>Instruction folding into replacement system prompts.</li>
-                <li>Tool schema aliasing, pending tool-call batches, and strict tool-output validation.</li>
+                <li>Tool schema conversion, pending tool-call batches, and strict tool-output validation.</li>
               </ul>
             </div>
             <div class="tile">
@@ -627,7 +627,7 @@ internal/openai/                 # OpenAI request/response/SSE schemas, errors, 
 internal/copilotgw/              # Copilot SDK client/session gateway, models, Chat, Responses, continuations
 internal/hydration/              # versioned OpenAI messages → SDK events.jsonl generator/validator
 internal/sessionfs/              # project-owned SessionFSProvider backed by XDG data dirs
-internal/toolproxy/              # client-defined tool schemas, opaque aliases, pending batches
+internal/toolproxy/              # client-defined tool schemas, public-name tools, pending batches
 internal/sessionstore/           # metadata.json, response lookup, locks, purge support
 internal/observability/          # request correlation and redaction helpers</code></pre>
 
@@ -691,7 +691,7 @@ internal/observability/          # request correlation and redaction helpers</co
               </tr>
               <tr>
                 <td>Client-defined function tools</td>
-                <td>Accept OpenAI function tools only. Register opaque SDK aliases, yield calls to clients, park Chat/Responses continuations when tool outputs are required, and validate one output per pending call.</td>
+                <td>Accept OpenAI function tools only. Register client tools under their public names with custom-only SDK availability filters, yield calls to clients, park Chat/Responses continuations when tool outputs are required, and validate one output per pending call.</td>
                 <td><span class="status mvp">MVP</span></td>
               </tr>
               <tr>
@@ -753,7 +753,7 @@ copilot-api purge [--dry-run] [--yes]</code></pre>
           <div class="grid-3">
             <div class="tile">
               <h4>Client-owned execution</h4>
-              <p>Only tools supplied in the OpenAI request are exposed. The proxy registers opaque SDK aliases and yields calls; clients perform side effects, including MCP if they choose to back a function tool with MCP.</p>
+              <p>Only tools supplied in the OpenAI request are exposed. The proxy registers public client tool names through SDK custom-tool filters and yields calls; clients perform side effects, including MCP if they choose to back a function tool with MCP.</p>
             </div>
             <div class="tile">
               <h4>No SDK built-ins</h4>
@@ -769,8 +769,8 @@ copilot-api purge [--dry-run] [--yes]</code></pre>
           <ol>
             <li>Accept only OpenAI function tools in MVP. Reject hosted tools, proxy-hosted MCP, file search, web search, computer/browser tools, and non-function tool types.</li>
             <li>Validate function name, description, JSON Schema parameters, optional <span class="kbd">strict</span>, and request shape. Tool-specific count limits are not imposed by default; the global request-body cap still applies.</li>
-            <li>Register every client tool under an opaque internal SDK alias and map it back to the public OpenAI name in all client-visible responses.</li>
-            <li>Set <span class="kbd">AvailableTools</span> to exactly the request-scoped aliases, or to an impossible sentinel for <span class="kbd">tool_choice: "none"</span>. Continue denying all SDK-provided or unknown permission requests.</li>
+            <li>Register every client tool under its public OpenAI name and set the SDK built-in override flag so same-named client tools intentionally win.</li>
+            <li>Set <span class="kbd">AvailableTools</span> to request-scoped custom-tool filters, or to an impossible sentinel for <span class="kbd">tool_choice: "none"</span>. Continue denying all SDK-provided or unknown permission requests.</li>
             <li>Support <span class="kbd">tool_choice</span> omitted/<span class="kbd">auto</span> and <span class="kbd">none</span>. Reject forced function and <span class="kbd">required</span> because the SDK/CLI does not expose true enforcement.</li>
           </ol>
 
@@ -780,7 +780,7 @@ func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
     call := PendingToolCall{
         OpenAIToolCallID: mapSDKCallID(inv.ToolCallID),
         SDKToolCallID:    inv.ToolCallID,
-        PublicName:       mapInternalNameToPublic(inv.ToolName),
+        PublicName:       inv.ToolName,
         ArgumentsJSON:    preserveArgumentsJSON(inv.Arguments),
     }
 
@@ -797,7 +797,7 @@ func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
             <tbody>
               <tr>
                 <td>Request with tools</td>
-                <td>Hydrate prior Chat history, resume synthetic session with replacement prompt, register proxy aliases, and send the final user turn.</td>
+                <td>Hydrate prior Chat history, resume synthetic session with replacement prompt, register public proxy tools, and send the final user turn.</td>
                 <td>Send standard OpenAI <span class="kbd">tools</span> with <span class="kbd">tool_choice</span> omitted/<span class="kbd">auto</span> or <span class="kbd">none</span>.</td>
               </tr>
               <tr>
@@ -842,7 +842,7 @@ func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
               <ul>
                 <li>Client tool failures are normal tool output content, not HTTP/proxy failures.</li>
                 <li>Parallel batches are supported internally; all pending outputs for a batch are required before continuation.</li>
-                <li>Unknown SDK tool calls, built-in tool requests, expired pending calls, and aliasing failures are invariant/upstream errors and are logged with request IDs.</li>
+                <li>Unknown SDK tool calls, built-in tool requests, expired pending calls, and tool mapping failures are invariant/upstream errors and are logged with request IDs.</li>
                 <li>Pending TTL is configurable; it is a live-handler liveness guard, not a debug-data retention policy.</li>
               </ul>
             </div>
@@ -990,7 +990,7 @@ func proxyToolHandler(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
             <li>Validate <span class="kbd">model</span>, message ordering, feature support, client tool schemas, <span class="kbd">tool_choice</span>, <span class="kbd">parallel_tool_calls</span>, and any tool-output continuation.</li>
             <li>For ordinary Chat turns, split leading system/developer messages into replacement prompt, hydrate prior messages into versioned SDK events, resume the synthetic session, and send only the final user message.</li>
             <li>For recognized parked tool continuations, validate every returned <span class="kbd">tool_call_id</span>, endpoint kind, and requested model against pending state, then unblock the live SDK proxy handlers instead of sending a new prompt.</li>
-            <li>Use disabled SDK built-ins, request-scoped proxy tool aliases, no config discovery/MCP/skills, and a denying permission handler with exact proxy-tool exceptions.</li>
+            <li>Use disabled SDK built-ins, request-scoped custom proxy tools, no config discovery/MCP/skills, and a denying permission handler with exact proxy-tool exceptions.</li>
             <li>Return OpenAI JSON or SSE frames. If proxy tools are invoked, yield complete <span class="kbd">tool_calls</span>, preserve pre-tool text, and finish with <span class="kbd">tool_calls</span>.</li>
             <li>Retain synthetic session state and <span class="kbd">metadata.json</span> forever under XDG data for debugging; never reuse it implicitly for later Chat requests.</li>
           </ol>
@@ -1043,7 +1043,7 @@ type TurnResult struct {
                 <li>OpenAI schema validation and error envelope unit tests.</li>
                 <li>Hydration generator tests: parent IDs, timestamps, turn delimiters, assistant text, tool calls, tool results, and <span class="kbd">copilot.SessionEvent</span> JSON round trips.</li>
                 <li>Instruction folding tests: leading system/developer ordering, mid-conversation rejection, empty/space/minimal prompt selection.</li>
-                <li>Tool conversion tests: opaque aliases, reserved names, <span class="kbd">tool_choice</span> auto/none/rejection, <span class="kbd">parallel_tool_calls</span> endpoint rules, and output serialization.</li>
+                <li>Tool conversion tests: public names, custom filters, built-in overrides, <span class="kbd">tool_choice</span> auto/none/rejection, <span class="kbd">parallel_tool_calls</span> endpoint rules, and output serialization.</li>
                 <li>SSE tests for text chunks, buffered complete tool calls, preserved pre-tool text, terminal finish reasons, <span class="kbd">[DONE]</span>, and cancellation.</li>
                 <li>Store tests for XDG paths, lock behavior, <span class="kbd">metadata.json</span>, forever retention, and purge dry-run/refusal while locked.</li>
               </ul>
@@ -1055,7 +1055,7 @@ type TurnResult struct {
                 <li>Synthetic text-history nonce recall and synthetic tool-result recall.</li>
                 <li>Empty/space/minimal replacement prompt proof using captured provider-bound system content.</li>
                 <li>Built-in tool disablement proof: no file/shell/MCP/memory/SDK tools are visible or executable by default.</li>
-                <li>Provider request capture for tool availability: <span class="kbd">tools: []</span> for none, aliases only for auto, no true forced/<span class="kbd">required</span> tool-choice claim.</li>
+                <li>Provider request capture for tool availability: <span class="kbd">tools: []</span> for none, custom-filtered tools only for auto, no true forced/<span class="kbd">required</span> tool-choice claim.</li>
                 <li>OpenAI Python and JS SDK compatibility tests against the local server.</li>
               </ul>
             </div>
@@ -1173,7 +1173,7 @@ copilot-api purge --dry-run</code></pre>
             <li>Chat Completions uses synthetic session hydration by default, rejects unsupported message ordering, fails closed on hydration failures, and retains session state plus metadata forever for debugging.</li>
             <li>Responses continuations reuse stored SDK sessions through <span class="kbd">previous_response_id</span>, with API-visible <span class="kbd">store</span> behavior separated from debug retention.</li>
             <li>The Copilot SDK default system prompt and coding-agent persona are never used; empty/space/minimal replacement behavior is proven by tests.</li>
-            <li>SDK-provided tools and proxy-hosted MCP are disabled. Client-defined OpenAI function tools are proxied under opaque aliases, yielded back to clients, and continued from validated client outputs without gateway-side execution.</li>
+            <li>SDK-provided tools and proxy-hosted MCP are disabled. Client-defined OpenAI function tools are proxied under public names with custom SDK filters, yielded back to clients, and continued from validated client outputs without gateway-side execution.</li>
             <li>MVP tool semantics are documented: <span class="kbd">tool_choice</span> auto/none only, endpoint-specific <span class="kbd">parallel_tool_calls</span>, buffered streaming tool calls, string-first tool outputs, and strict call-ID validation.</li>
             <li>OpenAI-shaped error responses are returned consistently for <span class="kbd">/v1/*</span>; health/readiness use simple operational JSON.</li>
             <li>XDG data/state/cache dirs, server lock, redacted logs, request IDs, forever retention, and <span class="kbd">copilot-api purge [--dry-run] [--yes]</span> are implemented.</li>

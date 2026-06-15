@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/config"
+	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionfs"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
@@ -311,6 +312,51 @@ func TestSessionConfigBuildersApplyV1Hardening(t *testing.T) {
 		t.Fatalf("GitHubToken = %q, want gho_test", resumeCfg.GitHubToken)
 	}
 	assertResumeSessionHardening(t, resumeCfg)
+}
+
+func TestSessionConfigBuildersExposePublicCustomToolNames(t *testing.T) {
+	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), []openai.Tool{
+		{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}},
+		{Type: "function", Function: openai.FunctionTool{Name: "grep"}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := &RealGateway{
+		cfg: config.Config{ConfigDir: "/tmp/config"},
+		fs:  sessionfs.NewManager(t.TempDir()),
+	}
+
+	createCfg := gw.newCreateSessionConfig("session-id", "gpt-5", "instructions", "", rt, false, nil)
+	assertPublicCustomToolConfig(t, createCfg.Tools, createCfg.AvailableTools)
+
+	resumeCfg := gw.newResumeSessionConfig("gpt-5", "instructions", "", rt, false, nil)
+	assertPublicCustomToolConfig(t, resumeCfg.Tools, resumeCfg.AvailableTools)
+}
+
+func assertPublicCustomToolConfig(t *testing.T, tools []copilot.Tool, available []string) {
+	t.Helper()
+	if len(tools) != 2 {
+		t.Fatalf("Tools length = %d, want 2: %#v", len(tools), tools)
+	}
+	wantNames := []string{"get-weather", "grep"}
+	for i, want := range wantNames {
+		if got := tools[i].Name; got != want {
+			t.Fatalf("Tools[%d].Name = %q, want %q", i, got, want)
+		}
+		if tools[i].OverridesBuiltInTool != true {
+			t.Fatalf("Tools[%d].OverridesBuiltInTool = false, want true", i)
+		}
+	}
+	wantAvailable := []string{"custom:get-weather", "custom:grep"}
+	if len(available) != len(wantAvailable) {
+		t.Fatalf("AvailableTools = %#v, want %#v", available, wantAvailable)
+	}
+	for i, want := range wantAvailable {
+		if got := available[i]; got != want {
+			t.Fatalf("AvailableTools[%d] = %q, want %q", i, got, want)
+		}
+	}
 }
 
 func assertCreateSessionHardening(t *testing.T, cfg *copilot.SessionConfig) {

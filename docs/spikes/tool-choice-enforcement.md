@@ -12,7 +12,7 @@ What is supportable with evidence:
 
 - **`auto`**: yes, by exposing the desired tools and letting the model decide. The provider request does not include `tool_choice`; this is effectively provider/model default behavior.
 - **`none`**: yes, but by **withholding all tools** (`tools: []`) rather than by sending `tool_choice: "none"`.
-- **forced specific function**: only a **best-effort approximation** is possible by registering/exposing only the selected tool alias. This does not force a tool call; live tests showed the model can still answer directly.
+- **forced specific function**: only a **best-effort approximation** is possible by registering/exposing only the selected tool. This does not force a tool call; live tests showed the model can still answer directly.
 - **`required`**: not enforceable through SDK/runtime. Live tests showed the model can answer directly when tools are available.
 - **`parallel_tool_calls: false`**:
   - Chat Completions wire path: captured requests include `"parallel_tool_calls": false`, apparently hard-coded by the CLI.
@@ -118,7 +118,7 @@ Impossible sentinel / no available tools:
 
 No `tool_choice` was sent in either case.
 
-Important nuance: with no custom tools and no `AvailableTools` restriction, the CLI exposed many built-in tools by default (`bash`, `view`, `web_fetch`, `report_intent`, `sql`, `task`, etc.). For copilot-api's accepted design of disabling built-ins by default, it must actively restrict `AvailableTools` to the request-scoped aliases, or to an impossible sentinel for no tools.
+Important nuance: with no custom tools and no `AvailableTools` restriction, the CLI exposed many built-in tools by default (`bash`, `view`, `web_fetch`, `report_intent`, `sql`, `task`, etc.). For copilot-api's accepted design of disabling built-ins by default, it must actively restrict `AvailableTools` to request-scoped custom-tool filters, or to an impossible sentinel for no tools.
 
 ### Responses wire path (`/v1/responses`)
 
@@ -211,14 +211,14 @@ OpenAI forced function choice means the assistant must produce a tool/function c
 - The model remains free to emit ordinary assistant text.
 - Live tests confirmed direct answers happen even with exactly one available tool.
 
-Therefore, exposing only the selected alias is a **best-effort approximation**, not true OpenAI-compatible forced tool choice.
+Therefore, exposing only the selected tool is a **best-effort approximation**, not true OpenAI-compatible forced tool choice.
 
 ## Recommended MVP behavior
 
 For copilot-api compatibility, recommended behavior is fail-closed where semantics cannot be honored:
 
 - `tool_choice` omitted or `"auto"`:
-  - Expose request-scoped client tool aliases in `AvailableTools`.
+  - Expose request-scoped client tools through custom-tool filters in `AvailableTools`.
   - Let the model decide whether to call tools.
 - `tool_choice: "none"`:
   - Enforce by setting `AvailableTools` to an impossible sentinel so provider request has `tools: []`.
@@ -226,7 +226,7 @@ For copilot-api compatibility, recommended behavior is fail-closed where semanti
 - `tool_choice: {"type":"function","function":{"name":"..."}}`:
   - Do **not** claim true support.
   - Safest MVP: reject with an OpenAI-style error such as unsupported `tool_choice` forced function for this backend.
-  - If product chooses best-effort later, expose only that opaque alias and document that the model may still answer directly.
+  - If product chooses best-effort later, expose only that selected custom tool and document that the model may still answer directly.
 - `tool_choice: "required"`:
   - Reject as unsupported for this backend. There is no SDK/CLI/provider-bound required-use control.
 - `parallel_tool_calls:false`:
@@ -240,11 +240,11 @@ Risks:
 - CLI internals are opaque; this spike used black-box capture against embedded CLI `1.0.36-0`. Future CLI/SDK versions may add or change tool-choice behavior.
 - The Go module's e2e TypeScript harness was not included in the module cache, so captures used a scratch equivalent provider rather than the repository harness.
 - Live behavioral testing was intentionally minimal to avoid unnecessary model calls; results are still aligned with provider request evidence.
-- Built-in tools appear unless `AvailableTools` restricts them. copilot-api must continue to use request-scoped aliases and explicit availability filtering to avoid exposing unintended tools.
+- Built-in tools appear unless `AvailableTools` restricts them. copilot-api must continue to use request-scoped custom-tool filters and explicit availability filtering to avoid exposing unintended tools.
 
 Next steps:
 
 1. Implement `auto`/omitted and `none` using tool availability filtering only.
 2. Decide product/API stance for forced function and `required`: recommended fail closed with a clear unsupported error.
-3. Add regression tests around outbound provider request shape using a local provider capture: no `tool_choice`, `tools: []` for `none`, only selected alias for best-effort forced if ever enabled.
+3. Add regression tests around outbound provider request shape using a local provider capture: no `tool_choice`, `tools: []` for `none`, only the selected custom tool for best-effort forced if ever enabled.
 4. Re-run this spike when upgrading beyond SDK `v1.0.0`.

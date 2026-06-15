@@ -3,6 +3,7 @@ package toolproxy
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,54 @@ func TestRequestToolsUnsupportedOnlyUsesSentinel(t *testing.T) {
 	}
 }
 
+func TestRequestToolsExposePublicNamesAsCustomFilters(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{
+		{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}},
+		{Type: "function", Function: openai.FunctionTool{Name: "grep"}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.Tools()) != 2 {
+		t.Fatalf("SDK tools = %#v, want two", rt.Tools())
+	}
+	gotNames := []string{rt.Tools()[0].Name, rt.Tools()[1].Name}
+	wantNames := []string{"get-weather", "grep"}
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("tool names = %#v, want %#v", gotNames, wantNames)
+	}
+	for _, tool := range rt.Tools() {
+		if strings.HasPrefix(tool.Name, "capi_") {
+			t.Fatalf("tool name %q still uses capi_ alias", tool.Name)
+		}
+		if !tool.OverridesBuiltInTool {
+			t.Fatalf("tool %q should opt into built-in override", tool.Name)
+		}
+	}
+	if got, want := rt.AvailableTools(), []string{"custom:get-weather", "custom:grep"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("available tools = %#v, want %#v", got, want)
+	}
+}
+
+func TestCaptureRequestsUsesPublicToolName(t *testing.T) {
+	broker := NewBroker(time.Minute)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, calls := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "get-weather", Arguments: map[string]any{"city": "Paris"}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want one", calls)
+	}
+	if got := calls[0].Function.Name; got != "get-weather" {
+		t.Fatalf("tool call name = %q, want public name", got)
+	}
+	if got := batch.Calls["call_1"].PublicName; got != "get-weather" {
+		t.Fatalf("batch public name = %q, want get-weather", got)
+	}
+}
+
 func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
@@ -59,7 +108,7 @@ func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
 	if denied.Kind() != rpc.PermissionDecisionKindReject {
 		t.Fatalf("expected reject, got %s", denied.Kind())
 	}
-	unknown, err := handler(copilot.PermissionRequestCustomTool{ToolName: "unknown_alias"}, copilot.PermissionInvocation{})
+	unknown, err := handler(copilot.PermissionRequestCustomTool{ToolName: "unknown_tool"}, copilot.PermissionInvocation{})
 	if err != nil {
 		t.Fatal(err)
 	}
