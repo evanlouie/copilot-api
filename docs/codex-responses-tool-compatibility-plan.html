@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Codex Responses Tool Compatibility — Implementation Plan</title>
+  <style>
+    :root {
+      --ink: #17120d;
+      --muted: #665d50;
+      --paper: #f6eddc;
+      --paper-2: #fff9ec;
+      --paper-3: #ead9ba;
+      --line: #d5bd8e;
+      --line-strong: #9b753e;
+      --rust: #99401f;
+      --amber: #cf821c;
+      --green: #326c50;
+      --blue: #255978;
+      --violet: #5d4963;
+      --red: #a73628;
+      --mono: "Berkeley Mono", "SF Mono", Menlo, Consolas, monospace;
+      --serif: "Iowan Old Style", Charter, "Palatino Linotype", Georgia, serif;
+      --sans: Avenir, "Avenir Next", Optima, Candara, system-ui, sans-serif;
+      --shadow: 0 28px 80px rgba(49, 32, 11, 0.18);
+      --radius: 22px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 6%, rgba(207, 130, 28, 0.18), transparent 30rem),
+        radial-gradient(circle at 88% 14%, rgba(37, 89, 120, 0.14), transparent 28rem),
+        linear-gradient(135deg, var(--paper), #efe0c5 60%, #e8d0aa);
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      font-family: var(--sans);
+      line-height: 1.58;
+      letter-spacing: 0.005em;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.24;
+      background-image:
+        linear-gradient(rgba(23, 18, 13, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 18, 13, 0.035) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 78%);
+    }
+
+    a { color: var(--blue); text-underline-offset: 0.18em; }
+    code, pre { font-family: var(--mono); }
+    code {
+      padding: 0.12rem 0.35rem;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      border-radius: 8px;
+      background: rgba(255, 249, 236, 0.78);
+      font-size: 0.92em;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 10px);
+      padding: clamp(28px, 5vw, 64px);
+      background:
+        linear-gradient(135deg, rgba(255, 249, 236, 0.98), rgba(238, 218, 181, 0.9)),
+        repeating-linear-gradient(-35deg, rgba(153, 64, 31, 0.08) 0 1px, transparent 1px 16px);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 390px;
+      height: 390px;
+      right: -120px;
+      top: -145px;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(207, 130, 28, 0.24), transparent 62%),
+        conic-gradient(from 45deg, rgba(153, 64, 31, 0.18), rgba(37, 89, 120, 0.13), rgba(50, 108, 80, 0.16), rgba(153, 64, 31, 0.18));
+      filter: blur(1px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 18px;
+      padding: 6px 12px;
+      border: 1px solid rgba(153, 64, 31, 0.25);
+      border-radius: 999px;
+      color: var(--rust);
+      background: rgba(255, 249, 236, 0.72);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.06;
+      letter-spacing: -0.032em;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: clamp(2.4rem, 6vw, 5.4rem);
+      text-wrap: balance;
+    }
+
+    h2 { font-size: clamp(1.85rem, 4vw, 2.8rem); }
+    h3 { font-size: clamp(1.28rem, 2.4vw, 1.75rem); }
+
+    .subtitle {
+      position: relative;
+      z-index: 1;
+      max-width: 850px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.05rem, 2vw, 1.3rem);
+    }
+
+    .meta-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .meta-card {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      border-radius: 17px;
+      background: rgba(255, 249, 236, 0.74);
+    }
+
+    .meta-card b {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 270px minmax(0, 1fr);
+      gap: 26px;
+      margin-top: 28px;
+      align-items: start;
+    }
+
+    nav {
+      position: sticky;
+      top: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: rgba(255, 249, 236, 0.78);
+      box-shadow: 0 18px 48px rgba(49, 32, 11, 0.10);
+    }
+
+    nav b {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    nav a {
+      display: block;
+      padding: 7px 0;
+      color: var(--ink);
+      text-decoration: none;
+      border-bottom: 1px dashed rgba(159, 119, 65, 0.28);
+      font-size: 0.95rem;
+    }
+    nav a:hover { color: var(--blue); }
+
+    main { min-width: 0; }
+
+    section, .panel {
+      margin-bottom: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: clamp(20px, 3.6vw, 34px);
+      background: rgba(255, 249, 236, 0.82);
+      box-shadow: 0 18px 50px rgba(49, 32, 11, 0.09);
+    }
+
+    section h2 + p, section h3 + p { margin-top: 14px; }
+    p { margin: 0.7rem 0; }
+    ul, ol { padding-left: 1.4rem; }
+    li { margin: 0.35rem 0; }
+
+    .callout {
+      margin: 18px 0;
+      padding: 16px 18px;
+      border-left: 5px solid var(--amber);
+      border-radius: 16px;
+      background: rgba(207, 130, 28, 0.11);
+    }
+    .callout.green { border-left-color: var(--green); background: rgba(50, 108, 80, 0.11); }
+    .callout.red { border-left-color: var(--red); background: rgba(167, 54, 40, 0.10); }
+    .callout.blue { border-left-color: var(--blue); background: rgba(37, 89, 120, 0.10); }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .card {
+      border: 1px solid rgba(159, 119, 65, 0.36);
+      border-radius: 18px;
+      padding: 18px;
+      background: rgba(246, 237, 220, 0.64);
+    }
+
+    .card h3 { margin-bottom: 10px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0;
+      overflow: hidden;
+      border-radius: 16px;
+      font-size: 0.95rem;
+    }
+
+    th, td {
+      padding: 12px 13px;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--rust);
+      background: rgba(234, 217, 186, 0.62);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      text-align: left;
+    }
+
+    pre {
+      margin: 16px 0;
+      padding: 16px;
+      border: 1px solid rgba(159, 119, 65, 0.36);
+      border-radius: 18px;
+      overflow-x: auto;
+      background: #1e1a15;
+      color: #f9ead0;
+      font-size: 0.88rem;
+      line-height: 1.55;
+    }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px 0;
+      border-top: 1px dashed rgba(159, 119, 65, 0.4);
+    }
+    .phase:first-of-type { border-top: 0; }
+
+    .phase-num {
+      font-family: var(--mono);
+      color: var(--rust);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.82rem;
+      padding-top: 0.25rem;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      margin: 0 6px 6px 0;
+      padding: 4px 9px;
+      border: 1px solid rgba(159, 119, 65, 0.42);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 249, 236, 0.72);
+      font-family: var(--mono);
+      font-size: 0.77rem;
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-align: center;
+      margin-top: 28px;
+    }
+
+    @media (max-width: 880px) {
+      .meta-grid, .cards { grid-template-columns: 1fr; }
+      .layout { grid-template-columns: 1fr; }
+      nav { position: static; }
+      .phase { grid-template-columns: 1fr; gap: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="eyebrow">Implementation plan · Responses API · Codex CLI</div>
+      <h1>Surface Codex’s full Responses tool set through copilot-api</h1>
+      <p class="subtitle">
+        A staged plan to support the non-function Responses tools that Codex CLI expects—freeform
+        <code>custom</code> tools such as <code>apply_patch</code>, namespaced MCP tools, and
+        <code>tool_search</code>—while keeping the proxy’s core safety invariant: client-owned tools are never executed by the proxy.
+      </p>
+      <div class="meta-grid">
+        <div class="meta-card"><b>Status</b>Plan only</div>
+        <div class="meta-card"><b>Primary surface</b><code>Responses API (HTTP + WebSocket)</code></div>
+        <div class="meta-card"><b>Default posture</b>Client-owned tools, no SDK built-ins</div>
+        <div class="meta-card"><b>Target outcome</b>Codex CLI sees the same practical tool catalog as vanilla Responses</div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="Plan navigation">
+        <b>Contents</b>
+        <a href="#summary">Summary</a>
+        <a href="#current-state">Current state</a>
+        <a href="#target">Compatibility target</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#phases">Implementation phases</a>
+        <a href="#data-model">Data model</a>
+        <a href="#streaming">Streaming and continuations</a>
+        <a href="#model-metadata">Codex model metadata</a>
+        <a href="#validation-matrix">Validation matrix</a>
+        <a href="#tests">Test plan</a>
+        <a href="#rollout">Rollout and risks</a>
+        <a href="#acceptance">Acceptance criteria</a>
+      </nav>
+
+      <main>
+        <section id="summary">
+          <h2>Summary</h2>
+          <p>
+            The proxy currently accepts Codex-shaped Responses requests in permissive mode, but it only forwards
+            <code>type: "function"</code> tools into the GitHub Copilot SDK. That filters out the tools Codex models rely on for
+            a complete coding-agent experience: <code>apply_patch</code> as a freeform custom tool, MCP tools grouped under
+            Responses namespaces, and the <code>tool_search</code> discovery tool.
+          </p>
+          <div class="callout blue">
+            <strong>Implementation strategy:</strong> introduce a normalized Responses tool catalog, flatten every supported
+            client-owned tool into SDK-compatible custom tools, capture SDK tool invocations with enough metadata to rehydrate
+            the original Responses output item shape, and extend continuation parsing for the corresponding output items.
+          </div>
+          <p>
+            This does <em>not</em> require enabling Copilot SDK built-in shell/file/MCP tools. The SDK remains a model transport;
+            Codex CLI remains the tool executor.
+          </p>
+        </section>
+
+        <section id="current-state">
+          <h2>Current state</h2>
+          <p>The relevant implementation paths are narrow and intentionally conservative:</p>
+          <ul>
+            <li><code>internal/openai/types.go</code> models a tool primarily as <code>Type</code> plus nested <code>Function</code>.</li>
+            <li><code>internal/openai/validation.go</code> lets non-function Responses tools pass in permissive mode but skips them.</li>
+            <li><code>openai.SupportedTools</code> returns only <code>tool.Type == "function"</code>.</li>
+            <li><code>internal/httpapi/responses.go</code> passes only <code>SupportedTools(req.Tools)</code> into the gateway.</li>
+            <li><code>internal/toolproxy/toolproxy.go</code> registers only those function tools as SDK custom tools.</li>
+            <li><code>README.md</code> documents the current behavior: non-function Responses tools emitted by Codex CLI are ignored in permissive mode and rejected in strict mode.</li>
+          </ul>
+          <div class="callout red">
+            <strong>Observed effect:</strong> a Codex CLI request may contain all tools, but the model only sees the subset that survived
+            <code>SupportedTools</code>. The missing entries are therefore missing from model behavior, not from Codex’s local tool runtime.
+          </div>
+        </section>
+
+        <section id="target">
+          <h2>Compatibility target</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Responses tool type</th>
+                <th>Examples</th>
+                <th>Target behavior</th>
+                <th>Proxy execution?</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>function</code></td>
+                <td><code>exec_command</code>, <code>write_stdin</code>, <code>view_image</code>, <code>multi_tool_use.parallel</code></td>
+                <td>Return <code>function_call</code> output items. Function names that are not Copilot-SDK-safe, such as dotted names, are encoded to internal SDK aliases and rehydrated to their original Responses names.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td><code>custom</code> / freeform</td>
+                <td><code>apply_patch</code></td>
+                <td>Expose to the model through a synthetic SDK custom tool and return <code>custom_tool_call</code> with raw <code>input</code>.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td><code>namespace</code></td>
+                <td><code>mcp__computer_use.click</code>, <code>mcp__grep_app.searchGitHub</code>, <code>mcp__node_repl.js</code></td>
+                <td>Expose child functions through flattened SDK aliases and return <code>function_call</code> with <code>namespace</code> plus child <code>name</code>.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td><code>tool_search</code></td>
+                <td><code>tool_search</code></td>
+                <td>Expose the top-level discovery tool and return <code>tool_search_call</code> with <code>execution: "client"</code> and structured <code>arguments</code>; accept <code>tool_search_output</code> on continuation.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>Hosted / proxy-executed tools</td>
+                <td><code>web_search</code>, <code>image_generation</code>, provider-hosted MCP server declarations</td>
+                <td>Out of scope for this iteration. Reject in both modes when accepting them would falsely advertise proxy-hosted execution semantics.</td>
+                <td>No</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="callout green">
+            <strong>Success definition:</strong> when Codex CLI asks the model to list available tools through this proxy, the list includes
+            the <code>apply_patch</code> custom/freeform tool, MCP namespace child tools such as <code>mcp__grep_app.searchGitHub</code>, and the top-level <code>tool_search</code> discovery tool in addition to the existing function tools.
+          </div>
+        </section>
+
+        <section id="architecture">
+          <h2>Architecture</h2>
+          <p>The core pattern is <strong>normalize → flatten → invoke → rehydrate → continue</strong>.</p>
+          <div class="cards">
+            <div class="card">
+              <h3>1. Normalize</h3>
+              <p>Parse the incoming Responses <code>tools</code> array into a typed catalog that preserves raw JSON, public names, namespace metadata, output kind, and validation state.</p>
+            </div>
+            <div class="card">
+              <h3>2. Flatten</h3>
+              <p>Convert every supported client-owned tool into a Copilot SDK custom tool with a safe internal SDK name and a mapping back to its Responses identity.</p>
+            </div>
+            <div class="card">
+              <h3>3. Invoke</h3>
+              <p>Let the model call SDK custom tools. The handler still parks the turn and waits for Codex CLI to execute the real tool.</p>
+            </div>
+            <div class="card">
+              <h3>4. Rehydrate</h3>
+              <p>Transform captured SDK invocations back into the correct Responses output item type: <code>function_call</code>, <code>custom_tool_call</code>, or <code>tool_search_call</code>.</p>
+            </div>
+          </div>
+          <pre><code>Responses request tools
+  ├─ function exec_command ────────────────┐
+  ├─ custom apply_patch ───────────────────┤ normalize
+  ├─ namespace mcp__grep_app.searchGitHub ─┤ flatten to SDK custom tools
+  └─ tool_search ──────────────────────────┘
+                                             ↓
+                                   Copilot SDK model turn
+                                             ↓
+                              SDK custom-tool invocation captured
+                                             ↓
+                    Rehydrate original Responses output item shape</code></pre>
+        </section>
+
+        <section id="phases">
+          <h2>Implementation phases</h2>
+
+          <div class="phase">
+            <div class="phase-num">Phase 0</div>
+            <div>
+              <h3>Capture the exact Codex request and model-discovery shape</h3>
+              <p>Before changing behavior, add local reproduction fixtures and request-shape logging so the implementation is grounded in real Codex CLI payloads.</p>
+              <ul>
+                <li>Add a redacted debug log under <code>COPILOT_LOG_CONTENT</code> that counts tool types and prints names/namespaces, not full schemas by default.</li>
+                <li>Add a fixture based on the user-observed list: a regular function tool, dotted function names such as <code>multi_tool_use.parallel</code>, <code>custom</code> <code>apply_patch</code>, a <code>namespace</code> with child tools, and top-level <code>tool_search</code>.</li>
+                <li>Fixture exact wire shapes: <code>custom</code> with <code>name</code>, <code>description</code>, and <code>format {type, syntax, definition}</code>; <code>namespace</code> with <code>name</code>, <code>description</code>, and child <code>tools</code>; and <code>tool_search</code> with <code>execution</code>, <code>description</code>, and JSON-schema <code>parameters</code>.</li>
+                <li>Confirm whether missing tools are present in incoming <code>/v1/responses</code> requests or suppressed earlier by Codex model metadata.</li>
+                <li>Capture which model endpoint Codex CLI calls (<code>/v1/models</code>, <code>/codex/models?client_version=...</code>, or another configured path) before adding any metadata compatibility mode.</li>
+              </ul>
+              <p><span class="tag">tests first</span><span class="tag">request fixture</span><span class="tag">diagnostics</span></p>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 1</div>
+            <div>
+              <h3>Introduce a Responses tool catalog</h3>
+              <p>Replace the function-only helper path with a richer representation for Responses tools while keeping Chat Completions function-only.</p>
+              <ul>
+                <li>Add a new type such as <code>openai.ResponsesTool</code> or extend <code>openai.Tool</code> with raw fields for <code>function</code>, <code>custom</code>, <code>namespace</code>, and <code>tool_search</code>.</li>
+                <li>Create <code>NormalizeResponsesTools(req.Tools, strict)</code> that returns supported client-owned tools plus explicit ignored/unsupported diagnostics.</li>
+                <li>Keep <code>ValidateTools</code> for Chat unchanged; update <code>ValidateResponsesTools</code> to validate supported Responses-only types in both strict and permissive modes.</li>
+                <li>Preserve <code>strict</code>, <code>defer_loading</code>, <code>format</code>, <code>execution</code>, namespace child metadata, and raw JSON so <code>tool_search_output.tools</code> can be round-tripped accurately.</li>
+                <li>Define and test the strict/permissive validation matrix before changing runtime behavior.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 2</div>
+            <div>
+              <h3>Flatten supported tools into SDK custom tools</h3>
+              <p>Extend <code>internal/toolproxy</code> so each normalized Responses tool becomes one SDK custom tool, or multiple SDK tools for namespace children.</p>
+              <ul>
+                <li>Define a <code>ClientTool</code> metadata struct with <code>SDKName</code>, <code>Kind</code>, <code>ResponseName</code>, <code>Namespace</code>, <code>Description</code>, <code>Parameters</code>, <code>Strict</code>, <code>DeferLoading</code>, and original raw spec.</li>
+                <li>Use deterministic SDK-safe aliases for <em>every</em> tool kind when the public Responses identity is not SDK-safe. This includes dotted function names such as <code>multi_tool_use.parallel</code>, not only namespace children.</li>
+                <li>For SDK-safe direct functions, keep the public name only when it does not collide with another encoded alias or reserved sentinel.</li>
+                <li>For <code>custom</code>, synthesize an SDK JSON schema with a required string <code>input</code> field and a description explaining the downstream freeform shape.</li>
+                <li>For <code>namespace</code>, flatten each child into a deterministic safe SDK name, for example <code>mcp__grep_app__searchGitHub</code>, and store the Responses namespace separately.</li>
+                <li>For <code>tool_search</code>, expose an internal SDK alias for the canonical top-level <code>tool_search</code> tool using the provided query/limit schema. The alias must never leak into Responses output items.</li>
+                <li>Detect and reject collisions among direct safe names, encoded aliases, returned loadable tools, and reserved names such as <code>__copilot_api_no_tools__</code> before the session starts.</li>
+              </ul>
+              <div class="callout">
+                <strong>Important:</strong> the SDK transport currently exposes JSON-schema custom tools, not native OpenAI freeform grammar tools.
+                The adapter should preserve Codex’s output shape, but the model-facing prompt/schema may need a small compatibility shim for freeform custom tools.
+              </div>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 3</div>
+            <div>
+              <h3>Introduce generic captured-call and continuation-output plumbing</h3>
+              <p>The current pipeline carries only <code>[]openai.ChatToolCall</code> and <code>map[string]string</code> function outputs. Extended Responses tools need typed call and output carriers across <code>httpapi</code>, <code>copilotgw</code>, and <code>toolproxy</code>.</p>
+              <ul>
+                <li>Add an internal captured-call type, for example <code>toolproxy.CapturedCall</code> or <code>copilotgw.ToolCall</code>, with <code>Kind</code>, <code>SDKName</code>, <code>ResponseName</code>, <code>Namespace</code>, <code>CallID</code>, <code>ArgumentsJSON</code>, <code>Input</code>, <code>Execution</code>, and raw metadata.</li>
+                <li>Keep Chat Completions adapted to <code>[]openai.ChatToolCall</code>; make Responses serialization use the generic call type.</li>
+                <li>Add an internal continuation-output type with <code>Kind</code>, <code>CallID</code>, <code>Output</code>, optional <code>Name</code>, <code>Status</code>, <code>Execution</code>, and returned <code>Tools</code>.</li>
+                <li>Thread these types through <code>parseResponsesInput</code>, <code>copilotgw.ResponseRequest</code>, pending-batch matching, batch completion, fallback transcript construction, and response serialization.</li>
+                <li>When the SDK invokes a flattened namespace tool, store the namespace and child name so the Responses item can be rehydrated.</li>
+                <li>When the SDK invokes a custom tool, unwrap <code>{"input":"..."}</code> into a raw <code>input</code> string; if malformed, return a model-visible tool error.</li>
+                <li>When the SDK invokes <code>tool_search</code>, preserve arguments as structured JSON rather than string-only function arguments.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 4</div>
+            <div>
+              <h3>Rehydrate Responses output item types</h3>
+              <p>Update the gateway and stream encoder to emit the item type expected by Codex CLI, with stable <code>call_id</code> values for every call kind.</p>
+              <ul>
+                <li>Add fields or custom marshaling to <code>openai.ResponseOutputItem</code> for <code>Namespace</code>, <code>Input</code>, <code>Execution</code>, and raw/structured <code>arguments</code> for <code>tool_search_call</code>.</li>
+                <li>Ensure <code>function_call.arguments</code> remains a JSON string while <code>tool_search_call.arguments</code> serializes as an object.</li>
+                <li>Emit direct function tools as <code>{"type":"function_call","call_id":"call_...","name":"exec_command","arguments":"..."}</code>.</li>
+                <li>Emit namespace children as <code>{"type":"function_call","call_id":"call_...","namespace":"mcp__grep_app","name":"searchGitHub","arguments":"..."}</code>.</li>
+                <li>Emit custom tools as <code>{"type":"custom_tool_call","call_id":"call_...","name":"apply_patch","input":"..."}</code>.</li>
+                <li>Emit discovery as <code>{"type":"tool_search_call","call_id":"call_...","execution":"client","arguments":{...}}</code> with no <code>name</code> or <code>namespace</code>.</li>
+                <li>Persist the same rehydrated output items in stored Responses records so restart/TTL fallback sees canonical Responses shapes, not SDK aliases.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 5</div>
+            <div>
+              <h3>Support continuations for new output kinds</h3>
+              <p>Codex CLI will answer custom and discovery calls with different input item types than normal function calls.</p>
+              <ul>
+                <li>Extend <code>ResponseInputItem</code> and/or retain per-item raw JSON for <code>namespace</code>, <code>status</code>, <code>execution</code>, <code>tools</code>, and optional <code>name</code> on <code>custom_tool_call_output</code>.</li>
+                <li>Extend <code>parseResponsesInput</code> to recognize <code>custom_tool_call_output</code> and <code>tool_search_output</code> in addition to <code>function_call_output</code>.</li>
+                <li>Reuse <code>outputRawToString</code> for <code>custom_tool_call_output.output</code>, preserving support for text parts and structured content; tolerate and validate optional <code>name</code> when present.</li>
+                <li>For <code>tool_search_output</code>, require the matching <code>call_id</code>, validate <code>execution: "client"</code> for client-owned calls, parse <code>status</code>, and parse <code>tools</code> as Codex loadable specs.</li>
+                <li>Limit <code>tool_search_output.tools</code> to loadable <code>function</code> and <code>namespace</code> specs. Reject or ignore-with-diagnostic hosted, <code>custom</code>, nested namespace, and <code>tool_search</code> returned specs according to the validation matrix.</li>
+                <li>Validate that the continuation item type matches the pending call kind for active matched IDs only, preserving existing Codex stateless-history behavior where stale old outputs can appear alongside one live batch.</li>
+                <li>Update fallback transcript reconstruction to include <code>custom_tool_call_output</code>, <code>tool_search_call</code>, <code>tool_search_output</code>, and namespaced <code>function_call</code> history when a live pending batch is unavailable.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 6</div>
+            <div>
+              <h3>Define <code>tool_search</code> as a turn-breaking continuation</h3>
+              <p><code>tool_search_output.tools</code> cannot make newly returned tools callable inside an already configured SDK turn. The implementation must make the boundary explicit rather than pretending SDK tools can mutate mid-turn.</p>
+              <ul>
+                <li>When a live pending <code>tool_search_call</code> receives <code>tool_search_output</code>, do not simply unblock the same parked SDK tool handler and expect new tools to appear.</li>
+                <li>Record the search result in the transcript/persisted response, merge returned loadable specs into the normalized catalog, and start/resume a new SDK model turn configured with the merged catalog for the model’s post-search continuation.</li>
+                <li>If SDK/session constraints prevent this new-turn strategy in the first implementation slice, explicitly narrow behavior to: accept and persist <code>tool_search_output</code>, then make returned tools available only when the client resubmits them in <code>tools</code> on a subsequent fresh request.</li>
+                <li>Add tests that prove returned tools are not claimed callable until the new tool catalog has actually been installed in the SDK session configuration.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 7</div>
+            <div>
+              <h3>Preserve safety invariants</h3>
+              <p>Do not accidentally turn this into a proxy-hosted tool runtime.</p>
+              <ul>
+                <li>Continue creating the Copilot client with <code>ModeEmpty</code>.</li>
+                <li>Keep <code>AvailableTools</code> restricted to request-scoped synthetic custom tools or the impossible sentinel.</li>
+                <li>Keep permission approval limited to exact request-scoped SDK names.</li>
+                <li>Honor <code>tool_choice: "none"</code> by withholding all synthetic tools, including <code>custom</code>, <code>namespace</code>, and <code>tool_search</code>.</li>
+                <li>Do not configure proxy-hosted MCP servers, skills, shell, repository operations, memory, file access, hosted web search, or hosted image generation.</li>
+                <li>Add regression tests proving SDK built-ins remain unavailable when namespace MCP tools are supplied by Codex CLI.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 8</div>
+            <div>
+              <h3>Update Responses WebSocket and warm-session paths</h3>
+              <p>The feature targets Responses compatibility, so the WebSocket transport and <code>generate:false</code> warm sessions must either support the same normalized catalog or be explicitly documented as out of scope.</p>
+              <ul>
+                <li>Replace warm-session storage/comparison of <code>openai.SupportedTools(req.Tools)</code> with the normalized client-tool catalog.</li>
+                <li>Ensure WebSocket <code>response.create</code> accepts the same extended tool specs, emits the same rehydrated output items, and handles extended-tool continuations with the same validation rules as HTTP.</li>
+                <li>Add warm-session reuse and mismatch tests for normalized catalogs, including custom, namespace, dotted function, and <code>tool_search</code> tools.</li>
+                <li>If WebSocket cannot be completed in this slice, add a documented feature gate and explicit tests proving unsupported extended-tool WebSocket requests fail clearly rather than silently filtering tools.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 9</div>
+            <div>
+              <h3>Add Codex-facing model metadata only if request capture proves it is needed</h3>
+              <p>
+                Some Codex tools are gated before the request by Codex model metadata, notably <code>apply_patch_tool_type</code> and
+                search-tool support. The first implementation should not guess; it should capture whether Codex actually sends the missing tool specs and which model endpoint shape it uses.
+              </p>
+              <ul>
+                <li>If Codex is already sending <code>custom</code>, <code>namespace</code>, and <code>tool_search</code>, do not alter model responses for this feature.</li>
+                <li>If Codex omits <code>apply_patch</code> or <code>tool_search</code> because metadata is absent, add an opt-in Codex metadata compatibility mode rather than changing the OpenAI model list shape globally.</li>
+                <li>Candidate metadata fields: <code>apply_patch_tool_type: "freeform"</code>, <code>supports_search_tool: true</code>, <code>supports_parallel_tool_calls: true</code>, and relevant context/truncation hints.</li>
+                <li>Prefer adding these under <code>data[].metadata</code> only if Codex is actually consuming the OpenAI model-list envelope; otherwise implement the exact Codex model endpoint shape Codex CLI requests.</li>
+                <li>Document and test any new config knob such as <code>COPILOT_CODEX_MODELS_COMPAT=1</code>, and prove default <code>/v1/models</code> output is unchanged.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="data-model">
+          <h2>Proposed data model</h2>
+          <pre><code>type ResponsesToolKind string
+
+const (
+    ToolKindFunction   ResponsesToolKind = "function"
+    ToolKindCustom     ResponsesToolKind = "custom"
+    ToolKindNamespace  ResponsesToolKind = "namespace"
+    ToolKindToolSearch ResponsesToolKind = "tool_search"
+)
+
+type NormalizedTool struct {
+    Kind         ResponsesToolKind
+    Name         string          // public function/custom/tool_search name or namespace name
+    Namespace    string          // set for namespace children
+    Description  string
+    Parameters   json.RawMessage // JSON schema when applicable
+    Format       json.RawMessage // custom/freeform grammar metadata
+    Execution    string          // tool_search execution, usually "client"
+    Strict       *bool
+    DeferLoading *bool
+    Children     []NormalizedTool // namespace children
+    Raw          json.RawMessage
+}
+
+type ClientTool struct {
+    SDKName      string          // safe SDK-facing alias
+    ResponseKind ResponsesToolKind
+    ResponseName string          // canonical Responses-facing name
+    Namespace    string
+    Description  string
+    Parameters   map[string]any
+    Strict       *bool
+    DeferLoading *bool
+    Raw          json.RawMessage
+}
+
+type CapturedToolCall struct {
+    Kind          ResponsesToolKind
+    SDKName       string
+    ResponseName  string
+    Namespace     string
+    CallID        string
+    ArgumentsJSON json.RawMessage // function/namespace/tool_search args
+    Input         string          // custom/freeform raw input
+    Execution     string          // tool_search execution
+}
+
+type ResponseToolOutput struct {
+    Kind      ResponsesToolKind
+    CallID    string
+    Name      string          // optional custom_tool_call_output name
+    Output    string
+    Status    string          // tool_search_output status
+    Execution string          // tool_search_output execution
+    Tools     json.RawMessage // tool_search_output loadable specs
+}</code></pre>
+          <p>
+            The exact names can change during implementation; the important property is that the SDK-facing name is an implementation detail,
+            while the Responses-facing identity is preserved losslessly for the client. Chat Completions can continue adapting captured calls to
+            <code>[]openai.ChatToolCall</code>; Responses should use the generic captured-call and output types directly.
+          </p>
+        </section>
+
+        <section id="streaming">
+          <h2>Streaming and continuations</h2>
+          <p>
+            Existing function-call streaming emits <code>response.output_item.added</code>, argument deltas, argument done, and output item done.
+            For new call types, the minimum compatible stream should still announce each item before completing it: emit
+            <code>response.output_item.added</code>, then <code>response.output_item.done</code>, then <code>response.completed</code>. Granular deltas are optional for the first implementation.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Call kind</th>
+                <th>Non-stream response output item</th>
+                <th>Streaming minimum</th>
+                <th>Continuation input</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Function</td>
+                <td><code>function_call</code> with <code>call_id</code></td>
+                <td>Existing function call lifecycle</td>
+                <td><code>function_call_output</code></td>
+              </tr>
+              <tr>
+                <td>Namespace child</td>
+                <td><code>function_call</code> with <code>call_id</code> and <code>namespace</code></td>
+                <td><code>response.output_item.added</code> + <code>response.output_item.done</code></td>
+                <td><code>function_call_output</code></td>
+              </tr>
+              <tr>
+                <td>Custom/freeform</td>
+                <td><code>custom_tool_call</code> with <code>call_id</code></td>
+                <td><code>response.output_item.added</code> + <code>response.output_item.done</code></td>
+                <td><code>custom_tool_call_output</code></td>
+              </tr>
+              <tr>
+                <td>Tool search</td>
+                <td><code>tool_search_call</code> with <code>call_id</code> and <code>execution</code></td>
+                <td><code>response.output_item.added</code> + <code>response.output_item.done</code></td>
+                <td><code>tool_search_output</code></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="callout">
+            <strong>Future enhancement:</strong> after basic compatibility lands, add richer delta events if Codex or other clients require them. Use the exact Codex custom input event name <code>response.custom_tool_call_input.delta</code> for custom/freeform streaming; do not confuse it with <code>response.function_call_arguments.*</code>.
+          </div>
+        </section>
+
+        <section id="model-metadata">
+          <h2>Codex model metadata considerations</h2>
+          <p>
+            The proxy’s OpenAI-compatible <code>/v1/models</code> endpoint is intentionally shaped like OpenAI’s model list. Codex, however, has model
+            metadata fields that influence tool planning. This feature should not globally change the model-list contract without evidence.
+          </p>
+          <ol>
+            <li><strong>Measure first:</strong> capture an actual Codex run and confirm both whether the missing tools are present in <code>tools</code> and which model endpoint shape Codex requested.</li>
+            <li><strong>If present:</strong> the tool-filtering implementation is sufficient; leave model metadata alone.</li>
+            <li><strong>If absent:</strong> add an opt-in compatibility mode, for example <code>COPILOT_CODEX_MODELS_COMPAT=1</code>, that augments only the model response shape Codex is actually consuming.</li>
+            <li><strong>Do not overclaim:</strong> only advertise capabilities that the proxy can round-trip safely. For example, advertise <code>apply_patch_tool_type</code> only after <code>custom_tool_call</code> support is implemented, and advertise search-tool support only after the <code>tool_search_output</code> lifecycle is implemented or explicitly scoped.</li>
+            <li><strong>Document the knob:</strong> if a compatibility mode is added, update the README config table and add tests proving default model output is unchanged.</li>
+          </ol>
+        </section>
+
+        <section id="validation-matrix">
+          <h2>Strict/permissive validation matrix</h2>
+          <p>
+            The implementation should make validation behavior explicit before runtime changes land. Supported client-owned Responses tool types are accepted in both modes; unsupported hosted/proxy-executed semantics fail closed when accepting them would mislead the client.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Input</th>
+                <th>Permissive mode</th>
+                <th>Strict mode</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Supported <code>function</code>, including names needing SDK aliases</td>
+                <td>Accept</td>
+                <td>Accept</td>
+                <td>Chat Completions validation remains function-regex constrained unless explicitly changed later.</td>
+              </tr>
+              <tr>
+                <td>Supported <code>custom</code> freeform tools</td>
+                <td>Accept</td>
+                <td>Accept</td>
+                <td>Preserve raw <code>format</code>; expose via SDK schema shim.</td>
+              </tr>
+              <tr>
+                <td>Supported <code>namespace</code> with function children</td>
+                <td>Accept</td>
+                <td>Accept</td>
+                <td>Flatten children; preserve namespace for rehydration.</td>
+              </tr>
+              <tr>
+                <td>Supported top-level <code>tool_search</code></td>
+                <td>Accept</td>
+                <td>Accept</td>
+                <td>Requires <code>execution: "client"</code> and valid parameters.</td>
+              </tr>
+              <tr>
+                <td>Malformed supported tools or duplicate/colliding SDK aliases</td>
+                <td>Reject</td>
+                <td>Reject</td>
+                <td>Reject before SDK session creation.</td>
+              </tr>
+              <tr>
+                <td>Hosted/proxy-executed tools such as hosted <code>web_search</code>, <code>image_generation</code>, or provider-hosted MCP declarations</td>
+                <td>Reject, unless a field is explicitly documented as a harmless no-op</td>
+                <td>Reject</td>
+                <td>Do not silently advertise capabilities the proxy will not execute.</td>
+              </tr>
+              <tr>
+                <td><code>tool_choice: "none"</code> with any tools supplied</td>
+                <td>Accept request; withhold all tools via sentinel</td>
+                <td>Accept request; withhold all tools via sentinel</td>
+                <td>Applies to function, custom, namespace, and tool_search tools.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="tests">
+          <h2>Test plan</h2>
+          <div class="cards">
+            <div class="card">
+              <h3>Unit tests</h3>
+              <ul>
+                <li>Unmarshal and validate <code>function</code>, <code>custom</code>, <code>namespace</code>, and top-level <code>tool_search</code> specs.</li>
+                <li>Update existing tests that intentionally assert old function-only behavior, such as permissive Codex defaults and unsupported-only sentinel tests.</li>
+                <li>Reject malformed namespaces, duplicate flattened SDK names, nested namespaces, malicious returned loadable specs, and unsupported hosted tools according to the validation matrix.</li>
+                <li>Verify SDK-safe aliasing for unsafe function names such as <code>multi_tool_use.parallel</code>, custom tools, namespace children, and <code>tool_search</code>.</li>
+                <li>Verify custom <code>apply_patch</code> schema synthesis and input unwrapping.</li>
+                <li>Verify <code>strict</code>, <code>defer_loading</code>, raw <code>format</code>, and raw returned loadable specs are preserved.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>HTTP/gateway tests</h3>
+              <ul>
+                <li>Responses request with mixed tool kinds passes all supported normalized tools to the gateway.</li>
+                <li>Non-stream response serializes <code>custom_tool_call</code>, namespaced <code>function_call</code>, and <code>tool_search_call</code> with stable <code>call_id</code> values.</li>
+                <li>SSE stream emits <code>output_item.added</code> before <code>output_item.done</code> for each new call kind, with stable output indexes when reasoning/message items precede tools.</li>
+                <li>Continuations accept <code>custom_tool_call_output</code> and <code>tool_search_output</code>, including optional custom output <code>name</code> and tool-search <code>status</code>/<code>execution</code>/<code>tools</code>.</li>
+                <li>Wrong output kind for a pending call kind, missing <code>call_id</code>, duplicate live <code>call_id</code>, model mismatch, and previous-response mismatch fail clearly.</li>
+                <li>Cold fallback/restart/TTL paths reconstruct transcripts for custom calls, namespaced calls, tool-search calls, and their outputs.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Safety and transport tests</h3>
+              <ul>
+                <li>No request-scoped tools results in the impossible sentinel.</li>
+                <li><code>tool_choice: "none"</code> with function, custom, namespace, and <code>tool_search</code> tools withholds all synthetic SDK tools.</li>
+                <li>Supplying MCP namespace tools does not configure proxy-hosted MCP servers.</li>
+                <li>Permission handler approves only exact synthetic SDK names.</li>
+                <li>SDK built-ins remain disabled with <code>ModeEmpty</code>.</li>
+                <li>Responses WebSocket <code>response.create</code> and <code>generate:false</code> warm sessions store, compare, and reuse normalized extended tool catalogs—or fail clearly behind an explicit scope gate.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>End-to-end and deterministic integration tests</h3>
+              <ul>
+                <li>Use a fake SDK/provider capture to assert exact SDK <code>Tools</code> and <code>AvailableTools</code> names, descriptions, schemas, and request-scoped filters.</li>
+                <li>Run Codex CLI against the proxy and ask it to list tools as a smoke test, while treating model output as nondeterministic.</li>
+                <li>Assert the smoke-test list includes <code>apply_patch</code>, at least one <code>mcp__*</code> namespace child tool, and top-level <code>tool_search</code>.</li>
+                <li>Perform a small apply-patch round trip in a disposable workspace.</li>
+                <li>Perform one MCP namespace child round trip using a fake local MCP server controlled by the test.</li>
+                <li>Perform a <code>tool_search</code> round trip and prove returned tools become callable only after the implementation’s explicit new-catalog boundary.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="rollout">
+          <h2>Rollout and risks</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Risk</th>
+                <th>Impact</th>
+                <th>Mitigation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>SDK name encoding changes model behavior</td>
+                <td>The model may list or call encoded names instead of Codex’s canonical names.</td>
+                <td>Keep names as close as safely possible; include canonical namespace/name in descriptions; rehydrate output names regardless of SDK name.</td>
+              </tr>
+              <tr>
+                <td>Freeform tools are represented as JSON schema to the SDK</td>
+                <td>The model may wrap <code>apply_patch</code> incorrectly.</td>
+                <td>Use a single <code>input</code> field with strong description. Add prompt/schema tests and fallback parsing for common shapes.</td>
+              </tr>
+              <tr>
+                <td>Tool-search requires dynamic tool availability</td>
+                <td>Loaded tools may not be callable in the same SDK turn.</td>
+                <td>Implement the explicit new-turn/new-catalog boundary or narrow the scope until it is available; never claim returned tools are callable before SDK configuration proves it.</td>
+              </tr>
+              <tr>
+                <td>Accidental proxy-side tool execution</td>
+                <td>Breaks security expectations and project scope.</td>
+                <td>Handlers continue to park and return client outputs only; add explicit safety regression tests.</td>
+              </tr>
+              <tr>
+                <td>OpenAI compatibility regressions</td>
+                <td>Non-Codex clients may see changed behavior.</td>
+                <td>Keep Chat Completions function-only; document the Responses extended-tool behavior, validation matrix, and hosted-tool fail-closed behavior.</td>
+              </tr>
+              <tr>
+                <td>WebSocket/warm-session drift</td>
+                <td>HTTP works but Codex WebSocket or <code>generate:false</code> silently filters tools or disconnects warmed sessions.</td>
+                <td>Update warm-session catalog comparison and add WebSocket coverage, or explicitly gate unsupported transport paths.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Recommended rollout is default-on for supported client-owned Responses tools once tests pass. Strict mode should accept the newly supported client-owned types and still reject malformed, hosted, proxy-executed, or unknown unsafe semantics. README updates are part of the rollout, including the validation matrix, tool-search boundary, WebSocket scope, and any Codex model metadata compatibility knob.
+          </p>
+        </section>
+
+        <section id="acceptance">
+          <h2>Acceptance criteria</h2>
+          <ol>
+            <li>A mixed Codex Responses request containing <code>function</code>, <code>custom</code>, <code>namespace</code>, and top-level <code>tool_search</code> tools no longer filters the latter three out.</li>
+            <li>Unsafe Responses function names such as <code>multi_tool_use.parallel</code> are SDK-aliased safely and rehydrated to their original public names.</li>
+            <li>Codex CLI can see and name the missing tools when asked to list available tools through this proxy: <code>apply_patch</code>, at least one <code>mcp__*</code> namespace child tool, and <code>tool_search</code>.</li>
+            <li>Every emitted call item has a stable unique <code>call_id</code> that matches pending batches, stored responses, streamed items, and continuation input items.</li>
+            <li><code>apply_patch</code> produces a <code>custom_tool_call</code> with raw <code>input</code> and accepts a <code>custom_tool_call_output</code> continuation.</li>
+            <li>A namespaced MCP child tool produces a <code>function_call</code> with <code>namespace</code> and accepts a normal <code>function_call_output</code>.</li>
+            <li><code>tool_search</code> produces a <code>tool_search_call</code>, accepts <code>tool_search_output</code>, and either installs returned loadable tools through an explicit new-catalog boundary or clearly scopes returned tools to a later fresh request.</li>
+            <li><code>tool_search_output.tools</code> accepts only loadable <code>function</code> and <code>namespace</code> specs and applies the same aliasing, collision, and safety validation as initial request tools.</li>
+            <li>Streaming emits <code>response.output_item.added</code> before <code>response.output_item.done</code> for new call kinds, with stable sequence numbers and output indexes.</li>
+            <li>Responses WebSocket and warm-session paths either support normalized extended tools with tests or explicitly fail/gate unsupported extended-tool requests with clear errors.</li>
+            <li><code>tool_choice: "none"</code> with extended tools exposes no synthetic SDK tools.</li>
+            <li>No proxy-hosted shell, file, MCP, memory, skill, repository, hosted web-search, or hosted image-generation tools become available unless they were supplied by the client as request-scoped client-owned tool specs.</li>
+            <li>Strict and permissive behavior matches the validation matrix and is documented in README.</li>
+            <li>If Codex model metadata compatibility is implemented, it is opt-in, documented, tested, and does not change default <code>/v1/models</code> output.</li>
+            <li>Existing Chat Completions function-tool behavior remains unchanged.</li>
+          </ol>
+        </section>
+      </main>
+    </div>
+
+    <p class="footer-note">Prepared for <code>copilot-api</code> · Codex Responses extended tool compatibility · 2026-06-16</p>
+  </div>
+</body>
+</html>
