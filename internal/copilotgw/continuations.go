@@ -246,6 +246,17 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	if err != nil {
 		return nil, openai.PreviousResponseNotFound(previousResponseID)
 	}
+	installBoundary, err := validateResponseToolOutputsForBatch(batch, activeOutputs)
+	if err != nil {
+		return nil, err
+	}
+	if installBoundary {
+		return g.continueDynamicToolSearchResponse(ctx, req, batch, activeOutputs, previousResponseID, previousRecord)
+	}
+	catalogDTO, err := responseCatalogDTOForRequest(req, &previousRecord)
+	if err != nil {
+		return nil, err
+	}
 	runner := g.runnerForBatch(batch.ID)
 	outputs, err := toolOutputsWithContinuationInput(activeOutputs, req.Input)
 	if err != nil {
@@ -282,6 +293,8 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 		record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 		record.PendingBatchID = turn.PendingBatchID
+		record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
+		record.InstalledToolCatalog = catalogDTO
 		if err := g.store.SaveResponse(record); err != nil {
 			return nil, openai.Internal(err.Error())
 		}
@@ -289,6 +302,76 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	case <-ctx.Done():
 		return nil, openai.InvalidRequest(ctx.Err().Error(), "input")
 	}
+}
+
+func (g *RealGateway) continueDynamicToolSearchResponse(ctx context.Context, req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]openai.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (*ResponseResult, error) {
+	outputs, err := toolOutputsWithContinuationInput(activeOutputs, req.Input)
+	if err != nil {
+		return nil, err
+	}
+	merge, err := mergeLoadedToolSearchOutputs(req, previousRecord, outputs)
+	if err != nil {
+		return nil, err
+	}
+	runner := g.runnerForBatch(batch.ID)
+	if runner != nil {
+		runner.abort()
+	} else {
+		batch.Cancel(context.Canceled)
+	}
+	g.broker.Remove(batch)
+	g.forgetRunner(batch.ID)
+	storeVisible := req.Store
+	if !req.StoreSet {
+		storeVisible = previousRecord.Stored
+	}
+	fallback := req
+	fallback.ToolOutputs = nil
+	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, previousRecord.Output)}
+	fallback.PreviousResponseID = previousResponseID
+	fallback.Tools = merge.Catalog.Flatten()
+	fallback.ToolsSet = true
+	fallback.ForceSynthetic = true
+	fallback.Store = storeVisible
+	fallback.StoreSet = true
+	fallback.ContinuationToolOutputs = outputs
+	fallback.LoadedToolEvents = append(append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...), merge.Events...)
+	return g.CreateResponse(ctx, fallback)
+}
+
+func (g *RealGateway) streamDynamicToolSearchResponse(ctx context.Context, req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]openai.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (<-chan ResponseStreamEvent, error) {
+	outputs, err := toolOutputsWithContinuationInput(activeOutputs, req.Input)
+	if err != nil {
+		return nil, err
+	}
+	merge, err := mergeLoadedToolSearchOutputs(req, previousRecord, outputs)
+	if err != nil {
+		return nil, err
+	}
+	runner := g.runnerForBatch(batch.ID)
+	if runner != nil {
+		runner.abort()
+	} else {
+		batch.Cancel(context.Canceled)
+	}
+	g.broker.Remove(batch)
+	g.forgetRunner(batch.ID)
+	storeVisible := req.Store
+	if !req.StoreSet {
+		storeVisible = previousRecord.Stored
+	}
+	fallback := req
+	fallback.ToolOutputs = nil
+	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, previousRecord.Output)}
+	fallback.PreviousResponseID = previousResponseID
+	fallback.Tools = merge.Catalog.Flatten()
+	fallback.ToolsSet = true
+	fallback.ForceSynthetic = true
+	fallback.Store = storeVisible
+	fallback.StoreSet = true
+	fallback.ContinuationToolOutputs = outputs
+	fallback.LoadedToolEvents = append(append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...), merge.Events...)
+	return g.StreamResponse(ctx, fallback)
 }
 
 func (g *RealGateway) responseContinuationBatch(outputs map[string]openai.ResponseToolOutput) (*toolproxy.Batch, map[string]openai.ResponseToolOutput, error) {
@@ -356,9 +439,18 @@ func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseReq
 	if err != nil {
 		return ResponseRequest{}, err
 	}
+	merge, err := mergeLoadedToolSearchOutputs(req, previousRecord, outputs)
+	if err != nil {
+		return ResponseRequest{}, err
+	}
 	fallback := req
 	fallback.ToolOutputs = nil
 	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, previousRecord.Output)}
+	fallback.Tools = merge.Catalog.Flatten()
+	fallback.ToolsSet = true
+	fallback.ForceSynthetic = true
+	fallback.ContinuationToolOutputs = outputs
+	fallback.LoadedToolEvents = append(append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...), merge.Events...)
 	if !fallback.StoreSet {
 		fallback.Store = previousRecord.Stored
 	}

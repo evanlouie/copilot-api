@@ -231,7 +231,7 @@ func parseToolOutputItem(item openai.ResponseInputItem, i int) (openai.ResponseT
 		if len(item.Tools) > 0 && out == "" {
 			out = string(item.Tools)
 		}
-		return openai.ResponseToolOutput{Kind: kind, CallID: item.CallID, Output: out, Status: item.Status, Execution: execution, Tools: item.Tools}, nil
+		return openai.ResponseToolOutput{Kind: kind, CallID: item.CallID, Output: out, Status: item.Status, Execution: execution, Tools: item.Tools, LoadedTools: normalizedTools}, nil
 	}
 	return openai.ResponseToolOutput{Kind: kind, CallID: item.CallID, Name: item.Name, Output: out}, nil
 }

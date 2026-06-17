@@ -115,7 +115,11 @@ type ResponseRequest struct {
 	PreviousResponseID                 string
 	WarmSession                        *WarmResponseSession
 	Tools                              []openai.NormalizedTool
+	ToolsSet                           bool
 	ToolChoiceNone                     bool
+	ForceSynthetic                     bool
+	ContinuationToolOutputs            map[string]openai.ResponseToolOutput
+	LoadedToolEvents                   []openai.StoredLoadedToolEvent
 	Store                              bool
 	StoreSet                           bool
 	ReasoningEffort                    string

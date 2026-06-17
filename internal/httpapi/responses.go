@@ -105,6 +105,7 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 			return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 		}
 	}
+	_, toolsSet := req.Raw["tools"]
 	gwReq := copilotgw.ResponseRequest{
 		ResponseID:                         responseID,
 		Model:                              req.Model,
@@ -116,6 +117,7 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 		FunctionOutputFallbackAvailable:    fallbackAvailable,
 		PreviousResponseID:                 req.PreviousResponseID,
 		Tools:                              normalizedTools,
+		ToolsSet:                           toolsSet,
 		ToolChoiceNone:                     openai.ToolChoiceNone(req.ToolChoice),
 		Store:                              store,
 		StoreSet:                           storeSet,

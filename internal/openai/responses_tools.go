@@ -1,12 +1,8 @@
 package openai
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
 )
 
 type ResponsesToolKind string
@@ -33,18 +29,15 @@ type NormalizedTool struct {
 }
 
 type ResponseToolOutput struct {
-	Kind      ResponsesToolKind
-	CallID    string
-	Name      string
-	Output    string
-	Status    string
-	Execution string
-	Tools     json.RawMessage
+	Kind        ResponsesToolKind
+	CallID      string
+	Name        string
+	Output      string
+	Status      string
+	Execution   string
+	Tools       json.RawMessage
+	LoadedTools []NormalizedTool
 }
-
-var responsesSDKToolNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
-
-const noToolsSentinelName = "__copilot_api_no_tools__"
 
 func NormalizeResponsesTools(tools []Tool) ([]NormalizedTool, error) {
 	return NormalizeResponsesToolsWithMode(tools, true)
@@ -99,6 +92,12 @@ func NormalizeToolSearchOutputTools(raw json.RawMessage, param string) ([]Normal
 		out = append(out, normalized)
 	}
 	if err := validateNormalizedToolCatalog(out, param); err != nil {
+		return nil, err
+	}
+	if flattenedToolCount(out) > MaxLoadedToolCount {
+		return nil, InvalidRequest("tool_search_output.tools contains too many loadable tools", param)
+	}
+	if err := validateLoadedToolLimits(out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -197,10 +196,20 @@ func normalizeLoadableToolSearchTool(tool Tool, param string) (NormalizedTool, e
 		typ = "function"
 	}
 	switch typ {
-	case "function", "namespace":
+	case "function":
+		if err := validateLoadableFunctionToolFields(tool.Raw, param); err != nil {
+			return NormalizedTool{}, err
+		}
+		return normalizeResponsesTool(tool, param, false)
+	case "namespace":
+		if err := validateLoadableNamespaceToolFields(tool, param); err != nil {
+			return NormalizedTool{}, err
+		}
 		return normalizeResponsesTool(tool, param, false)
 	case "custom", "tool_search":
 		return NormalizedTool{}, InvalidRequest("tool_search_output.tools may only contain loadable function or namespace tools", param+".type")
+	case "web_search", "web_search_preview", "image_generation", "mcp", "file_search", "computer_use_preview", "code_interpreter":
+		return NormalizedTool{}, InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
 	default:
 		return NormalizedTool{}, InvalidRequest("unsupported tool_search_output tool type", param+".type")
 	}
@@ -208,7 +217,7 @@ func normalizeLoadableToolSearchTool(tool Tool, param string) (NormalizedTool, e
 
 func validateNormalizedToolCatalog(tools []NormalizedTool, param string) error {
 	identities := map[string]struct{}{}
-	sdkNames := map[string]string{noToolsSentinelName: "reserved sentinel"}
+	sdkNames := map[string]string{NoToolsSentinelName: "reserved sentinel"}
 	for _, tool := range tools {
 		if tool.Kind == ToolKindNamespace {
 			for _, child := range tool.Children {
@@ -227,12 +236,12 @@ func validateNormalizedToolCatalog(tools []NormalizedTool, param string) error {
 }
 
 func validateFlattenedToolIdentity(tool NormalizedTool, param string, identities map[string]struct{}, sdkNames map[string]string) error {
-	identity := normalizedToolIdentity(tool)
+	identity := NormalizedToolIdentity(tool)
 	if _, exists := identities[identity]; exists {
 		return InvalidRequest("duplicate Responses tool identity", param)
 	}
 	identities[identity] = struct{}{}
-	sdkName := normalizedToolSDKName(tool)
+	sdkName := NormalizedToolSDKName(tool)
 	if prior, exists := sdkNames[sdkName]; exists {
 		return InvalidRequest(fmt.Sprintf("Responses tool SDK name collision for %q with %s", sdkName, prior), param)
 	}
@@ -240,50 +249,64 @@ func validateFlattenedToolIdentity(tool NormalizedTool, param string, identities
 	return nil
 }
 
-func normalizedToolIdentity(tool NormalizedTool) string {
-	if tool.Namespace != "" {
-		return string(tool.Kind) + ":" + tool.Namespace + "." + tool.Name
+func validateLoadableFunctionToolFields(raw json.RawMessage, param string) error {
+	if len(raw) == 0 {
+		return nil
 	}
-	return string(tool.Kind) + ":" + tool.Name
-}
-
-func normalizedToolSDKName(tool NormalizedTool) string {
-	public := tool.Name
-	if tool.Namespace != "" {
-		public = tool.Namespace + "__" + tool.Name
+	fields, err := rawObjectFields(raw)
+	if err != nil {
+		return InvalidRequest("tool_search_output.tools entries must be JSON objects", param)
 	}
-	if tool.Kind == ToolKindToolSearch {
-		public = "tool_search"
+	allowed := map[string]struct{}{"type": {}, "function": {}, "name": {}, "description": {}, "parameters": {}, "strict": {}, "defer_loading": {}}
+	if err := rejectUnknownFields(fields, allowed, param); err != nil {
+		return err
 	}
-	if responsesSDKToolNameRE.MatchString(public) && public != noToolsSentinelName {
-		return public
-	}
-	return safeResponsesSDKAlias(public)
-}
-
-func safeResponsesSDKAlias(public string) string {
-	var b strings.Builder
-	for _, r := range public {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
+	if nested, ok := fields["function"]; ok && len(nested) > 0 && string(nested) != "null" {
+		nestedFields, err := rawObjectFields(nested)
+		if err != nil {
+			return InvalidRequest("function tool function field must be an object", param+".function")
+		}
+		if err := rejectUnknownFields(nestedFields, map[string]struct{}{"name": {}, "description": {}, "parameters": {}, "strict": {}}, param+".function"); err != nil {
+			return err
 		}
 	}
-	alias := b.String()
-	if alias == "" || !((alias[0] >= 'a' && alias[0] <= 'z') || (alias[0] >= 'A' && alias[0] <= 'Z') || alias[0] == '_') {
-		alias = "tool_" + alias
-	}
-	h := sha1.Sum([]byte(public))
-	suffix := "_" + hex.EncodeToString(h[:])[:10]
-	if len(alias)+len(suffix) > 64 {
-		alias = strings.TrimRight(alias[:64-len(suffix)], "_-")
-		if alias == "" {
-			alias = "tool"
+	return nil
+}
+
+func validateLoadableNamespaceToolFields(tool Tool, param string) error {
+	if len(tool.Raw) > 0 {
+		fields, err := rawObjectFields(tool.Raw)
+		if err != nil {
+			return InvalidRequest("tool_search_output.tools entries must be JSON objects", param)
+		}
+		allowed := map[string]struct{}{"type": {}, "name": {}, "description": {}, "defer_loading": {}, "tools": {}}
+		if err := rejectUnknownFields(fields, allowed, param); err != nil {
+			return err
 		}
 	}
-	return alias + suffix
+	for i, child := range tool.Tools {
+		if err := validateLoadableFunctionToolFields(child.Raw, fmt.Sprintf("%s.tools.%d", param, i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rawObjectFields(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, fmt.Errorf("not an object")
+	}
+	return fields, nil
+}
+
+func rejectUnknownFields(fields map[string]json.RawMessage, allowed map[string]struct{}, param string) error {
+	for name := range fields {
+		if _, ok := allowed[name]; !ok {
+			return InvalidRequest("unsupported field in tool_search_output.tools loadable tool", param+"."+name)
+		}
+	}
+	return nil
 }
 
 func validateSchemaRaw(raw json.RawMessage, param, message string) error {

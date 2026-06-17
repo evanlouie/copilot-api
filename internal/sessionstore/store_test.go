@@ -34,7 +34,7 @@ func TestSaveResponseWritesVersionedCompactJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"version":2`) {
+	if !strings.Contains(string(b), `"version":3`) {
 		t.Fatalf("record JSON missing version: %s", b)
 	}
 	if strings.Contains(string(b), "\n  ") {

@@ -2,12 +2,9 @@ package toolproxy
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -20,14 +17,12 @@ import (
 	"github.com/google/uuid"
 )
 
-const NoToolsSentinel = "__copilot_api_no_tools__"
+const NoToolsSentinel = openai.NoToolsSentinelName
 
 var (
 	ErrExpired  = errors.New("pending tool call batch expired")
 	ErrNotFound = errors.New("pending tool call batch not found")
 )
-
-var sdkToolNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
 
 type ClientTool struct {
 	SDKName      string
@@ -299,42 +294,7 @@ func assignSDKNames(tools []ClientTool) ([]ClientTool, error) {
 }
 
 func desiredSDKName(tool ClientTool) string {
-	public := tool.ResponseName
-	if tool.Namespace != "" {
-		public = tool.Namespace + "__" + tool.ResponseName
-	}
-	if tool.ResponseKind == openai.ToolKindToolSearch {
-		public = "tool_search"
-	}
-	if sdkToolNameRE.MatchString(public) && public != NoToolsSentinel {
-		return public
-	}
-	return safeSDKAlias(public)
-}
-
-func safeSDKAlias(public string) string {
-	var b strings.Builder
-	for _, r := range public {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	alias := b.String()
-	if alias == "" || !((alias[0] >= 'a' && alias[0] <= 'z') || (alias[0] >= 'A' && alias[0] <= 'Z') || alias[0] == '_') {
-		alias = "tool_" + alias
-	}
-	h := sha1.Sum([]byte(public))
-	suffix := "_" + hex.EncodeToString(h[:])[:10]
-	if len(alias)+len(suffix) > 64 {
-		alias = strings.TrimRight(alias[:64-len(suffix)], "_-")
-		if alias == "" {
-			alias = "tool"
-		}
-	}
-	return alias + suffix
+	return openai.NormalizedToolSDKName(openai.NormalizedTool{Kind: tool.ResponseKind, Name: tool.ResponseName, Namespace: tool.Namespace})
 }
 
 func responseIdentity(tool ClientTool) string {
@@ -786,6 +746,16 @@ func (b *Batch) CapturedCalls() []CapturedCall {
 		out = append(out, call.Captured())
 	}
 	return out
+}
+
+func (b *Batch) CapturedCall(callID string) (CapturedCall, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	call := b.Calls[callID]
+	if call == nil {
+		return CapturedCall{}, false
+	}
+	return call.Captured(), true
 }
 
 type Call struct {

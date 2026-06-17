@@ -230,6 +230,43 @@ func TestResponseFallbackWithPreviousResponseUsesExtendedToolLabels(t *testing.T
 	}
 }
 
+func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalog(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	g := &RealGateway{store: store}
+	previous := responseFromTurn("resp_prev", "gpt-test", "", nil, true, &TurnResult{FinishReason: "tool_calls", ResponseToolCalls: []toolproxy.CapturedCall{{Kind: openai.ToolKindToolSearch, CallID: "call_search", ResponseName: "tool_search", Execution: "client"}}}, false)
+	catalog, err := openai.NewToolCatalog([]openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := recordFromResponse(previous, "sdk-session", "")
+	record.InstalledToolCatalog = catalog.StoredDTO()
+	if err := store.SaveResponse(record); err != nil {
+		t.Fatal(err)
+	}
+	fallback, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{
+		Model:              "gpt-test",
+		PreviousResponseID: "resp_prev",
+		ToolOutputs: map[string]openai.ResponseToolOutput{
+			"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`), LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fallback.ForceSynthetic || len(fallback.ToolOutputs) != 0 || !fallback.ToolsSet {
+		t.Fatalf("fallback fields = ForceSynthetic %v ToolOutputs %#v ToolsSet %v", fallback.ForceSynthetic, fallback.ToolOutputs, fallback.ToolsSet)
+	}
+	if len(fallback.Tools) != 2 || fallback.Tools[1].Kind != openai.ToolKindNamespace || fallback.Tools[1].Children[0].Name != "spawn_agent" {
+		t.Fatalf("fallback tools = %#v, want installed loaded namespace", fallback.Tools)
+	}
+	if len(fallback.LoadedToolEvents) != 1 || fallback.LoadedToolEvents[0].SourceCallID != "call_search" {
+		t.Fatalf("loaded events = %#v", fallback.LoadedToolEvents)
+	}
+}
+
 func TestResponseFallbackWithoutPreviousResponseRejectsUnavailableTranscript(t *testing.T) {
 	g := &RealGateway{}
 	_, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{

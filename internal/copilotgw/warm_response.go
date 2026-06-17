@@ -1,13 +1,11 @@
 package copilotgw
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"sort"
 	"sync"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/google/uuid"
@@ -78,7 +76,7 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (*copilot.Session, *tool
 	} else if requestReasoningEffort != w.reasoningEffort {
 		return nil, nil, nil, "", nil, false
 	}
-	if len(req.Tools) == 0 {
+	if !req.ToolsSet && len(req.Tools) == 0 {
 		req.Tools = append([]openai.NormalizedTool{}, w.tools...)
 	} else if !responseToolsEqual(req.Tools, w.tools) {
 		return nil, nil, nil, "", nil, false
@@ -93,79 +91,16 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (*copilot.Session, *tool
 	return w.session, w.rt, w.events, w.retained, &w.responseID, true
 }
 
-type comparableNormalizedTool struct {
-	Kind         openai.ResponsesToolKind   `json:"kind"`
-	Name         string                     `json:"name"`
-	Namespace    string                     `json:"namespace,omitempty"`
-	Description  string                     `json:"description,omitempty"`
-	Parameters   string                     `json:"parameters,omitempty"`
-	Format       string                     `json:"format,omitempty"`
-	Execution    string                     `json:"execution,omitempty"`
-	Strict       *bool                      `json:"strict,omitempty"`
-	DeferLoading *bool                      `json:"defer_loading,omitempty"`
-	Children     []comparableNormalizedTool `json:"children,omitempty"`
-}
-
 func responseToolsEqual(a, b []openai.NormalizedTool) bool {
-	ak, aok := responseToolsKey(a)
-	bk, bok := responseToolsKey(b)
-	return aok && bok && ak == bk
-}
-
-func responseToolsKey(tools []openai.NormalizedTool) (string, bool) {
-	comparable := comparableTools(tools)
-	b, err := json.Marshal(comparable)
+	ac, err := openai.NewToolCatalog(a)
 	if err != nil {
-		return "", false
+		return false
 	}
-	return string(b), true
-}
-
-func comparableTools(tools []openai.NormalizedTool) []comparableNormalizedTool {
-	out := make([]comparableNormalizedTool, 0, len(tools))
-	for _, tool := range tools {
-		children := comparableTools(tool.Children)
-		out = append(out, comparableNormalizedTool{
-			Kind:         tool.Kind,
-			Name:         tool.Name,
-			Namespace:    tool.Namespace,
-			Description:  tool.Description,
-			Parameters:   canonicalRawJSON(tool.Parameters),
-			Format:       canonicalRawJSON(tool.Format),
-			Execution:    tool.Execution,
-			Strict:       tool.Strict,
-			DeferLoading: tool.DeferLoading,
-			Children:     children,
-		})
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind < out[j].Kind
-		}
-		if out[i].Namespace != out[j].Namespace {
-			return out[i].Namespace < out[j].Namespace
-		}
-		return out[i].Name < out[j].Name
-	})
-	return out
-}
-
-func canonicalRawJSON(raw json.RawMessage) string {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return ""
-	}
-	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return string(trimmed)
-	}
-	b, err := json.Marshal(v)
+	bc, err := openai.NewToolCatalog(b)
 	if err != nil {
-		return string(trimmed)
+		return false
 	}
-	return string(b)
+	return ac.Key() == bc.Key()
 }
 
 func combinePromptContent(previous openai.PromptContent, current openai.PromptContent) openai.PromptContent {
@@ -183,6 +118,9 @@ func combinePromptContent(previous openai.PromptContent, current openai.PromptCo
 }
 
 func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*WarmResponseResult, error) {
+	if len(req.ToolOutputs) > 0 {
+		return nil, openai.InvalidRequest("generate:false with tool-output continuations is not supported", "input")
+	}
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
 	}
@@ -197,7 +135,19 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	if err != nil {
 		return nil, err
 	}
-	rt, err := toolproxy.NewResponseRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
+	var previousRecord *sessionstore.ResponseRecord
+	if req.PreviousResponseID != "" {
+		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
+		if err != nil {
+			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
+		}
+		previousRecord = &record
+	}
+	catalog, err := responseCatalogForRequest(req, previousRecord)
+	if err != nil {
+		return nil, err
+	}
+	rt, err := toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoiceNone)
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
@@ -205,19 +155,17 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	var session *copilot.Session
 	var sessionID string
 	var previous *string
-	if req.PreviousResponseID != "" {
-		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
-		if err != nil {
-			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
-		}
-		sessionID = record.SDKSessionID
+	if previousRecord != nil {
+		sessionID = previousRecord.SDKSessionID
 		previous = &req.PreviousResponseID
-		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
-		if err != nil || session == nil {
-			if g.log != nil {
+		if !req.ForceSynthetic {
+			session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+		}
+		if req.ForceSynthetic || err != nil || session == nil {
+			if g.log != nil && !req.ForceSynthetic {
 				g.log.Warn("falling back to synthetic warm Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
 			}
-			prompt = g.responseContinuationPrompt(record, prompt)
+			prompt = g.responseContinuationPrompt(*previousRecord, prompt)
 			req.Input.Text = prompt.Text
 			sessionID = "resp_sdk_" + uuid.NewString()
 			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
@@ -236,6 +184,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
 	record := recordFromResponse(resp, sessionID, retained)
 	record.InputText = req.Input.Text
+	record.InstalledToolCatalog = catalog.StoredDTO()
 	if err := g.store.SaveResponse(record); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Internal(err.Error())

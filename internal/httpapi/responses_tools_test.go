@@ -25,7 +25,7 @@ func TestParseResponsesInputAcceptsCustomAndToolSearchOutputs(t *testing.T) {
 	if got := outputs["call_patch"]; got.Kind != openai.ToolKindCustom || got.Name != "apply_patch" || got.Output != "patched" {
 		t.Fatalf("custom output = %#v", got)
 	}
-	if got := outputs["call_search"]; got.Kind != openai.ToolKindToolSearch || got.Execution != "client" || got.Status != "completed" || !strings.Contains(got.Output, "loaded_tool") {
+	if got := outputs["call_search"]; got.Kind != openai.ToolKindToolSearch || got.Execution != "client" || got.Status != "completed" || !strings.Contains(got.Output, "loaded_tool") || len(got.LoadedTools) != 1 || got.LoadedTools[0].Name != "loaded_tool" {
 		t.Fatalf("tool_search output = %#v", got)
 	}
 }

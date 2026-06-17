@@ -36,8 +36,19 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if err != nil {
 		return nil, err
 	}
-
-	rt, err := toolproxy.NewResponseRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
+	var previousRecord *sessionstore.ResponseRecord
+	if req.PreviousResponseID != "" {
+		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
+		if err != nil {
+			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
+		}
+		previousRecord = &record
+	}
+	catalog, err := responseCatalogForRequest(req, previousRecord)
+	if err != nil {
+		return nil, err
+	}
+	rt, err := toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoiceNone)
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
@@ -45,19 +56,17 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	var session *copilot.Session
 	var sessionID string
 	var previous *string
-	if req.PreviousResponseID != "" {
-		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
-		if err != nil {
-			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
-		}
-		sessionID = record.SDKSessionID
+	if previousRecord != nil {
+		sessionID = previousRecord.SDKSessionID
 		previous = &req.PreviousResponseID
-		session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
-		if err != nil || session == nil {
-			if g.log != nil {
+		if !req.ForceSynthetic {
+			session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
+		}
+		if req.ForceSynthetic || err != nil || session == nil {
+			if g.log != nil && !req.ForceSynthetic {
 				g.log.Warn("falling back to synthetic Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
 			}
-			prompt = g.responseContinuationPrompt(record, prompt)
+			prompt = g.responseContinuationPrompt(*previousRecord, prompt)
 			sessionID = "resp_sdk_" + uuid.NewString()
 			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
 		}
@@ -89,6 +98,9 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	record := recordFromResponse(resp, sessionID, retained)
 	record.InputText = req.Input.Text
 	record.PendingBatchID = turn.PendingBatchID
+	record.InstalledToolCatalog = catalog.StoredDTO()
+	record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
+	record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
 	if err := g.store.SaveResponse(record); err != nil {
 		return nil, openai.Internal(err.Error())
 	}
@@ -126,6 +138,17 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		if err != nil {
 			return nil, openai.PreviousResponseNotFound(previousResponseID)
 		}
+		installBoundary, err := validateResponseToolOutputsForBatch(batch, activeOutputs)
+		if err != nil {
+			return nil, err
+		}
+		if installBoundary {
+			return g.streamDynamicToolSearchResponse(ctx, req, batch, activeOutputs, previousResponseID, previousRecord)
+		}
+		catalogDTO, err := responseCatalogDTOForRequest(req, &previousRecord)
+		if err != nil {
+			return nil, err
+		}
 		runner := g.runnerForBatch(batch.ID)
 		if runner == nil {
 			batch.Cancel(openai.InvalidRequest("pending function_call_output is not attached to a live streamable turn", "input"))
@@ -154,6 +177,8 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 				record.PendingBatchID = turn.PendingBatchID
+				record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
+				record.InstalledToolCatalog = catalogDTO
 				if err := g.store.SaveResponse(record); err != nil {
 					return openai.Internal(err.Error())
 				}
@@ -178,6 +203,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	var previous *string
 	var rt *toolproxy.RequestTools
 	var prompt resolvedPrompt
+	var catalog openai.ToolCatalog
 	retained := ""
 	if warmSession, warmTools, warmEvents, warmRetained, warmPrevious, ok := req.WarmSession.use(&req); ok {
 		session = warmSession
@@ -186,31 +212,42 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		retained = warmRetained
 		previous = warmPrevious
 		sessionID = session.SessionID
+		catalog, _ = openai.NewToolCatalog(req.Tools)
 	} else {
 		if req.WarmSession != nil && req.WarmSession.ResponseID() == req.PreviousResponseID {
 			req.WarmSession.Disconnect()
-		}
-		rt, err = toolproxy.NewResponseRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
-		if err != nil {
-			return nil, openai.InvalidRequest(err.Error(), "tools")
 		}
 		prompt, err = g.resolvePrompt(ctx, req.Model, req.Input, "input")
 		if err != nil {
 			return nil, err
 		}
+		var previousRecord *sessionstore.ResponseRecord
 		if req.PreviousResponseID != "" {
 			record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
 			if err != nil {
 				return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
 			}
-			sessionID = record.SDKSessionID
+			previousRecord = &record
+		}
+		catalog, err = responseCatalogForRequest(req, previousRecord)
+		if err != nil {
+			return nil, err
+		}
+		rt, err = toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoiceNone)
+		if err != nil {
+			return nil, openai.InvalidRequest(err.Error(), "tools")
+		}
+		if previousRecord != nil {
+			sessionID = previousRecord.SDKSessionID
 			previous = &req.PreviousResponseID
-			session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
-			if err != nil || session == nil {
-				if g.log != nil {
+			if !req.ForceSynthetic {
+				session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+			}
+			if req.ForceSynthetic || err != nil || session == nil {
+				if g.log != nil && !req.ForceSynthetic {
 					g.log.Warn("falling back to synthetic streaming Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
 				}
-				prompt = g.responseContinuationPrompt(record, prompt)
+				prompt = g.responseContinuationPrompt(*previousRecord, prompt)
 				sessionID = "resp_sdk_" + uuid.NewString()
 				session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 			}
@@ -247,6 +284,9 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record := recordFromResponse(resp, sessionID, retained)
 		record.InputText = req.Input.Text
 		record.PendingBatchID = turn.PendingBatchID
+		record.InstalledToolCatalog = catalog.StoredDTO()
+		record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
+		record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
 		if err := g.store.SaveResponse(record); err != nil {
 			return openai.Internal(err.Error())
 		}
