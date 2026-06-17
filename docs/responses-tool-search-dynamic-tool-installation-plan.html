@@ -1,0 +1,889 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Responses Tool Search Dynamic Tool Installation — Implementation Plan</title>
+  <style>
+    :root {
+      --ink: #17120d;
+      --muted: #665d50;
+      --paper: #f6eddc;
+      --paper-2: #fff9ec;
+      --paper-3: #ead9ba;
+      --line: #d5bd8e;
+      --line-strong: #9b753e;
+      --rust: #99401f;
+      --amber: #cf821c;
+      --green: #326c50;
+      --blue: #255978;
+      --violet: #5d4963;
+      --red: #a73628;
+      --mono: "Berkeley Mono", "SF Mono", Menlo, Consolas, monospace;
+      --serif: "Iowan Old Style", Charter, "Palatino Linotype", Georgia, serif;
+      --sans: Avenir, "Avenir Next", Optima, Candara, system-ui, sans-serif;
+      --shadow: 0 28px 80px rgba(49, 32, 11, 0.18);
+      --radius: 22px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(207, 130, 28, 0.18), transparent 30rem),
+        radial-gradient(circle at 88% 18%, rgba(37, 89, 120, 0.14), transparent 28rem),
+        linear-gradient(135deg, var(--paper), #efe0c5 60%, #e8d0aa);
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      font-family: var(--sans);
+      line-height: 1.58;
+      letter-spacing: 0.005em;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.24;
+      background-image:
+        linear-gradient(rgba(23, 18, 13, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 18, 13, 0.035) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 78%);
+    }
+
+    a { color: var(--blue); text-underline-offset: 0.18em; }
+    code, pre { font-family: var(--mono); }
+    code {
+      padding: 0.12rem 0.35rem;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      border-radius: 8px;
+      background: rgba(255, 249, 236, 0.78);
+      font-size: 0.92em;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 10px);
+      padding: clamp(28px, 5vw, 64px);
+      background:
+        linear-gradient(135deg, rgba(255, 249, 236, 0.98), rgba(238, 218, 181, 0.9)),
+        repeating-linear-gradient(-35deg, rgba(153, 64, 31, 0.08) 0 1px, transparent 1px 16px);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 390px;
+      height: 390px;
+      right: -120px;
+      top: -145px;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(207, 130, 28, 0.24), transparent 62%),
+        conic-gradient(from 45deg, rgba(153, 64, 31, 0.18), rgba(37, 89, 120, 0.13), rgba(50, 108, 80, 0.16), rgba(153, 64, 31, 0.18));
+      filter: blur(1px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 18px;
+      padding: 6px 12px;
+      border: 1px solid rgba(153, 64, 31, 0.25);
+      border-radius: 999px;
+      color: var(--rust);
+      background: rgba(255, 249, 236, 0.72);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.06;
+      letter-spacing: -0.032em;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: clamp(2.4rem, 6vw, 5.2rem);
+      text-wrap: balance;
+    }
+
+    h2 { font-size: clamp(1.85rem, 4vw, 2.8rem); }
+    h3 { font-size: clamp(1.28rem, 2.4vw, 1.75rem); }
+
+    .subtitle {
+      position: relative;
+      z-index: 1;
+      max-width: 870px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.05rem, 2vw, 1.3rem);
+    }
+
+    .meta-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .meta-card {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      border-radius: 17px;
+      background: rgba(255, 249, 236, 0.74);
+    }
+
+    .meta-card b {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 26px;
+      margin-top: 28px;
+      align-items: start;
+    }
+
+    nav {
+      position: sticky;
+      top: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: rgba(255, 249, 236, 0.78);
+      box-shadow: 0 18px 48px rgba(49, 32, 11, 0.10);
+    }
+
+    nav b {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--rust);
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    nav a {
+      display: block;
+      padding: 7px 0;
+      color: var(--ink);
+      text-decoration: none;
+      border-bottom: 1px dashed rgba(159, 119, 65, 0.28);
+      font-size: 0.95rem;
+    }
+    nav a:hover { color: var(--blue); }
+
+    main { min-width: 0; }
+
+    section, .panel {
+      margin-bottom: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: clamp(20px, 3.6vw, 34px);
+      background: rgba(255, 249, 236, 0.82);
+      box-shadow: 0 18px 50px rgba(49, 32, 11, 0.09);
+    }
+
+    section h2 + p, section h3 + p { margin-top: 14px; }
+    p { margin: 0.7rem 0; }
+    ul, ol { padding-left: 1.4rem; }
+    li { margin: 0.35rem 0; }
+
+    .callout {
+      margin: 18px 0;
+      padding: 16px 18px;
+      border-left: 5px solid var(--amber);
+      border-radius: 16px;
+      background: rgba(207, 130, 28, 0.11);
+    }
+    .callout.green { border-left-color: var(--green); background: rgba(50, 108, 80, 0.11); }
+    .callout.red { border-left-color: var(--red); background: rgba(167, 54, 40, 0.10); }
+    .callout.blue { border-left-color: var(--blue); background: rgba(37, 89, 120, 0.10); }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .card {
+      border: 1px solid rgba(159, 119, 65, 0.36);
+      border-radius: 18px;
+      padding: 18px;
+      background: rgba(246, 237, 220, 0.64);
+    }
+
+    .card h3 { margin-bottom: 10px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0;
+      overflow: hidden;
+      border-radius: 16px;
+      font-size: 0.95rem;
+    }
+
+    th, td {
+      padding: 12px 13px;
+      border: 1px solid rgba(159, 119, 65, 0.35);
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--rust);
+      background: rgba(234, 217, 186, 0.62);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      text-align: left;
+    }
+
+    pre {
+      margin: 16px 0;
+      padding: 16px;
+      border: 1px solid rgba(159, 119, 65, 0.36);
+      border-radius: 18px;
+      overflow-x: auto;
+      background: #1e1a15;
+      color: #f9ead0;
+      font-size: 0.88rem;
+      line-height: 1.55;
+    }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px 0;
+      border-top: 1px dashed rgba(159, 119, 65, 0.4);
+    }
+    .phase:first-of-type { border-top: 0; }
+
+    .phase-num {
+      font-family: var(--mono);
+      color: var(--rust);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.82rem;
+      padding-top: 0.25rem;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      margin: 0 6px 6px 0;
+      padding: 4px 9px;
+      border: 1px solid rgba(159, 119, 65, 0.42);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 249, 236, 0.72);
+      font-family: var(--mono);
+      font-size: 0.77rem;
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-align: center;
+      margin-top: 28px;
+    }
+
+    @media (max-width: 880px) {
+      .meta-grid, .cards { grid-template-columns: 1fr; }
+      .layout { grid-template-columns: 1fr; }
+      nav { position: static; }
+      .phase { grid-template-columns: 1fr; gap: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="eyebrow">Implementation plan · Responses API · Dynamic tool search</div>
+      <h1>Install <code>tool_search</code> results through an explicit SDK turn boundary</h1>
+      <p class="subtitle">
+        A plan for Option B: when Codex returns loadable tool specs from <code>tool_search_output.tools</code>, merge them into
+        the request-scoped Responses tool catalog and continue in a newly configured Copilot SDK turn, so deferred tools such as
+        <code>multi_agent_v1.spawn_agent</code> become actually callable without making <code>copilot-api</code> a proxy-hosted tool runtime.
+      </p>
+      <div class="meta-grid">
+        <div class="meta-card"><b>Status</b>Plan only</div>
+        <div class="meta-card"><b>Primary surface</b><code>Responses HTTP + WebSocket</code></div>
+        <div class="meta-card"><b>Core invariant</b>Client executes tools</div>
+        <div class="meta-card"><b>Target outcome</b>Deferred namespace tools become callable after search</div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="Plan navigation">
+        <b>Contents</b>
+        <a href="#summary">Summary</a>
+        <a href="#current-gap">Current gap</a>
+        <a href="#goals">Goals and non-goals</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#phases">Implementation phases</a>
+        <a href="#data-model">Data model</a>
+        <a href="#flows">HTTP and WebSocket flows</a>
+        <a href="#validation">Validation matrix</a>
+        <a href="#tests">Test plan</a>
+        <a href="#risks">Risks</a>
+        <a href="#acceptance">Acceptance criteria</a>
+      </nav>
+
+      <main>
+        <section id="summary">
+          <h2>Summary</h2>
+          <p>
+            Codex can currently call <code>tool_search</code> and return loadable tool specs, but those returned specs are only
+            validated and recorded as output text. They are not installed into the Copilot SDK session's active tool catalog.
+            The result is the exact failure mode observed with sub-agents: Codex discovers <code>multi_agent_v1.spawn_agent</code>,
+            <code>wait_agent</code>, <code>send_input</code>, <code>resume_agent</code>, and <code>close_agent</code>, but the model cannot call them
+            in the subsequent step because the SDK turn still has the old tool set.
+          </p>
+          <div class="callout blue">
+            <strong>Strategy:</strong> make <code>tool_search_output</code> a catalog boundary. When live search output contains valid
+            loadable tools, validate ownership and mergeability first, persist the client-supplied search output as continuation
+            transcript state, cut over from the old parked SDK turn without exposing stale-catalog results, and start exactly one
+            next model turn with a new <code>RequestTools</code> instance built from the merged catalog.
+          </div>
+          <p>
+            The proxy should expose these loaded tools to the model and return their calls to Codex CLI. Codex CLI remains the
+            executor. <code>copilot-api</code> must not run sub-agents, MCP actions, shell commands, or any other client-owned tool logic.
+          </p>
+        </section>
+
+        <section id="current-gap">
+          <h2>Current gap</h2>
+          <p>The current implementation has the necessary parsing and safety foundation, but not the dynamic catalog step:</p>
+          <ul>
+            <li><code>tool_search_call</code> is exposed as a client-owned tool.</li>
+            <li><code>tool_search_output</code> is parsed and its <code>tools</code> array is validated as loadable <code>function</code> or <code>namespace</code> specs.</li>
+            <li>The returned specs are not merged into <code>ResponseRequest.Tools</code> for the next SDK turn.</li>
+            <li>The live parked SDK handler receives only a string output; the session's <code>Tools</code> and <code>AvailableTools</code> remain unchanged.</li>
+            <li>Completing that parked handler would let the old runner continue planning with the stale catalog unless the implementation explicitly cuts it over.</li>
+            <li>Warm sessions and stored response records do not yet carry an installed-catalog delta produced by tool search.</li>
+          </ul>
+          <div class="callout red">
+            <strong>Observed effect:</strong> the model can talk about discovered tools from the search result, but when it tries to call
+            <code>multi_agent_v1.spawn_agent</code> the tool is absent from the SDK-configured callable set.
+          </div>
+        </section>
+
+        <section id="goals">
+          <h2>Goals and non-goals</h2>
+          <div class="cards">
+            <div class="card">
+              <h3>Goals</h3>
+              <ul>
+                <li>Install valid <code>tool_search_output.tools</code> for the model's next tool-planning step.</li>
+                <li>Support deferred namespace tools such as <code>multi_agent_v1.spawn_agent</code>.</li>
+                <li>Preserve canonical Responses names and namespaces in output items.</li>
+                <li>Persist enough catalog state for subsequent continuations, warm sessions, and restart fallback.</li>
+                <li>Keep the SDK in <code>ModeEmpty</code> with only request-scoped synthetic custom tools exposed.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Non-goals</h3>
+              <ul>
+                <li>Do not execute sub-agent tools inside <code>copilot-api</code>.</li>
+                <li>Do not enable Copilot SDK built-in MCP, shell, file, memory, skills, repository, or host-git tools.</li>
+                <li>Do not implement hosted OpenAI tools such as provider web search, file search, image generation, or code interpreter.</li>
+                <li>Do not mutate the active SDK tool list mid-turn unless the SDK gains a supported API for it.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="architecture">
+          <h2>Architecture</h2>
+          <p>The dynamic path becomes <strong>search → validate active outputs → merge catalog → persist transcript/catalog → cut over old runner → reconfigure SDK → continue</strong>.</p>
+          <pre><code>Turn N SDK catalog
+  └─ tool_search
+       ↓ model calls tool_search
+Responses output
+  └─ tool_search_call(call_search)
+       ↓ Codex executes search and returns tools
+Continuation input
+  └─ tool_search_output(call_search, tools: [namespace multi_agent_v1 ...])
+       ↓ proxy validates active outputs, status, ownership, allowlisted fields, and collisions
+Merged catalog
+  ├─ original function/custom/namespace tools
+  ├─ tool_search
+  └─ loaded namespace multi_agent_v1.*
+       ↓ old runner is aborted/drained; new synthetic or proven-safe resumed SDK turn is configured with merged catalog
+Turn N+1 model can call multi_agent_v1__spawn_agent
+       ↓ proxy rehydrates
+Responses output
+  └─ function_call(namespace: "multi_agent_v1", name: "spawn_agent")</code></pre>
+          <div class="callout green">
+            <strong>Important boundary:</strong> the new tools become callable only after a new SDK turn is configured with the merged catalog.
+            The implementation must never claim that returned tools were callable before <code>Tools</code> and <code>AvailableTools</code> actually include them.
+          </div>
+        </section>
+
+        <section id="phases">
+          <h2>Implementation phases</h2>
+
+          <div class="phase">
+            <div class="phase-num">Phase 1</div>
+            <div>
+              <h3>Extract one canonical tool-catalog module</h3>
+              <p>Create a single source of truth for normalization, merge, aliasing, collision checks, semantic keys, and persistence DTO conversion.</p>
+              <ul>
+                <li>Add a <code>ToolCatalog</code> type around canonical Responses tool specs, not raw SDK aliases.</li>
+                <li>Expose operations: <code>FromRequest</code>, <code>FromStored</code>, <code>MergeLoaded</code>, <code>Flatten</code>, <code>Key</code>, <code>StoredDTO</code>, and <code>WithoutRaw</code>.</li>
+                <li>Move duplicate SDK-safe alias and collision logic out of both <code>openai</code> and <code>toolproxy</code> into this module or a shared helper.</li>
+                <li>Keep provenance such as source search <code>call_id</code> outside the semantic catalog key unless intentionally comparing audit history.</li>
+                <li>Ensure catalog keys ignore raw JSON byte ordering/whitespace but preserve schema, format, strictness, defer-loading, namespace, execution, and descriptions.</li>
+                <li>Represent “catalog missing from migrated record” distinctly from “known empty catalog.”</li>
+              </ul>
+              <p><span class="tag">catalog</span><span class="tag">canonicalization</span><span class="tag">alias safety</span></p>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 2</div>
+            <div>
+              <h3>Define safe persisted DTOs and data limits</h3>
+              <p>Do not persist Go-internal structs with transient fields as the durable schema.</p>
+              <ul>
+                <li>Bump <code>sessionstore.ResponseRecordVersion</code>.</li>
+                <li>Add explicit JSON DTOs such as <code>StoredToolCatalog</code>, <code>StoredToolSpec</code>, <code>StoredLoadedToolEvent</code>, and <code>StoredToolOutput</code>.</li>
+                <li>Persist canonical Responses identities and meaningful schema/format fields; do not persist SDK aliases as source of truth.</li>
+                <li>Persist raw returned <code>tool_search_output.tools</code> only where needed for transcript fidelity; default catalog storage should be <code>WithoutRaw</code>.</li>
+                <li>Cap loaded tool count, per-tool schema bytes, total catalog bytes, nesting depth, and description length before storage or SDK exposure.</li>
+                <li>Log loaded-tool catalogs as counts and canonical names only; never log full schemas/descriptions except under existing explicit content logging and truncation policy.</li>
+                <li>Document that dynamic catalogs may contain sensitive tool descriptions/schemas and are retained locally until purge, including for <code>store:false</code> continuation/debug state.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 3</div>
+            <div>
+              <h3>Parse returned tools into typed, allowlisted continuation outputs</h3>
+              <p>Stop treating <code>tool_search_output.tools</code> as only raw JSON after validation.</p>
+              <ul>
+                <li>Extend the internal continuation output carrier with <code>LoadedTools []NormalizedTool</code>, <code>LoadedCatalogDelta</code>, or an equivalent typed field.</li>
+                <li>Allowlist fields for returned <code>function</code> and <code>namespace</code> specs; reject or strip unknown provider-hosted fields such as <code>server_url</code>, <code>server_label</code>, auth/provider configuration, hosted execution hints, and any hosted web/file/code/image tool shape disguised under a client-owned type.</li>
+                <li>Reject returned <code>custom</code>, nested <code>tool_search</code>, hosted tools, provider-hosted MCP declarations, nested namespaces, malformed schemas, sentinel collisions, duplicate identities, and SDK alias collisions.</li>
+                <li>Install loaded tools only when the matched pending call is a live <code>tool_search</code> call with <code>execution: "client"</code> and <code>status</code> absent, <code>success</code>, or <code>completed</code>.</li>
+                <li>If <code>status</code> is failed, incomplete, cancelled, or unknown, record the search output but do not install accompanying tools; reject if the client tries to combine a failed status with loaded tools unless a harmless no-install mode is explicitly chosen.</li>
+                <li>Track the source <code>call_id</code>, response id, raw tools payload, normalized loaded tools, and merge result for audit/replay.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 4</div>
+            <div>
+              <h3>Resolve the effective catalog for every continuation</h3>
+              <p>Continuations need a deterministic catalog source before any SDK turn starts.</p>
+              <ul>
+                <li>On initial requests, use the normalized request catalog and persist it as the installed catalog.</li>
+                <li>On <code>previous_response_id</code>, start from <code>previousRecord.InstalledToolCatalog</code> when present.</li>
+                <li>For migrated records without catalog state, use the current request tools only when explicitly supplied; otherwise mark loaded-tool replay unavailable and fail clearly if a dynamic loaded tool would be required.</li>
+                <li>Merge active <code>tool_search_output.LoadedTools</code> into the previous installed catalog before completing or cancelling the live batch.</li>
+                <li>Define repeated-search behavior: identical already-installed tools are idempotent, exact semantic duplicates are accepted as no-ops, conflicting definitions reject, and multiple search outputs in one batch merge in deterministic <code>call_id</code> order.</li>
+                <li>Handle empty <code>tools</code> arrays as successful searches with no catalog change.</li>
+                <li>Honor effective <code>tool_choice: "none"</code> on continuation by withholding all installed tools and exposing only the sentinel, even if a loaded catalog exists.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 5</div>
+            <div>
+              <h3>Create a shared continuation planner</h3>
+              <p>A single gateway-level planner should drive non-streaming HTTP, streaming HTTP, WebSocket, and warm-session paths.</p>
+              <ul>
+                <li>Take parsed outputs, request metadata, optional warm session, previous response record, and live batch lookup as input.</li>
+                <li>Return a decision: normal parked-handler continuation, dynamic tool-search cutover, cold synthetic fallback, warm response creation, or clear unsupported request error.</li>
+                <li>Derive <code>previous_response_id</code> from the live batch when omitted and assign the continuation response id exactly once.</li>
+                <li>Select active outputs from the current live batch while preserving stale stateless-history outputs for transcript reconstruction only.</li>
+                <li>Validate model, previous-response ownership, endpoint kind, call kind, optional custom output name, search status/execution, and exact output count before mutating any live batch.</li>
+                <li>Ensure non-streaming and streaming code paths save equivalent final response records and pending-batch ownership.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 6</div>
+            <div>
+              <h3>Implement explicit old-runner cutover</h3>
+              <p>The dynamic branch must not let the old stale-catalog runner produce a client-visible post-search turn.</p>
+              <ul>
+                <li>Validate active outputs and merge the loaded catalog before completing, cancelling, or removing the batch.</li>
+                <li>Persist the client-supplied <code>tool_search_output</code> in a structured continuation transcript/log, not as an API-visible assistant output item.</li>
+                <li>Default implementation: cancel/abort/disconnect the old runner, remove the broker batch, forget the pending runner, and drain/discard any late old-runner results.</li>
+                <li>Do not call the normal <code>CompleteToolOutputsWithSetup</code> path for loaded-tool search outputs unless a gated integration test proves the SDK can record the tool result and then be safely resumed with replaced tools before stale-catalog planning occurs.</li>
+                <li>Assert no duplicate final response, no remembered old runner, and no live batch leak after cutover.</li>
+              </ul>
+              <div class="callout red">
+                <strong>Default to synthetic cutover:</strong> until real SDK behavior proves that resume can replace tools safely after a delivered tool result,
+                build the post-search continuation from stored transcript state in a fresh/synthetic SDK turn configured with the merged catalog.
+              </div>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 7</div>
+            <div>
+              <h3>Build replay prompts for synthetic and resumed modes</h3>
+              <p><code>Continue.</code> is only sufficient when the same SDK session already contains the full prior conversation and accepted tool result.</p>
+              <ul>
+                <li>For synthetic cutover, include prior user/assistant transcript, the assistant <code>tool_search_call</code>, all submitted tool outputs in the active batch, returned tool specs or a concise availability note, and any mixed user suffix after outputs.</li>
+                <li>For proven-safe same-session resume, use a minimal continuation prompt only after the SDK has recorded the tool result and the new catalog is installed.</li>
+                <li>Keep API-visible <code>response.output</code> as assistant outputs only; store client continuation inputs/tool outputs in separate continuation transcript fields.</li>
+                <li>Include canonical names in transcript notes and avoid SDK aliases in prompts unless needed for debugging under explicit content logging.</li>
+                <li>Preserve namespaced function calls, custom inputs, tool-search arguments, tool-search status/execution, and raw returned tool summaries in cold fallback.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 8</div>
+            <div>
+              <h3>Implement transport support incrementally</h3>
+              <p>Sequence transports so each path has deterministic proof before broad rollout.</p>
+              <ul>
+                <li>First: non-streaming <code>POST /v1/responses</code> with fake SDK/provider capture proving merged <code>Tools</code> and <code>AvailableTools</code>.</li>
+                <li>Second: HTTP SSE streaming with identical planner decision and stable lifecycle events.</li>
+                <li>Third: WebSocket <code>response.create</code> using the same gateway-level planner and sequence-number semantics.</li>
+                <li>Fourth: <code>generate:false</code> warm sessions. Define whether <code>generate:false</code> with tool-output continuations warms the post-search turn through the merge planner or fails clearly until supported.</li>
+                <li>If any transport is not completed in the first implementation slice, add a temporary explicit feature gate/error rather than silently falling back to stale catalogs.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 9</div>
+            <div>
+              <h3>Harden safety boundaries</h3>
+              <p>Installing dynamically discovered tools must not weaken the proxy's no-execution invariant.</p>
+              <ul>
+                <li>Keep <code>ModeEmpty</code>.</li>
+                <li>Keep SDK runtime defaults with MCP servers, skills, shell/file/repository/memory operations, host-git operations, sub-agent streaming, and session store disabled.</li>
+                <li>Permissions approve only exact SDK names generated from the merged request-scoped catalog.</li>
+                <li>Reject any SDK tool request not present in the current request-scoped catalog.</li>
+                <li>Do not install hosted or proxy-executed tools returned by <code>tool_search_output.tools</code>.</li>
+                <li>Tests should prove <code>copilot-api</code> never spawns sub-agent processes, shell commands, MCP servers, file tools, or SDK built-ins as a result of dynamic installation.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="phase">
+            <div class="phase-num">Phase 10</div>
+            <div>
+              <h3>Codex sub-agent proof and documentation rollout</h3>
+              <p>Prove the observed failure mode is fixed without depending on nondeterministic model output.</p>
+              <ul>
+                <li>Use a fake SDK/provider that emits a loaded-tool call only when the merged catalog actually contains <code>multi_agent_v1__spawn_agent</code>.</li>
+                <li>Assert the proxy rehydrates that call as <code>namespace: "multi_agent_v1"</code>, <code>name: "spawn_agent"</code>.</li>
+                <li>Keep Codex CLI as a manual/non-gating smoke test: discover <code>multi_agent_v1</code>, call a harmless sub-agent operation, wait, and close.</li>
+                <li>Update README once automatic post-search installation lands; remove the current limitation that returned tools require a later request with an installed catalog.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="data-model">
+          <h2>Proposed data model</h2>
+          <pre><code>type ToolCatalog struct {
+    Tools []CanonicalToolSpec // no SDK aliases as source of truth
+}
+
+func (c ToolCatalog) MergeLoaded(sourceCallID string, loaded []CanonicalToolSpec) (ToolCatalog, []LoadedToolEvent, error)
+func (c ToolCatalog) Flatten(choiceNone bool) ([]toolproxy.ClientTool, []string, error)
+func (c ToolCatalog) Key() string
+func (c ToolCatalog) StoredDTO() StoredToolCatalog
+
+type StoredToolCatalog struct {
+    SchemaVersion int              `json:"schema_version"`
+    CatalogKey    string           `json:"catalog_key"`
+    Tools         []StoredToolSpec `json:"tools"`
+    KnownEmpty    bool             `json:"known_empty,omitempty"`
+}
+
+type StoredLoadedToolEvent struct {
+    SourceCallID string            `json:"source_call_id"`
+    ResponseID   string            `json:"response_id"`
+    Status       string            `json:"status,omitempty"`
+    Execution    string            `json:"execution,omitempty"`
+    RawTools     json.RawMessage   `json:"raw_tools,omitempty"`
+    LoadedTools  []StoredToolSpec  `json:"loaded_tools,omitempty"`
+}
+
+type StoredToolOutput struct {
+    Type       string          `json:"type"` // function_call_output/custom_tool_call_output/tool_search_output
+    CallID     string          `json:"call_id"`
+    Name       string          `json:"name,omitempty"`
+    Output     string          `json:"output,omitempty"`
+    Status     string          `json:"status,omitempty"`
+    Execution  string          `json:"execution,omitempty"`
+    Tools      json.RawMessage `json:"tools,omitempty"`
+}
+
+type ResponseRecord struct {
+    Version              int
+    ...
+    InstalledToolCatalog *StoredToolCatalog    `json:"installed_tool_catalog,omitempty"`
+    LoadedToolEvents     []StoredLoadedToolEvent `json:"loaded_tool_events,omitempty"`
+    ToolOutputs          []StoredToolOutput     `json:"tool_outputs,omitempty"`
+}</code></pre>
+          <p>
+            The exact names can change. The durable schema should have explicit JSON fields and versioning. Store canonical Responses
+            identities and semantic catalog keys; regenerate SDK aliases when configuring a session. Keep client continuation inputs
+            and tool outputs separate from API-visible assistant <code>response.output</code> items.
+          </p>
+        </section>
+
+        <section id="flows">
+          <h2>HTTP and WebSocket flows</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Flow</th>
+                <th>Required behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Initial HTTP response</td>
+                <td>Normalize request tools, store installed catalog and semantic key, expose <code>tool_search</code> and any non-deferred tools.</td>
+              </tr>
+              <tr>
+                <td>Live HTTP continuation with search output</td>
+                <td>Planner validates active outputs, resolves effective catalog, merges loaded tools, persists tool-output transcript and catalog, cuts over old runner, starts one synthetic/proven-safe resumed SDK turn with merged catalog, and returns the next model response.</td>
+              </tr>
+              <tr>
+                <td>Streaming continuation</td>
+                <td>Use the same planner decision as non-streaming; emit lifecycle events for the post-search turn only, with stable response id, sequence numbers, output indexes, and pending-batch ownership.</td>
+              </tr>
+              <tr>
+                <td>WebSocket continuation</td>
+                <td>Route <code>response.create</code> through the same gateway-level planner; preserve sequence numbers, one-active-response rules, and top-level error behavior.</td>
+              </tr>
+              <tr>
+                <td><code>generate:false</code> warm session</td>
+                <td>Either support tool-output continuations through the same merge planner and warm the post-search turn, or fail clearly until supported. Warm reuse compares semantic catalog keys.</td>
+              </tr>
+              <tr>
+                <td>Cold fallback / restart / TTL</td>
+                <td>Resolve catalog from the previous response record; reconstruct a transcript with prior assistant calls, client tool outputs, search results, loaded-tool availability, and mixed user suffix before configuring the synthetic turn.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="validation">
+          <h2>Validation matrix</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Input</th>
+                <th>Behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>tool_search_output.tools</code> contains loadable functions</td>
+                <td>Accept, merge into catalog, expose next turn when pending call ownership, status, and execution are valid.</td>
+              </tr>
+              <tr>
+                <td><code>tool_search_output.tools</code> contains namespace with function children</td>
+                <td>Accept, flatten children, preserve namespace on output calls.</td>
+              </tr>
+              <tr>
+                <td>Returned tool repeats an already-installed identical definition</td>
+                <td>Accept as idempotent no-op; provenance may record the repeated search event outside the semantic key.</td>
+              </tr>
+              <tr>
+                <td>Returned tool collides with existing identity or SDK alias but has different definition</td>
+                <td>Reject continuation before completing/cancelling the pending batch.</td>
+              </tr>
+              <tr>
+                <td>Multiple <code>tool_search_output</code> items in one live parallel batch</td>
+                <td>Validate all active outputs, then merge loaded sets in deterministic <code>call_id</code> order; reject the whole continuation on any conflict.</td>
+              </tr>
+              <tr>
+                <td>Empty <code>tool_search_output.tools</code></td>
+                <td>Record the search output; no catalog change.</td>
+              </tr>
+              <tr>
+                <td><code>tool_search_output.status</code> failed/incomplete/cancelled/unknown</td>
+                <td>Record output text; do not install tools. Reject if a failed status includes tools unless explicitly handled as no-install metadata.</td>
+              </tr>
+              <tr>
+                <td>Returned hosted/proxy-executed tool or provider-hosted fields</td>
+                <td>Reject returned spec. Do not silently install.</td>
+              </tr>
+              <tr>
+                <td>Returned <code>custom</code> or nested <code>tool_search</code></td>
+                <td>Reject for this iteration.</td>
+              </tr>
+              <tr>
+                <td>Returned nested namespace</td>
+                <td>Reject.</td>
+              </tr>
+              <tr>
+                <td>Continuation has <code>tool_choice: "none"</code></td>
+                <td>Preserve merged catalog state but expose no callable tools in that turn; use sentinel only.</td>
+              </tr>
+              <tr>
+                <td>SDK emits unconfigured tool request</td>
+                <td>Abort/fail turn as upstream protocol violation; do not rehydrate as client-visible call.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="tests">
+          <h2>Test plan</h2>
+          <div class="cards">
+            <div class="card">
+              <h3>Unit tests</h3>
+              <ul>
+                <li>Catalog merge with functions and namespaces, including idempotent duplicate loads.</li>
+                <li>Collision rejection against existing tools, loaded tools, aliases, and sentinel.</li>
+                <li>Canonical catalog keys ignore raw JSON order but preserve meaningful fields; provenance is excluded from semantic equality.</li>
+                <li>Returned hosted/custom/tool_search/nested namespace specs reject.</li>
+                <li>Returned spec field allowlist rejects provider-hosted or auth/server fields disguised in function/namespace specs.</li>
+                <li>Status handling: completed installs; failed/incomplete does not install.</li>
+                <li>Permission handler only approves merged request-scoped SDK aliases, and <code>tool_choice:none</code> exposes only sentinel.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Gateway tests</h3>
+              <ul>
+                <li>Live <code>tool_search_output</code> with loaded namespace starts exactly one post-search turn with merged <code>AvailableTools</code>.</li>
+                <li>The old runner is cancelled/drained, broker batch removed, and no stale-catalog result is emitted.</li>
+                <li>The next model tool request for <code>multi_agent_v1.spawn_agent</code> rehydrates as namespaced <code>function_call</code>.</li>
+                <li>Wrong output kind/name/status/execution and wrong previous response id fail before state mutation.</li>
+                <li>Cold fallback reconstructs search output, loaded-tool availability, and effective catalog from stored record state.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Streaming, WebSocket, and warm tests</h3>
+              <ul>
+                <li>Streaming continuation emits lifecycle events for the post-search turn only, with stable response id, sequence numbers, and output indexes.</li>
+                <li>WebSocket <code>response.create</code> supports search-output merge and loaded-tool calls through the same planner.</li>
+                <li><code>generate:false</code> warm-session behavior is either supported through merge planner or rejected clearly.</li>
+                <li>Warm session reuse/mismatch covers merged catalogs and semantic catalog keys.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Deterministic smoke and safety tests</h3>
+              <ul>
+                <li>Fake SDK/provider records exact merged SDK tool names and filters, and emits loaded-tool calls only when present.</li>
+                <li>Aliases do not appear in SSE/WS events, <code>ResponseRecord.Output</code>, fallback transcripts, or normal log summaries.</li>
+                <li>No SDK built-ins, sub-agent processes, shell/MCP/file tools, or host-git operations are enabled after dynamic install.</li>
+                <li>Manual Codex CLI smoke: discover <code>multi_agent_v1</code>, call a harmless sub-agent operation, wait, and close.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="risks">
+          <h2>Risks and mitigations</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Risk</th>
+                <th>Mitigation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Old SDK turn continues with stale catalog</td>
+                <td>Default to synthetic cutover: validate/merge/persist, abort or drain old runner, remove batch, then start one merged-catalog turn.</td>
+              </tr>
+              <tr>
+                <td>SDK resume does not actually replace tools</td>
+                <td>Do not rely on resume replacement until live integration proves it. Use synthetic continuation by default; gate resume optimization separately.</td>
+              </tr>
+              <tr>
+                <td>Catalog state is unrecoverable after restart</td>
+                <td>Persist versioned installed catalog, loaded-tool events, and structured tool outputs on response records.</td>
+              </tr>
+              <tr>
+                <td>Loaded tools accidentally become proxy-hosted</td>
+                <td>Keep handlers parked, permissions scoped, SDK built-ins disabled, and returned spec allowlists strict.</td>
+              </tr>
+              <tr>
+                <td>Dynamic catalogs leak sensitive schemas/descriptions</td>
+                <td>Persist minimized canonical specs, cap sizes, truncate logs, and document local retention/purge behavior.</td>
+              </tr>
+              <tr>
+                <td>Catalog state drifts between HTTP, WebSocket, and warm sessions</td>
+                <td>Use one shared planner and one shared catalog module for all transports.</td>
+              </tr>
+              <tr>
+                <td>Alias behavior changes model planning or leaks outward</td>
+                <td>Preserve canonical names in descriptions and rehydrate outward names. Add tests that aliases do not appear in API-visible outputs or normal logs.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="acceptance">
+          <h2>Acceptance criteria</h2>
+          <ol>
+            <li>A live <code>tool_search_output</code> containing a <code>multi_agent_v1</code> namespace causes the next SDK turn to include synthetic custom tools for its child functions.</li>
+            <li>The old stale-catalog runner is cancelled/drained/discarded and cannot emit a duplicate or stale final response.</li>
+            <li>The model can call a loaded tool such as <code>multi_agent_v1.spawn_agent</code> after the boundary.</li>
+            <li>The proxy emits <code>function_call</code> with <code>namespace: "multi_agent_v1"</code> and <code>name: "spawn_agent"</code>, not the SDK alias.</li>
+            <li>Codex CLI executes the loaded tool and continues with <code>function_call_output</code>; the proxy never executes it.</li>
+            <li>Returned loadable tools are persisted in canonical catalog state and survive subsequent continuations and restart fallback.</li>
+            <li>HTTP non-streaming, HTTP streaming, WebSocket, and warm-session paths either use the same catalog merge planner or explicitly fail behind a documented temporary gate.</li>
+            <li>Returned hosted/proxy-executed tools, provider-hosted fields, nested namespaces, returned custom tools, and returned nested tool-search tools are rejected.</li>
+            <li><code>tool_search_output.status</code> failed/incomplete does not install tools.</li>
+            <li><code>tool_choice: "none"</code> with an installed dynamic catalog exposes no callable tools in that turn.</li>
+            <li>No Copilot SDK built-in tools, proxy-hosted MCP servers, shell/file/repository tools, host-git operations, or sub-agent processes become available after dynamic tool installation.</li>
+            <li>Tests prove tools are not callable before the boundary and are callable after the merged catalog is installed.</li>
+            <li>README is updated to remove the old limitation that returned <code>tool_search_output.tools</code> require a later request with an installed catalog.</li>
+          </ol>
+        </section>
+      </main>
+    </div>
+
+    <p class="footer-note">Prepared for <code>copilot-api</code> · Responses dynamic <code>tool_search</code> loaded-tool installation · 2026-06-17</p>
+  </div>
+</body>
+</html>
