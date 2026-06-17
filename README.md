@@ -67,9 +67,74 @@ auth.
 | `parallel_tool_calls`           | Chat accepts omitted/`false`/`true`; Responses accepts omitted/`true` and rejects `false`. Internal pending batches capture and replay multiple tool calls per turn, so parallel tool calls round-trip on both surfaces. |
 | Streaming                       | SSE streams are OpenAI-shaped. Chat streams emit reasoning deltas first (when present), then forward SDK text deltas, buffer tool calls, emit complete tool-call deltas, and terminate with `[DONE]`. Responses SSE streams emit lifecycle events (each carrying a monotonically increasing `sequence_number`) such as `response.created`, `response.in_progress`, reasoning summary events (`response.reasoning_summary_part.added`/`.done` and `response.reasoning_summary_text.delta`/`.done`), `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, function-call argument events, and `response.completed` or `response.failed`, then `[DONE]`. Extended Responses tool items (`custom_tool_call`, namespaced `function_call`, and `tool_search_call`) are announced with `response.output_item.added` before `response.output_item.done`; granular custom/tool-search deltas are deferred. Responses WebSocket mode emits the same JSON events and terminates failures with a top-level `error` for client compatibility. |
 | Usage                           | SDK input/output/reasoning token events are mapped when available; unavailable fields are omitted. When Chat `stream_options.include_usage` is set, every streamed chunk carries `usage` (null until the terminal chunk) and a final empty-choices usage chunk is always emitted, using `usage: null` when upstream usage is unavailable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Multimodal                      | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; remote image fetches reject loopback, private, link-local, multicast, and otherwise non-public hosts to avoid SSRF; selected models must advertise vision support. Per-image size is capped at the model-advertised limit or 50 MiB, with a 100 MiB aggregate cap per request and a fallback limit of 20 images when model metadata omits a count. `function_call_output` content arrays are parsed: text parts become plain text, while image and file output arrays are rejected with specific unsupported-output errors. Image `file_id` inputs and binary/image tool outputs are deferred. JSON object/array tool outputs are serialized to JSON text.                                                                                                                                       |
+| Multimodal                      | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; remote image fetches reject loopback, private, link-local, multicast, and otherwise non-public hosts to avoid SSRF; selected models must advertise vision support. Per-image size is capped at the model-advertised limit or 50 MiB, with a 100 MiB aggregate cap per request and a fallback limit of 20 images when model metadata omits a count. `function_call_output` content arrays are parsed: text parts become plain text, while image and file output parts are summarized as redacted text markers. Image `file_id` inputs and binary/image/file tool-output artifacts are deferred. JSON object/array tool outputs are serialized to JSON text.                                                                                                                         |
 | Responses WebSocket differences | The OpenAI beta header is accepted but not required; instead of OpenAI's fixed 60-minute socket lifetime, connection limits are configurable via `COPILOT_WEBSOCKET_*` (an idle timeout, default 2m, that never closes a connection while a response is still generating; an optional hard max lifetime; and server ping keepalive); `response.create.response` nested payloads are accepted as an extension with nested fields taking precedence. `generate:false` creates a warmed Copilot SDK session and returns an empty completed response; tool-output continuations with `generate:false` fail clearly until warm post-search planning is supported. Warm sessions store and compare the normalized Responses tool catalog, including custom, namespace, unsafe-name aliases, and `tool_search`. Responses `store:false` is not API-visible but is still persisted locally for debugging and continuation, including dynamic tool catalogs until purge. |
 | Unsupported fields              | Strict compatibility defaults to disabled, so harmless unsupported client knobs such as `temperature` are ignored. For Codex CLI compatibility, Responses `include: ["reasoning.encrypted_content"]` and `text.verbosity` are accepted as no-ops in permissive mode. Unsupported semantics that would mislead clients still fail closed with OpenAI-shaped `invalid_request_error` responses.                                                                                                                                                                                                                                  |
+
+## Known Responses API limitations
+
+`copilot-api` aims for practical OpenAI Responses compatibility on top of the
+Copilot SDK; it is not a full OpenAI-hosted Responses runtime. Current known
+limitations and intentional differences are:
+
+- **Hosted/provider tools are unavailable.** The proxy does not implement hosted
+  `web_search`, `file_search`, `image_generation`, `code_interpreter`,
+  `computer_use`, or provider-hosted MCP execution. In permissive mode, hosted
+  tool declarations are ignored when that is safe for mixed client catalogs; in
+  strict mode they are rejected. Dynamically loaded `tool_search_output.tools`
+  may install only client-owned `function` and `namespace` specs.
+- **Client-owned tools are not executed by the proxy.** Function, custom,
+  namespace, and dynamically loaded tools are exposed to the model as
+  request-scoped synthetic SDK custom tools, then returned to the client as
+  Responses tool-call items. The client must execute them and continue with the
+  matching output item.
+- **`tool_choice` supports only model-default planning and no-tools mode.**
+  Omitted/`auto` and `none` are supported. Forced function choices and
+  `required` are rejected because the Copilot SDK/runtime does not expose
+  OpenAI-compatible enforcement.
+- **Responses cannot enforce `parallel_tool_calls:false`.** Responses accepts
+  omitted/`true` and rejects explicit `false`; the SDK Responses path exposes no
+  public control to force serial tool planning.
+- **Background Responses are unsupported.** Requests with `background` are
+  rejected; WebSocket `background` fields are treated as transport-only no-ops
+  when decoding `response.create` payloads.
+- **Some generation controls are not forwarded.** `max_output_tokens` and
+  `truncation` are rejected. `temperature`, `top_p`, `metadata`,
+  `service_tier`, and `user` are not forwarded by this single-user proxy;
+  permissive mode tolerates some of them as no-ops, while strict mode rejects
+  them.
+- **Structured text output is unsupported.** `text.verbosity` is accepted as a
+  no-op for Codex compatibility, but `text.format` / JSON-schema-style
+  structured output is rejected.
+- **`include` is narrow.** Only `include: ["reasoning.encrypted_content"]` is
+  accepted. Other include values are rejected.
+- **Reasoning object controls are partial.** Top-level `reasoning_effort` and
+  Responses `reasoning.effort` are supported. `reasoning.summary` is accepted
+  for compatibility, but the proxy does not implement the full set of OpenAI
+  reasoning controls or provider-specific summary behaviors.
+- **Warm `generate:false` cannot include tool-output continuations.**
+  `generate:false` can pre-warm a Responses session and return an empty
+  completed response, but requests that combine `generate:false` with
+  `function_call_output`, `custom_tool_call_output`, or `tool_search_output`
+  fail clearly.
+- **Image and file handling is partial.** User image inputs are supported only as
+  `http`, `https`, or base64 `data:` URLs and only for models that advertise
+  vision support. Image `file_id` inputs are unsupported. Tool-output image/file
+  content parts are converted to redacted text summaries; binary artifacts are
+  not retained or exposed as OpenAI files.
+- **Cold fallback is synthetic, not exact provider-state replay.** When a live
+  Copilot SDK session or pending tool batch is unavailable after restart or TTL
+  expiry, the proxy reconstructs a continuation prompt from stored response
+  records, tool outputs, and installed tool catalogs. This preserves practical
+  continuity but is not byte-for-byte equivalent to resuming an opaque OpenAI
+  provider session.
+- **Usage fields are best-effort.** SDK usage events are mapped when available;
+  unavailable token counts are omitted or emitted as `null` in streaming usage
+  chunks where the OpenAI wire shape requires it.
+- **Local debug retention differs from OpenAI.** `store:false` responses are not
+  API-visible, but local continuation/debug records can still be retained until
+  `copilot-api purge` is run, including prompts, tool outputs, and dynamic tool
+  catalog metadata.
 
 ## Configuration
 
