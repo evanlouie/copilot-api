@@ -16,8 +16,10 @@ const (
 	NoToolsSentinelName      = "__copilot_api_no_tools__"
 
 	MaxLoadedToolCount        = 128
+	MaxInstalledToolCount     = 512
 	MaxLoadedToolSchemaBytes  = 64 * 1024
 	MaxLoadedCatalogBytes     = 512 * 1024
+	MaxLoadedRawToolsBytes    = 512 * 1024
 	MaxLoadedDescriptionBytes = 8 * 1024
 )
 
@@ -77,7 +79,11 @@ type StoredToolOutput struct {
 
 func NewToolCatalog(tools []NormalizedTool) (ToolCatalog, error) {
 	cloned := cloneNormalizedTools(tools, false)
+	canonicalizeNamespaceChildren(cloned)
 	if err := validateNormalizedToolCatalog(cloned, "tools"); err != nil {
+		return ToolCatalog{}, err
+	}
+	if err := validateInstalledToolCount(cloned, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
 	return ToolCatalog{Tools: cloned}, nil
@@ -142,19 +148,34 @@ func (c ToolCatalog) MergeLoaded(sourceCallID string, loaded []NormalizedTool) (
 	if err := validateLoadedToolLimits(loaded); err != nil {
 		return ToolCatalog{}, err
 	}
+	return c.mergeTools(loaded, true, "tool_search_output.tools")
+}
+
+func (c ToolCatalog) MergeRequestTools(tools []NormalizedTool) (ToolCatalog, error) {
+	if len(tools) == 0 {
+		return c.WithoutRaw(), nil
+	}
+	return c.mergeTools(tools, false, "tools")
+}
+
+func (c ToolCatalog) mergeTools(tools []NormalizedTool, loadedOnly bool, param string) (ToolCatalog, error) {
 	merged := c.WithoutRaw()
-	incoming := cloneNormalizedTools(loaded, false)
-	if err := validateNormalizedToolCatalog(incoming, "tool_search_output.tools"); err != nil {
+	incoming := cloneNormalizedTools(tools, false)
+	canonicalizeNamespaceChildren(incoming)
+	if err := validateNormalizedToolCatalog(incoming, param); err != nil {
 		return ToolCatalog{}, err
 	}
 	for _, tool := range incoming {
 		var err error
-		merged.Tools, err = mergeLoadedTool(merged.Tools, tool)
+		merged.Tools, err = mergeCatalogTool(merged.Tools, tool, loadedOnly)
 		if err != nil {
 			return ToolCatalog{}, err
 		}
 	}
 	if err := validateNormalizedToolCatalog(merged.Tools, "tools"); err != nil {
+		return ToolCatalog{}, err
+	}
+	if err := validateInstalledToolCount(merged.Tools, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
 	if err := validateStoredCatalogSize(merged); err != nil {
@@ -201,36 +222,35 @@ func responseToolOutputType(kind ResponsesToolKind) string {
 	}
 }
 
-func mergeLoadedTool(existing []NormalizedTool, loaded NormalizedTool) ([]NormalizedTool, error) {
-	switch loaded.Kind {
-	case ToolKindNamespace:
-		return mergeLoadedNamespace(existing, loaded)
-	case ToolKindFunction:
-		identity := NormalizedToolIdentity(loaded)
-		for _, tool := range existing {
-			if tool.Kind == ToolKindNamespace {
-				for _, child := range tool.Children {
-					child.Namespace = tool.Name
-					if NormalizedToolIdentity(child) == identity {
-						if normalizedToolSemanticKey(child) == normalizedToolSemanticKey(loaded) {
-							return existing, nil
-						}
-						return nil, InvalidRequest("tool_search_output.tools conflicts with an installed Responses tool", "input")
-					}
-				}
-				continue
-			}
-			if NormalizedToolIdentity(tool) == identity {
-				if normalizedToolSemanticKey(tool) == normalizedToolSemanticKey(loaded) {
-					return existing, nil
-				}
-				return nil, InvalidRequest("tool_search_output.tools conflicts with an installed Responses tool", "input")
-			}
-		}
-		return append(existing, loaded), nil
-	default:
+func mergeCatalogTool(existing []NormalizedTool, incoming NormalizedTool, loadedOnly bool) ([]NormalizedTool, error) {
+	if loadedOnly && incoming.Kind != ToolKindFunction && incoming.Kind != ToolKindNamespace {
 		return nil, InvalidRequest("tool_search_output.tools may only install function or namespace tools", "input")
 	}
+	if incoming.Kind == ToolKindNamespace {
+		return mergeLoadedNamespace(existing, incoming)
+	}
+	identity := NormalizedToolIdentity(incoming)
+	for _, tool := range existing {
+		if tool.Kind == ToolKindNamespace {
+			for _, child := range tool.Children {
+				child.Namespace = tool.Name
+				if NormalizedToolIdentity(child) == identity {
+					if normalizedToolSemanticKey(child) == normalizedToolSemanticKey(incoming) {
+						return existing, nil
+					}
+					return nil, InvalidRequest("Responses tool conflicts with an installed tool", "input")
+				}
+			}
+			continue
+		}
+		if NormalizedToolIdentity(tool) == identity {
+			if normalizedToolSemanticKey(tool) == normalizedToolSemanticKey(incoming) {
+				return existing, nil
+			}
+			return nil, InvalidRequest("Responses tool conflicts with an installed tool", "input")
+		}
+	}
+	return append(existing, incoming), nil
 }
 
 func mergeLoadedNamespace(existing []NormalizedTool, loaded NormalizedTool) ([]NormalizedTool, error) {
@@ -379,6 +399,17 @@ func storedToolSpecFromNormalized(tool NormalizedTool) StoredToolSpec {
 	return spec
 }
 
+func canonicalizeNamespaceChildren(tools []NormalizedTool) {
+	for i := range tools {
+		if tools[i].Kind != ToolKindNamespace {
+			continue
+		}
+		for j := range tools[i].Children {
+			tools[i].Children[j].Namespace = tools[i].Name
+		}
+	}
+}
+
 func cloneNormalizedTools(tools []NormalizedTool, keepRaw bool) []NormalizedTool {
 	if len(tools) == 0 {
 		return nil
@@ -502,6 +533,13 @@ func validateLoadedToolLimits(tools []NormalizedTool) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validateInstalledToolCount(tools []NormalizedTool, param string) error {
+	if flattenedToolCount(tools) > MaxInstalledToolCount {
+		return InvalidRequest("installed tool catalog contains too many tools", param)
 	}
 	return nil
 }

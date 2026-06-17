@@ -3,6 +3,7 @@ package copilotgw
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
@@ -326,16 +327,7 @@ func (g *RealGateway) responseContinuationPrompt(previous sessionstore.ResponseR
 	var b strings.Builder
 	b.WriteString("Conversation so far from previous_response_id context:\n\n")
 	for _, record := range records {
-		if text := strings.TrimSpace(record.InputText); text != "" {
-			b.WriteString("User:\n")
-			b.WriteString(text)
-			b.WriteString("\n\n")
-		}
-		if text := strings.TrimSpace(record.OutputText); text != "" {
-			b.WriteString("Assistant:\n")
-			b.WriteString(text)
-			b.WriteString("\n\n")
-		}
+		appendResponseRecordTranscript(&b, record)
 	}
 	if text := strings.TrimSpace(current.Text); text != "" {
 		b.WriteString("Current user request:\n")
@@ -346,6 +338,105 @@ func (g *RealGateway) responseContinuationPrompt(previous sessionstore.ResponseR
 	current.Text = b.String()
 	return current
 }
+
+func appendResponseRecordTranscript(b *strings.Builder, record sessionstore.ResponseRecord) {
+	if text := strings.TrimSpace(record.InputText); text != "" {
+		b.WriteString("User:\n")
+		b.WriteString(text)
+		b.WriteString("\n\n")
+	}
+	if text := strings.TrimSpace(record.OutputText); text != "" {
+		b.WriteString("Assistant:\n")
+		b.WriteString(text)
+		b.WriteString("\n\n")
+	}
+	for _, item := range record.Output {
+		switch item.Type {
+		case "function_call", "custom_tool_call", "tool_search_call":
+			b.WriteString("Assistant call: ")
+			b.WriteString(responseOutputItemPromptSummary(item))
+			if item.CallID != "" {
+				b.WriteString(" call_id=")
+				b.WriteString(item.CallID)
+			}
+			b.WriteString("\n\n")
+		}
+	}
+	for _, output := range record.ToolOutputs {
+		b.WriteString(storedToolOutputPrompt(output))
+		b.WriteString("\n\n")
+	}
+	for _, event := range record.LoadedToolEvents {
+		if len(event.LoadedTools) == 0 {
+			continue
+		}
+		b.WriteString("Loaded tools from tool search ")
+		b.WriteString(event.SourceCallID)
+		b.WriteString(": ")
+		b.WriteString(storedToolNames(event.LoadedTools))
+		b.WriteString("\n\n")
+	}
+}
+
+func storedToolOutputPrompt(output openai.StoredToolOutput) string {
+	var b strings.Builder
+	switch output.Type {
+	case "custom_tool_call_output":
+		b.WriteString("Custom tool output ")
+	case "tool_search_output":
+		b.WriteString("Tool search output ")
+	default:
+		b.WriteString("Function output ")
+	}
+	b.WriteString(output.CallID)
+	if output.Name != "" {
+		b.WriteString(" for ")
+		b.WriteString(output.Name)
+	}
+	if output.Execution != "" || output.Status != "" {
+		parts := []string{}
+		if output.Execution != "" {
+			parts = append(parts, "execution="+output.Execution)
+		}
+		if output.Status != "" {
+			parts = append(parts, "status="+output.Status)
+		}
+		b.WriteString(" (")
+		b.WriteString(strings.Join(parts, ", "))
+		b.WriteString(")")
+	}
+	b.WriteString(":\n")
+	if len(output.Tools) > 0 {
+		b.WriteString("Returned tools: ")
+		b.WriteString(string(output.Tools))
+		b.WriteString("\n")
+	}
+	b.WriteString(output.Output)
+	return b.String()
+}
+
+func storedToolNames(tools []openai.StoredToolSpec) string {
+	parts := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Type == openai.ToolKindNamespace {
+			for _, child := range tool.Tools {
+				parts = append(parts, tool.Name+"."+child.Name)
+			}
+			if len(tool.Tools) == 0 {
+				parts = append(parts, tool.Name)
+			}
+			continue
+		}
+		name := tool.Name
+		if tool.Namespace != "" {
+			name = tool.Namespace + "." + tool.Name
+		}
+		parts = append(parts, name)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
 func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Response, error) {
 	record, err := g.store.LoadResponse(id)
 	if err != nil {

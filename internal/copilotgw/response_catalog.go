@@ -15,9 +15,15 @@ type responseCatalogMergeResult struct {
 }
 
 func responseCatalogForRequest(req ResponseRequest, previous *sessionstore.ResponseRecord) (openai.ToolCatalog, error) {
-	if previous != nil && !req.ToolsSet && previous.InstalledToolCatalog != nil {
+	if previous != nil && previous.InstalledToolCatalog != nil {
 		catalog, _, err := openai.ToolCatalogFromStored(previous.InstalledToolCatalog)
-		return catalog, err
+		if err != nil {
+			return openai.ToolCatalog{}, err
+		}
+		if req.ToolsSet {
+			return catalog.MergeRequestTools(req.Tools)
+		}
+		return catalog, nil
 	}
 	return openai.NewToolCatalog(req.Tools)
 }
@@ -73,6 +79,79 @@ func responseOutputsContainLoadedTools(outputs map[string]openai.ResponseToolOut
 		}
 	}
 	return false
+}
+
+func activeResponseToolOutputsFromRecord(record sessionstore.ResponseRecord, outputs map[string]openai.ResponseToolOutput) (map[string]openai.ResponseToolOutput, error) {
+	expected := map[string]openai.ResponseOutputItem{}
+	for _, item := range record.Output {
+		if item.CallID == "" {
+			continue
+		}
+		switch item.Type {
+		case "function_call", "custom_tool_call", "tool_search_call":
+			expected[item.CallID] = item
+		}
+	}
+	if len(expected) == 0 {
+		for _, output := range outputs {
+			if len(output.LoadedTools) > 0 {
+				return nil, openai.InvalidRequest("tool output call_id does not belong to previous_response_id", "input")
+			}
+		}
+		return nil, openai.InvalidRequest("previous response has no pending tool calls", "previous_response_id")
+	}
+	active := make(map[string]openai.ResponseToolOutput, len(expected))
+	for id, output := range outputs {
+		previous, ok := expected[id]
+		if !ok {
+			if len(output.LoadedTools) > 0 {
+				return nil, openai.InvalidRequest("tool output call_id does not belong to previous_response_id", "input")
+			}
+			continue
+		}
+		if err := validateResponseToolOutputForItem(previous, output); err != nil {
+			return nil, err
+		}
+		active[id] = output
+	}
+	for id := range expected {
+		if _, ok := active[id]; !ok {
+			return nil, openai.InvalidRequest("expected exactly one output for each pending tool call", "input")
+		}
+	}
+	return active, nil
+}
+
+func validateResponseToolOutputForItem(previous openai.ResponseOutputItem, output openai.ResponseToolOutput) error {
+	expectedKind := openai.ToolKindFunction
+	switch previous.Type {
+	case "custom_tool_call":
+		expectedKind = openai.ToolKindCustom
+	case "tool_search_call":
+		expectedKind = openai.ToolKindToolSearch
+	}
+	if output.Kind != "" && output.Kind != expectedKind {
+		return openai.InvalidRequest(string(output.Kind)+" output does not match previous "+string(expectedKind)+" call", "input")
+	}
+	if expectedKind == openai.ToolKindCustom && output.Name != "" && previous.Name != "" && output.Name != previous.Name {
+		return openai.InvalidRequest("custom_tool_call_output name does not match previous custom tool", "input")
+	}
+	if expectedKind == openai.ToolKindToolSearch {
+		if previous.Execution != "" && previous.Execution != "client" {
+			return openai.InvalidRequest("previous tool_search_call execution is not client", "input")
+		}
+		if output.Execution != "" && output.Execution != "client" {
+			return openai.InvalidRequest("tool_search_output execution must be client", "input")
+		}
+		if !toolSearchOutputStatusInstallable(output.Status) && len(output.LoadedTools) > 0 {
+			return openai.InvalidRequest("tool_search_output with failed, incomplete, cancelled, or unknown status cannot include tools", "input")
+		}
+		return nil
+	}
+	if len(output.LoadedTools) > 0 {
+		return openai.InvalidRequest("only tool_search_output can include loadable tools", "input")
+	}
+	return nil
 }
 
 func validateResponseToolOutputsForBatch(batch *toolproxy.Batch, outputs map[string]openai.ResponseToolOutput) (bool, error) {

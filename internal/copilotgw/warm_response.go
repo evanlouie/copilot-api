@@ -189,6 +189,6 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		_ = session.Disconnect()
 		return nil, openai.Internal(err.Error())
 	}
-	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: append([]openai.NormalizedTool{}, req.Tools...), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
 	return &WarmResponseResult{Response: resp, WarmSession: warm}, nil
 }

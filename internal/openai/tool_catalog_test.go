@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -47,6 +48,36 @@ func TestToolCatalogMergeLoadedRejectsConflictingDefinition(t *testing.T) {
 	}
 	if _, err := base.MergeLoaded("call_search", []NormalizedTool{{Kind: ToolKindFunction, Name: "lookup", Description: "old"}}); err != nil {
 		t.Fatalf("identical duplicate should be idempotent: %v", err)
+	}
+}
+
+func TestToolCatalogMergeLoadedRejectsCumulativeToolCountLimit(t *testing.T) {
+	baseTools := make([]NormalizedTool, 0, MaxInstalledToolCount)
+	for i := 0; i < MaxInstalledToolCount; i++ {
+		baseTools = append(baseTools, NormalizedTool{Kind: ToolKindFunction, Name: fmt.Sprintf("base_%03d", i)})
+	}
+	base, err := NewToolCatalog(baseTools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = base.MergeLoaded("call_search", []NormalizedTool{{Kind: ToolKindFunction, Name: "one_more"}})
+	if err == nil || !strings.Contains(err.Error(), "too many tools") {
+		t.Fatalf("error = %v, want cumulative tool count rejection", err)
+	}
+}
+
+func TestNormalizeToolSearchOutputToolsRejectsRawPayloadTooLarge(t *testing.T) {
+	desc := strings.Repeat("x", MaxLoadedRawToolsBytes)
+	raw, _ := json.Marshal([]map[string]any{{"type": "function", "name": "lookup", "description": desc}})
+	if _, err := NormalizeToolSearchOutputTools(raw, "input.0.tools"); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("error = %v, want raw payload size rejection", err)
+	}
+}
+
+func TestNormalizeToolSearchOutputToolsRejectsMixedFunctionShapes(t *testing.T) {
+	raw := json.RawMessage(`[{"type":"function","name":"ignored_but_large","function":{"name":"lookup"}}]`)
+	if _, err := NormalizeToolSearchOutputTools(raw, "input.0.tools"); err == nil || !strings.Contains(err.Error(), "cannot mix") {
+		t.Fatalf("error = %v, want mixed function shape rejection", err)
 	}
 }
 

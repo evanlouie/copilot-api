@@ -435,7 +435,11 @@ func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseReq
 	if err != nil {
 		return ResponseRequest{}, openai.PreviousResponseNotFound(req.PreviousResponseID)
 	}
-	outputs, err := toolOutputsWithContinuationInput(req.ToolOutputs, req.Input)
+	activeOutputs, err := activeResponseToolOutputsFromRecord(previousRecord, req.ToolOutputs)
+	if err != nil {
+		return ResponseRequest{}, err
+	}
+	outputs, err := toolOutputsWithContinuationInput(activeOutputs, req.Input)
 	if err != nil {
 		return ResponseRequest{}, err
 	}

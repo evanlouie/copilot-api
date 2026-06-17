@@ -267,6 +267,35 @@ func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalo
 	}
 }
 
+func TestResponseContinuationPromptIncludesStructuredToolState(t *testing.T) {
+	g := &RealGateway{}
+	previous := sessionstore.ResponseRecord{
+		ID:        "resp_prev",
+		InputText: "find tools",
+		Output: []openai.ResponseOutputItem{
+			{Type: "tool_search_call", CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"agents"}`)},
+		},
+		ToolOutputs: []openai.StoredToolOutput{
+			{Type: "tool_search_output", CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`)},
+		},
+		LoadedToolEvents: []openai.StoredLoadedToolEvent{
+			{SourceCallID: "call_search", LoadedTools: []openai.StoredToolSpec{{Type: openai.ToolKindNamespace, Name: "multi_agent_v1", Tools: []openai.StoredToolSpec{{Type: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
+		},
+	}
+	prompt := g.responseContinuationPrompt(previous, resolvedPrompt{Text: "continue"})
+	for _, want := range []string{
+		"Assistant call: tool_search_call arguments={\"query\":\"agents\"} call_id=call_search",
+		"Tool search output call_search (execution=client, status=completed):",
+		"Returned tools: [{\"type\":\"namespace\",\"name\":\"multi_agent_v1\",\"tools\":[{\"name\":\"spawn_agent\"}]}]",
+		"Loaded tools from tool search call_search: multi_agent_v1.spawn_agent",
+		"Current user request:\ncontinue",
+	} {
+		if !strings.Contains(prompt.Text, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt.Text)
+		}
+	}
+}
+
 func TestResponseFallbackWithoutPreviousResponseRejectsUnavailableTranscript(t *testing.T) {
 	g := &RealGateway{}
 	_, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{

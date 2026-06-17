@@ -36,6 +36,25 @@ func TestWarmResponseSessionUseInheritsWarmRequestState(t *testing.T) {
 	}
 }
 
+func TestWarmResponseSessionUseInheritsResolvedDynamicCatalog(t *testing.T) {
+	warm := &WarmResponseSession{
+		responseID: "resp_warm",
+		model:      "gpt-5",
+		tools: []openai.NormalizedTool{
+			{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
+			{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}},
+		},
+	}
+	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm"}
+	_, _, _, _, _, ok := warm.use(&req)
+	if !ok {
+		t.Fatal("warm session was not used")
+	}
+	if len(req.Tools) != 2 || req.Tools[1].Kind != openai.ToolKindNamespace || req.Tools[1].Children[0].Name != "spawn_agent" {
+		t.Fatalf("request tools = %#v, want resolved dynamic catalog", req.Tools)
+	}
+}
+
 func TestWarmResponseSessionUseAcceptsSemanticEquivalentToolCatalog(t *testing.T) {
 	warm := &WarmResponseSession{
 		responseID: "resp_warm",

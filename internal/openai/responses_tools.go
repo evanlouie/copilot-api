@@ -79,6 +79,9 @@ func NormalizeToolSearchOutputTools(raw json.RawMessage, param string) ([]Normal
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
+	if len(raw) > MaxLoadedRawToolsBytes {
+		return nil, InvalidRequest("tool_search_output.tools is too large", param)
+	}
 	var tools []Tool
 	if err := json.Unmarshal(raw, &tools); err != nil {
 		return nil, InvalidRequest("tool_search_output.tools must be an array of tool specs", param)
@@ -262,6 +265,11 @@ func validateLoadableFunctionToolFields(raw json.RawMessage, param string) error
 		return err
 	}
 	if nested, ok := fields["function"]; ok && len(nested) > 0 && string(nested) != "null" {
+		for _, duplicate := range []string{"name", "description", "parameters", "strict"} {
+			if _, exists := fields[duplicate]; exists {
+				return InvalidRequest("function tools in tool_search_output.tools cannot mix top-level and nested function fields", param+"."+duplicate)
+			}
+		}
 		nestedFields, err := rawObjectFields(nested)
 		if err != nil {
 			return InvalidRequest("function tool function field must be an object", param+".function")

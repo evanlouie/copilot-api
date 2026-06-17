@@ -96,6 +96,46 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func TestResponseCatalogForContinuationMergesRequestToolsIntoStoredCatalog(t *testing.T) {
+	base, err := openai.NewToolCatalog([]openai.NormalizedTool{
+		{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
+		{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := sessionstore.ResponseRecord{ID: "resp_prev", InstalledToolCatalog: base.StoredDTO()}
+	catalog, err := responseCatalogForRequest(ResponseRequest{ToolsSet: true, Tools: []openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}}, &previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := catalog.Flatten()
+	if len(flat) != 2 || flat[1].Kind != openai.ToolKindNamespace || flat[1].Children[0].Name != "spawn_agent" {
+		t.Fatalf("catalog after request tools = %#v, want stored dynamic namespace preserved", flat)
+	}
+}
+
+func TestActiveResponseToolOutputsFromRecordRejectsSpoofedLoadedToolCallID(t *testing.T) {
+	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "tool_search_call", CallID: "call_real", Execution: "client"}}}
+	_, err := activeResponseToolOutputsFromRecord(record, map[string]openai.ResponseToolOutput{
+		"call_real":  {Kind: openai.ToolKindToolSearch, CallID: "call_real", Execution: "client", Output: "none"},
+		"call_spoof": {Kind: openai.ToolKindToolSearch, CallID: "call_spoof", Execution: "client", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "evil"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not belong to previous_response_id") {
+		t.Fatalf("error = %v, want spoofed call_id rejection", err)
+	}
+}
+
+func TestActiveResponseToolOutputsFromRecordRejectsLoadedToolsForFunctionCall(t *testing.T) {
+	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "function_call", CallID: "call_lookup", Name: "lookup"}}}
+	_, err := activeResponseToolOutputsFromRecord(record, map[string]openai.ResponseToolOutput{
+		"call_lookup": {Kind: openai.ToolKindFunction, CallID: "call_lookup", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "evil"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "only tool_search_output") {
+		t.Fatalf("error = %v, want non-search loaded tool rejection", err)
+	}
+}
+
 func TestMergeLoadedToolSearchOutputsRequiresCatalogForMigratedRecords(t *testing.T) {
 	outputs := map[string]openai.ResponseToolOutput{
 		"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "loaded_tool"}}},
