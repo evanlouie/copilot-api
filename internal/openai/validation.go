@@ -271,7 +271,8 @@ func ValidateTools(tools []Tool) error {
 }
 
 func ValidateResponsesTools(tools []Tool, strict bool) error {
-	return validateTools(tools, !strict)
+	_, err := NormalizeResponsesToolsWithMode(tools, strict)
+	return err
 }
 
 func validateTools(tools []Tool, allowUnsupported bool) error {

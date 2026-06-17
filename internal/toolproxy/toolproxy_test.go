@@ -75,11 +75,11 @@ func TestCaptureRequestsUsesPublicToolName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, calls := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "get-weather", Arguments: map[string]any{"city": "Paris"}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	batch, calls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "get-weather", Arguments: map[string]any{"city": "Paris"}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if len(calls) != 1 {
 		t.Fatalf("calls = %#v, want one", calls)
 	}
-	if got := calls[0].Function.Name; got != "get-weather" {
+	if got := calls[0].ResponseName; got != "get-weather" {
 		t.Fatalf("tool call name = %q, want public name", got)
 	}
 	if got := batch.Calls["call_1"].PublicName; got != "get-weather" {
@@ -123,7 +123,7 @@ func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if err := batch.Complete(map[string]string{"call_1": "ok"}); err != nil {
 		t.Fatal(err)
 	}
@@ -155,11 +155,11 @@ func TestFindByAnyCallIDsIgnoresStaleHistoryIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldBatch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	oldBatch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if err := oldBatch.Complete(map[string]string{"call_old": "old"}); err != nil {
 		t.Fatal(err)
 	}
-	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_current", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_current", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_current", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_current", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	found, matched, err := broker.FindByAnyCallIDs([]string{"call_old", "call_missing", "call_current"})
 	if err != nil {
 		t.Fatal(err)
@@ -178,11 +178,11 @@ func TestFindByAnyCallIDsReturnsAllMatchedLiveIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldBatch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	oldBatch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_old", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_old", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if err := oldBatch.Complete(map[string]string{"call_old": "old"}); err != nil {
 		t.Fatal(err)
 	}
-	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{
+	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{
 		{ToolCallID: "call_current_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}},
 		{ToolCallID: "call_current_2", Name: rt.Tools()[0].Name, Arguments: map[string]any{}},
 	}, "resp_current", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
@@ -204,12 +204,12 @@ func TestFindByAnyCallIDsRejectsMultipleLiveBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	_, _, _ = rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	rt2, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = rt2.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_2", Name: rt2.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_2", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	_, _, _ = rt2.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_2", Name: rt2.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_2", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	_, _, err = broker.FindByAnyCallIDs([]string{"call_1", "call_2"})
 	if err == nil || !strings.Contains(err.Error(), "different pending batches") {
 		t.Fatalf("error = %v, want different pending batches", err)
@@ -222,7 +222,7 @@ func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _ := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if batch.Model != "gpt-test" {
 		t.Fatalf("batch model = %q", batch.Model)
 	}

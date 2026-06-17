@@ -2,6 +2,7 @@ package copilotgw
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -249,11 +250,17 @@ func (r *turnRunner) loop(g *RealGateway) {
 			r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
 			if len(d.ToolRequests) > 0 {
 				text = d.Content
-				batch, calls := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
+				batch, calls, err := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
+				if err != nil {
+					r.emitError(openai.Upstream(err.Error()))
+					r.abort()
+					return
+				}
 				r.setBatch(batch)
 				res := r.result(text, reason.resolve(), usage, "tool_calls")
 				reason.applyTo(res)
-				res.ToolCalls = calls
+				res.ResponseToolCalls = calls
+				res.ToolCalls = chatToolCallsFromCaptured(calls)
 				res.PendingBatchID = batch.ID
 				r.emitResult(res)
 				// The runner loop is reused across the client-owned tool-call
@@ -744,6 +751,18 @@ func usageFromSDK(d *copilot.AssistantUsageData) *openai.Usage {
 	return usage
 }
 
+func chatToolCallsFromCaptured(calls []toolproxy.CapturedCall) []openai.ChatToolCall {
+	out := make([]openai.ChatToolCall, 0, len(calls))
+	for _, call := range calls {
+		name := call.ResponseName
+		if name == "" {
+			name = call.SDKName
+		}
+		out = append(out, openai.ChatToolCall{ID: call.CallID, Type: "function", Function: openai.ToolCallFunction{Name: name, Arguments: string(call.ArgumentsJSON)}})
+	}
+	return out
+}
+
 func responseFromTurn(id, model, instructions string, previous *string, store bool, turn *TurnResult, suppressReasoning bool) *openai.Response {
 	if id == "" {
 		id = openai.NewID("resp_")
@@ -754,14 +773,55 @@ func responseFromTurn(id, model, instructions string, previous *string, store bo
 			resp.Output = append(resp.Output, item)
 		}
 	}
-	if turn.Text != "" || len(turn.ToolCalls) == 0 {
+	calls := turn.ResponseToolCalls
+	if len(calls) == 0 && len(turn.ToolCalls) > 0 {
+		calls = capturedFromChatToolCalls(turn.ToolCalls)
+	}
+	if turn.Text != "" || len(calls) == 0 {
 		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: openai.NewID("msg_"), Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}})
 	}
-	for _, tc := range turn.ToolCalls {
-		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: "fc_" + tc.ID, Type: "function_call", Status: "completed", CallID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+	for _, tc := range calls {
+		resp.Output = append(resp.Output, responseOutputItemFromCaptured(tc))
 	}
 	return resp
 }
+
+func capturedFromChatToolCalls(calls []openai.ChatToolCall) []toolproxy.CapturedCall {
+	out := make([]toolproxy.CapturedCall, 0, len(calls))
+	for _, tc := range calls {
+		out = append(out, toolproxy.CapturedCall{Kind: openai.ToolKindFunction, ResponseName: tc.Function.Name, CallID: tc.ID, ArgumentsJSON: jsonRaw(tc.Function.Arguments)})
+	}
+	return out
+}
+
+func responseOutputItemFromCaptured(tc toolproxy.CapturedCall) openai.ResponseOutputItem {
+	kind := tc.Kind
+	if kind == "" {
+		kind = openai.ToolKindFunction
+	}
+	name := tc.ResponseName
+	if name == "" {
+		name = tc.SDKName
+	}
+	switch kind {
+	case openai.ToolKindCustom:
+		return openai.ResponseOutputItem{ID: "ctc_" + tc.CallID, Type: "custom_tool_call", Status: "completed", CallID: tc.CallID, Name: name, Input: tc.Input}
+	case openai.ToolKindToolSearch:
+		execution := tc.Execution
+		if execution == "" {
+			execution = "client"
+		}
+		args := tc.ArgumentsJSON
+		if len(args) == 0 {
+			args = jsonRaw(`{}`)
+		}
+		return openai.ResponseOutputItem{ID: "tsc_" + tc.CallID, Type: "tool_search_call", Status: "completed", CallID: tc.CallID, Execution: execution, ArgumentsJSON: args}
+	default:
+		return openai.ResponseOutputItem{ID: "fc_" + tc.CallID, Type: "function_call", Status: "completed", CallID: tc.CallID, Namespace: tc.Namespace, Name: name, Arguments: string(tc.ArgumentsJSON)}
+	}
+}
+
+func jsonRaw(s string) json.RawMessage { return json.RawMessage(s) }
 
 // reasoningItemID derives a stable Responses reasoning item ID from the SDK
 // reasoning block ID so streamed and final items agree.

@@ -200,24 +200,53 @@ func TestResponsesPermissiveAllowsIgnoredFields(t *testing.T) {
 	}
 }
 
-func TestResponsesPermissiveAllowsCodexReasoningDefaults(t *testing.T) {
+func TestResponsesAcceptsCodexReasoningDefaultsAndClientOwnedTools(t *testing.T) {
 	var req ResponsesRequest
-	body := []byte(`{"model":"gpt-5.5","include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium","summary":"auto"},"text":{"verbosity":"low"},"tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch","description":"patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},{"type":"web_search","external_web_access":true}],"input":"hi"}`)
+	body := []byte(`{"model":"gpt-5.5","include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium","summary":"auto"},"text":{"verbosity":"low"},"tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"function","name":"multi_tool_use.parallel","description":"parallel","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch","description":"patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},{"type":"namespace","name":"mcp__grep_app","tools":[{"name":"searchGitHub","description":"search","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}]},{"type":"tool_search","execution":"client","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}],"input":"hi"}`)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateResponsesRequest(&req, false); err != nil {
-		t.Fatalf("Codex reasoning defaults should be accepted in permissive mode: %v", err)
+		t.Fatalf("Codex reasoning defaults and Responses tools should be accepted in permissive mode: %v", err)
+	}
+	var strictReq ResponsesRequest
+	strictBody := []byte(`{"model":"gpt-5.5","tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"function","name":"multi_tool_use.parallel","description":"parallel","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch","description":"patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},{"type":"namespace","name":"mcp__grep_app","tools":[{"name":"searchGitHub","description":"search","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}]},{"type":"tool_search","execution":"client","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}],"input":"hi"}`)
+	if err := json.Unmarshal(strictBody, &strictReq); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateResponsesRequest(&strictReq, true); err != nil {
+		t.Fatalf("supported Responses tools should be accepted in strict mode: %v", err)
 	}
 	if got := ResponsesReasoningEffort(&req); got != "medium" {
 		t.Fatalf("ResponsesReasoningEffort = %q, want medium", got)
 	}
-	supported := SupportedTools(req.Tools)
-	if len(supported) != 1 || supported[0].Function.Name != "exec_command" {
-		t.Fatalf("SupportedTools = %#v, want exec_command only", supported)
+	normalized, err := NormalizeResponsesTools(req.Tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normalized) != 5 || normalized[2].Kind != ToolKindCustom || normalized[3].Kind != ToolKindNamespace || normalized[4].Kind != ToolKindToolSearch {
+		t.Fatalf("normalized tools = %#v, want function/function/custom/namespace/tool_search", normalized)
+	}
+}
+
+func TestResponsesIgnoresHostedToolsInPermissiveAndRejectsInStrict(t *testing.T) {
+	var req ResponsesRequest
+	body := []byte(`{"model":"gpt-5.5","tools":[{"type":"web_search","external_web_access":true}],"input":"hi"}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateResponsesRequest(&req, false); err != nil {
+		t.Fatalf("hosted web_search should be ignored in permissive mode: %v", err)
+	}
+	normalized, err := NormalizeResponsesToolsWithMode(req.Tools, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normalized) != 0 {
+		t.Fatalf("normalized hosted tools = %#v, want none", normalized)
 	}
 	if err := ValidateResponsesRequest(&req, true); err == nil {
-		t.Fatal("expected Codex-only ignored fields to be rejected in strict mode")
+		t.Fatal("expected hosted web_search rejection in strict mode")
 	}
 }
 

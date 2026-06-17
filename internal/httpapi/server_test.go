@@ -677,7 +677,7 @@ func TestResponsesRequestPassesNestedReasoningImageInputAndIgnoresMCPTool(t *tes
 		t.Fatalf("ReasoningEffort = %q, want low", gw.got.ReasoningEffort)
 	}
 	if len(gw.got.Tools) != 0 {
-		t.Fatalf("gateway tools = %#v, want MCP provider tool ignored in permissive mode", gw.got.Tools)
+		t.Fatalf("gateway tools = %#v, want none", gw.got.Tools)
 	}
 	if gw.got.Input.Text != "Describe the attachment." {
 		t.Fatalf("Input.Text = %q", gw.got.Input.Text)
@@ -719,7 +719,7 @@ func TestStrictResponsesRejectsMCPProviderTool(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "only function tools are supported") {
+	if !strings.Contains(w.Body.String(), "hosted or proxy-executed Responses tools are not supported") {
 		t.Fatalf("unexpected error body: %s", w.Body.String())
 	}
 }
@@ -748,8 +748,8 @@ func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *test
 	if gw.got.Store || !gw.got.StoreSet {
 		t.Fatalf("Store/StoreSet = %v/%v, want false/true", gw.got.Store, gw.got.StoreSet)
 	}
-	if got := gw.got.FunctionOutputs["call_1"]; got != `{"answer":42}` {
-		t.Fatalf("FunctionOutputs[call_1] = %q, want compact JSON object", got)
+	if got := gw.got.ToolOutputs["call_1"].Output; got != `{"answer":42}` {
+		t.Fatalf("ToolOutputs[call_1] = %q, want compact JSON object", got)
 	}
 	if gw.got.Input.Text != "" || len(gw.got.Input.Images) != 0 {
 		t.Fatalf("Input = %#v, want function-output continuation without prompt", gw.got.Input)
@@ -774,8 +774,8 @@ func TestResponsesRequestAllowsMixedFunctionOutputsAndNewInput(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
 	}
-	if got := gw.got.FunctionOutputs["call_1"]; got != "tool result" {
-		t.Fatalf("FunctionOutputs[call_1] = %q, want tool result", got)
+	if got := gw.got.ToolOutputs["call_1"].Output; got != "tool result" {
+		t.Fatalf("ToolOutputs[call_1] = %q, want tool result", got)
 	}
 	if gw.got.Input.Text != "Now optimize it." {
 		t.Fatalf("Input.Text = %q, want mixed continuation prompt", gw.got.Input.Text)
@@ -837,8 +837,8 @@ func TestResponsesRequestDoesNotBuildFallbackForOutputOnlyWithoutHistory(t *test
 	if gw.got.FunctionOutputFallbackAvailable || gw.got.FunctionOutputFallbackInput.Text != "" || gw.got.FunctionOutputFallbackInstructions != "" {
 		t.Fatalf("unexpected output-only fallback: %#v", gw.got)
 	}
-	if got := gw.got.FunctionOutputs["call_orphan"]; got != "orphan result" {
-		t.Fatalf("FunctionOutputs[call_orphan] = %q", got)
+	if got := gw.got.ToolOutputs["call_orphan"].Output; got != "orphan result" {
+		t.Fatalf("ToolOutputs[call_orphan] = %q", got)
 	}
 }
 
@@ -1315,8 +1315,8 @@ func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
 	if gw.got.ReasoningEffort != "medium" {
 		t.Fatalf("ReasoningEffort = %q, want medium", gw.got.ReasoningEffort)
 	}
-	if len(gw.got.Tools) != 1 || gw.got.Tools[0].Function.Name != "exec_command" {
-		t.Fatalf("gateway tools = %#v, want exec_command only", gw.got.Tools)
+	if len(gw.got.Tools) != 2 || gw.got.Tools[0].Name != "exec_command" || gw.got.Tools[1].Name != "apply_patch" {
+		t.Fatalf("gateway tools = %#v, want exec_command and apply_patch", gw.got.Tools)
 	}
 	if gw.got.Instructions != "base\n\nDeveloper:\ndesktop context" {
 		t.Fatalf("Instructions = %q, want developer context folded in", gw.got.Instructions)
@@ -1444,7 +1444,7 @@ func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outputs["call_obj"] != `{"ok":true}` || outputs["call_arr"] != `[1,2]` {
+	if outputs["call_obj"].Output != `{"ok":true}` || outputs["call_arr"].Output != `[1,2]` {
 		t.Fatalf("responses function outputs = %#v, want compact JSON object and array", outputs)
 	}
 	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_scalar","output":42}]`))
@@ -1455,21 +1455,21 @@ func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := outputs["call_text_parts"]; got != "alpha beta" {
+	if got := outputs["call_text_parts"].Output; got != "alpha beta" {
 		t.Fatalf("text content-part output = %q, want alpha beta", got)
 	}
 	_, outputs, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_image","output":[{"type":"input_text","text":"chart generated"},{"type":"input_image","detail":"low","image_url":"data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := outputs["call_image"]; !strings.Contains(got, "chart generated") || !strings.Contains(got, "[Image: data:image/png;base64, redacted") || !strings.Contains(got, "detail=low") || strings.Contains(got, "AAAA") {
+	if got := outputs["call_image"].Output; !strings.Contains(got, "chart generated") || !strings.Contains(got, "[Image: data:image/png;base64, redacted") || !strings.Contains(got, "detail=low") || strings.Contains(got, "AAAA") {
 		t.Fatalf("image content-part output = %q, want text plus redacted image marker", got)
 	}
 	_, outputs, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_file","output":[{"type":"input_file","filename":"/tmp/report.pdf","file_id":"file_1"}]}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := outputs["call_file"]; got != "[File: filename=report.pdf, file_id present]" {
+	if got := outputs["call_file"].Output; got != "[File: filename=report.pdf, file_id present]" {
 		t.Fatalf("file content-part output = %q, want redacted file marker", got)
 	}
 	_, _, _, err = parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_bad","output":[{"type":"mystery","file_data":"secret"}]}]`))
@@ -1488,7 +1488,7 @@ func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := outputs["call_signed_url"]; got != "[Image: https://example.com/…]" {
+	if got := outputs["call_signed_url"].Output; got != "[Image: https://example.com/…]" {
 		t.Fatalf("signed URL output = %q, want host-only redacted URL", got)
 	}
 }
@@ -1509,7 +1509,7 @@ func TestParseResponsesInputUsesOnlyPostOutputItemsAsContinuationInput(t *testin
 	if instructions != "" {
 		t.Fatalf("instructions = %q, want empty", instructions)
 	}
-	if outputs["call_old"] != "old result" || outputs["call_current"] != "current result" {
+	if outputs["call_old"].Output != "old result" || outputs["call_current"].Output != "current result" {
 		t.Fatalf("outputs = %#v, want both function outputs", outputs)
 	}
 	if prompt.Text != "Now summarize it." {
@@ -1530,7 +1530,7 @@ func TestParseResponsesInputDropsStatelessHistoryBeforeFunctionOutput(t *testing
 	if instructions != "" || prompt.Text != "" || len(prompt.Images) != 0 {
 		t.Fatalf("prompt/instructions = %#v/%q, want empty continuation input", prompt, instructions)
 	}
-	if got := outputs["call_1"]; got != "alpha result" {
+	if got := outputs["call_1"].Output; got != "alpha result" {
 		t.Fatalf("outputs[call_1] = %q, want alpha result", got)
 	}
 }

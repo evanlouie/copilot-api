@@ -42,10 +42,38 @@ type preparedResponseLogFields struct {
 	continuation    bool
 }
 
+func (s *Server) logResponsesToolSummary(ctx context.Context, tools []openai.NormalizedTool) {
+	if s.log == nil {
+		return
+	}
+	counts := map[string]int{}
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		counts[string(tool.Kind)]++
+		switch tool.Kind {
+		case openai.ToolKindNamespace:
+			names = append(names, string(tool.Kind)+":"+tool.Name)
+			for _, child := range tool.Children {
+				names = append(names, "function:"+tool.Name+"."+child.Name)
+			}
+		default:
+			names = append(names, string(tool.Kind)+":"+tool.Name)
+		}
+	}
+	s.log.DebugContext(ctx, "responses tool catalog", "tool_type_counts", counts, "tools", names)
+}
+
 func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.ResponsesRequest, responseID string) (copilotgw.ResponseRequest, preparedResponseLogFields, error) {
 	reasoningEffort := openai.ResponsesReasoningEffort(req)
 	if err := openai.ValidateResponsesRequest(req, s.cfg.StrictCompat); err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+	}
+	normalizedTools, err := openai.NormalizeResponsesToolsWithMode(req.Tools, s.cfg.StrictCompat)
+	if err != nil {
+		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+	}
+	if s.cfg.LogContent {
+		s.logResponsesToolSummary(ctx, normalizedTools)
 	}
 	input, outputs, inputInstructions, err := parseResponsesInput(req.Input)
 	if err != nil {
@@ -82,12 +110,12 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 		Model:                              req.Model,
 		Instructions:                       combineInstructions(req.Instructions, inputInstructions),
 		Input:                              input,
-		FunctionOutputs:                    outputs,
+		ToolOutputs:                        outputs,
 		FunctionOutputFallbackInput:        fallbackInput,
 		FunctionOutputFallbackInstructions: fallbackInstructions,
 		FunctionOutputFallbackAvailable:    fallbackAvailable,
 		PreviousResponseID:                 req.PreviousResponseID,
-		Tools:                              openai.SupportedTools(req.Tools),
+		Tools:                              normalizedTools,
 		ToolChoiceNone:                     openai.ToolChoiceNone(req.ToolChoice),
 		Store:                              store,
 		StoreSet:                           storeSet,

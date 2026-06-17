@@ -396,8 +396,17 @@ func (p ContentPart) Image() (ImageInput, error) {
 }
 
 type Tool struct {
-	Type     string       `json:"type"`
-	Function FunctionTool `json:"function"`
+	Type         string          `json:"type,omitempty"`
+	Function     FunctionTool    `json:"function,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Description  string          `json:"description,omitempty"`
+	Parameters   json.RawMessage `json:"parameters,omitempty"`
+	Strict       *bool           `json:"strict,omitempty"`
+	DeferLoading *bool           `json:"defer_loading,omitempty"`
+	Format       json.RawMessage `json:"format,omitempty"`
+	Execution    string          `json:"execution,omitempty"`
+	Tools        []Tool          `json:"tools,omitempty"`
+	Raw          json.RawMessage `json:"-"`
 }
 
 func (t *Tool) UnmarshalJSON(data []byte) error {
@@ -406,17 +415,24 @@ func (t *Tool) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &a); err != nil {
 		return err
 	}
-	if a.Type == "function" && a.Function.Name == "" {
-		var flat struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description,omitempty"`
-			Parameters  json.RawMessage `json:"parameters,omitempty"`
-			Strict      *bool           `json:"strict,omitempty"`
+	a.Raw = append(a.Raw[:0], data...)
+	if a.Type == "function" {
+		if a.Function.Name == "" {
+			a.Function = FunctionTool{Name: a.Name, Description: a.Description, Parameters: a.Parameters, Strict: a.Strict}
+		} else {
+			if a.Name == "" {
+				a.Name = a.Function.Name
+			}
+			if a.Description == "" {
+				a.Description = a.Function.Description
+			}
+			if len(a.Parameters) == 0 {
+				a.Parameters = a.Function.Parameters
+			}
+			if a.Strict == nil {
+				a.Strict = a.Function.Strict
+			}
 		}
-		if err := json.Unmarshal(data, &flat); err != nil {
-			return err
-		}
-		a.Function = FunctionTool{Name: flat.Name, Description: flat.Description, Parameters: flat.Parameters, Strict: flat.Strict}
 	}
 	*t = Tool(a)
 	return nil
@@ -573,8 +589,45 @@ type ResponseOutputItem struct {
 	EncryptedContent string                     `json:"encrypted_content,omitempty"`
 	CallID           string                     `json:"call_id,omitempty"`
 	Name             string                     `json:"name,omitempty"`
+	Namespace        string                     `json:"namespace,omitempty"`
 	Arguments        string                     `json:"arguments,omitempty"`
+	ArgumentsJSON    json.RawMessage            `json:"-"`
+	Input            string                     `json:"input,omitempty"`
+	Execution        string                     `json:"execution,omitempty"`
 	Output           json.RawMessage            `json:"output,omitempty"`
+}
+
+func (i ResponseOutputItem) MarshalJSON() ([]byte, error) {
+	type alias ResponseOutputItem
+	if i.Type == "tool_search_call" && len(i.ArgumentsJSON) > 0 {
+		return json.Marshal(struct {
+			alias
+			Arguments json.RawMessage `json:"arguments,omitempty"`
+		}{alias: alias(i), Arguments: i.ArgumentsJSON})
+	}
+	return json.Marshal(alias(i))
+}
+
+func (i *ResponseOutputItem) UnmarshalJSON(data []byte) error {
+	type alias ResponseOutputItem
+	var raw struct {
+		alias
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*i = ResponseOutputItem(raw.alias)
+	if len(raw.Arguments) == 0 || string(raw.Arguments) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw.Arguments, &s); err == nil {
+		i.Arguments = s
+		return nil
+	}
+	i.ArgumentsJSON = append(i.ArgumentsJSON[:0], raw.Arguments...)
+	return nil
 }
 
 // ResponseReasoningSummary is a single summary block inside a Responses
@@ -604,15 +657,53 @@ func (t ResponseText) MarshalJSON() ([]byte, error) {
 }
 
 type ResponseInputItem struct {
-	Type      string          `json:"type,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   Content         `json:"content,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Input     string          `json:"input,omitempty"`
-	Output    json.RawMessage `json:"output,omitempty"`
+	Type          string          `json:"type,omitempty"`
+	ID            string          `json:"id,omitempty"`
+	Role          string          `json:"role,omitempty"`
+	Content       Content         `json:"content,omitempty"`
+	CallID        string          `json:"call_id,omitempty"`
+	Name          string          `json:"name,omitempty"`
+	Namespace     string          `json:"namespace,omitempty"`
+	Arguments     string          `json:"arguments,omitempty"`
+	ArgumentsJSON json.RawMessage `json:"-"`
+	Input         string          `json:"input,omitempty"`
+	Output        json.RawMessage `json:"output,omitempty"`
+	Status        string          `json:"status,omitempty"`
+	Execution     string          `json:"execution,omitempty"`
+	Tools         json.RawMessage `json:"tools,omitempty"`
+}
+
+func (i ResponseInputItem) MarshalJSON() ([]byte, error) {
+	type alias ResponseInputItem
+	if len(i.ArgumentsJSON) > 0 {
+		return json.Marshal(struct {
+			alias
+			Arguments json.RawMessage `json:"arguments,omitempty"`
+		}{alias: alias(i), Arguments: i.ArgumentsJSON})
+	}
+	return json.Marshal(alias(i))
+}
+
+func (i *ResponseInputItem) UnmarshalJSON(data []byte) error {
+	type alias ResponseInputItem
+	var raw struct {
+		alias
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*i = ResponseInputItem(raw.alias)
+	if len(raw.Arguments) == 0 || string(raw.Arguments) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw.Arguments, &s); err == nil {
+		i.Arguments = s
+		return nil
+	}
+	i.ArgumentsJSON = append(i.ArgumentsJSON[:0], raw.Arguments...)
+	return nil
 }
 
 type ResponseStreamEvent struct {

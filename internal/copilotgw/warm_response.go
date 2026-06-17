@@ -1,8 +1,10 @@
 package copilotgw
 
 import (
+	"bytes"
 	"context"
-	"reflect"
+	"encoding/json"
+	"sort"
 	"sync"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
@@ -18,7 +20,7 @@ type WarmResponseSession struct {
 	model           string
 	instructions    string
 	reasoningEffort string
-	tools           []openai.Tool
+	tools           []openai.NormalizedTool
 	toolChoiceNone  bool
 	input           openai.PromptContent
 	previous        *string
@@ -77,8 +79,8 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (*copilot.Session, *tool
 		return nil, nil, nil, "", nil, false
 	}
 	if len(req.Tools) == 0 {
-		req.Tools = append([]openai.Tool{}, w.tools...)
-	} else if !reflect.DeepEqual(openai.SupportedTools(req.Tools), w.tools) {
+		req.Tools = append([]openai.NormalizedTool{}, w.tools...)
+	} else if !responseToolsEqual(req.Tools, w.tools) {
 		return nil, nil, nil, "", nil, false
 	}
 	if w.toolChoiceNone {
@@ -89,6 +91,81 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (*copilot.Session, *tool
 	req.Input = combinePromptContent(w.input, req.Input)
 	w.disconnected = true
 	return w.session, w.rt, w.events, w.retained, &w.responseID, true
+}
+
+type comparableNormalizedTool struct {
+	Kind         openai.ResponsesToolKind   `json:"kind"`
+	Name         string                     `json:"name"`
+	Namespace    string                     `json:"namespace,omitempty"`
+	Description  string                     `json:"description,omitempty"`
+	Parameters   string                     `json:"parameters,omitempty"`
+	Format       string                     `json:"format,omitempty"`
+	Execution    string                     `json:"execution,omitempty"`
+	Strict       *bool                      `json:"strict,omitempty"`
+	DeferLoading *bool                      `json:"defer_loading,omitempty"`
+	Children     []comparableNormalizedTool `json:"children,omitempty"`
+}
+
+func responseToolsEqual(a, b []openai.NormalizedTool) bool {
+	ak, aok := responseToolsKey(a)
+	bk, bok := responseToolsKey(b)
+	return aok && bok && ak == bk
+}
+
+func responseToolsKey(tools []openai.NormalizedTool) (string, bool) {
+	comparable := comparableTools(tools)
+	b, err := json.Marshal(comparable)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+func comparableTools(tools []openai.NormalizedTool) []comparableNormalizedTool {
+	out := make([]comparableNormalizedTool, 0, len(tools))
+	for _, tool := range tools {
+		children := comparableTools(tool.Children)
+		out = append(out, comparableNormalizedTool{
+			Kind:         tool.Kind,
+			Name:         tool.Name,
+			Namespace:    tool.Namespace,
+			Description:  tool.Description,
+			Parameters:   canonicalRawJSON(tool.Parameters),
+			Format:       canonicalRawJSON(tool.Format),
+			Execution:    tool.Execution,
+			Strict:       tool.Strict,
+			DeferLoading: tool.DeferLoading,
+			Children:     children,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		if out[i].Namespace != out[j].Namespace {
+			return out[i].Namespace < out[j].Namespace
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func canonicalRawJSON(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return string(trimmed)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return string(trimmed)
+	}
+	return string(b)
 }
 
 func combinePromptContent(previous openai.PromptContent, current openai.PromptContent) openai.PromptContent {
@@ -120,7 +197,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	if err != nil {
 		return nil, err
 	}
-	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
+	rt, err := toolproxy.NewResponseRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
@@ -163,6 +240,6 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		_ = session.Disconnect()
 		return nil, openai.Internal(err.Error())
 	}
-	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: openai.SupportedTools(req.Tools), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: append([]openai.NormalizedTool{}, req.Tools...), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
 	return &WarmResponseResult{Response: resp, WarmSession: warm}, nil
 }

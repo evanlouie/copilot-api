@@ -8,9 +8,10 @@ import (
 	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
 
-func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]string, string, error) {
+func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]openai.ResponseToolOutput, string, error) {
 	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
 		return openai.PromptContent{}, nil, "", nil
 	}
@@ -22,19 +23,19 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return openai.PromptContent{}, nil, "", openai.InvalidRequest("input must be a string or an array of response input items", "input")
 	}
-	if responsesInputHasFunctionOutputs(items) {
-		outputs := map[string]string{}
+	if responsesInputHasToolOutputs(items) {
+		outputs := map[string]openai.ResponseToolOutput{}
 		lastOutput := -1
 		for i, item := range items {
-			if item.Type != "function_call_output" {
+			if !isResponsesToolOutput(item.Type) {
 				continue
 			}
-			out, err := parseFunctionOutputItem(item, i)
+			out, err := parseToolOutputItem(item, i)
 			if err != nil {
 				return openai.PromptContent{}, nil, "", err
 			}
 			if _, exists := outputs[item.CallID]; exists {
-				return openai.PromptContent{}, nil, "", openai.InvalidRequest("duplicate function_call_output call_id", fmt.Sprintf("input.%d.call_id", i))
+				return openai.PromptContent{}, nil, "", openai.InvalidRequest("duplicate tool output call_id", fmt.Sprintf("input.%d.call_id", i))
 			}
 			outputs[item.CallID] = out
 			lastOutput = i
@@ -45,7 +46,7 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 		// the last tool output as an explicit mixed-continuation follow-up.
 		remaining := make([]openai.ResponseInputItem, 0, len(items)-lastOutput-1)
 		for _, item := range items[lastOutput+1:] {
-			if item.Type != "function_call_output" {
+			if !isResponsesToolOutput(item.Type) {
 				remaining = append(remaining, item)
 			}
 		}
@@ -89,7 +90,7 @@ func parseResponsesFallbackInput(raw json.RawMessage) (openai.PromptContent, str
 
 func responsesInputHasFallbackContext(items []openai.ResponseInputItem) bool {
 	for _, item := range items {
-		if item.Type == "function_call_output" || item.Type == "reasoning" || item.Type == "item_reference" {
+		if isResponsesToolOutput(item.Type) || item.Type == "reasoning" || item.Type == "item_reference" {
 			continue
 		}
 		if item.Type != "" || item.Role != "" || item.Content.Present || item.CallID != "" || item.Name != "" || item.Arguments != "" || item.Input != "" {
@@ -106,12 +107,12 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 	var transcript []string
 	for i, item := range items {
 		switch item.Type {
-		case "function_call_output":
-			out, err := parseFunctionOutputItem(item, i)
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
+			out, err := parseToolOutputItem(item, i)
 			if err != nil {
 				return openai.PromptContent{}, "", err
 			}
-			transcript = append(transcript, "Function output "+item.CallID+":\n"+out)
+			transcript = append(transcript, toolOutputTranscriptLabel(out)+":\n"+out.Output)
 		case "message", "":
 			role := item.Role
 			if role == "" {
@@ -148,9 +149,19 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 			// in AI SDK Responses tool loops to point at prior output items; the
 			// referenced function call is already represented by function_call_output.
 		case "function_call":
-			transcript = append(transcript, "Assistant function call "+item.Name+" "+item.CallID+":\n"+item.Arguments)
+			label := "Assistant function call " + item.Name
+			if item.Namespace != "" {
+				label = "Assistant namespace tool call " + item.Namespace + "." + item.Name
+			}
+			transcript = append(transcript, label+" "+item.CallID+":\n"+item.Arguments)
 		case "custom_tool_call":
 			transcript = append(transcript, "Assistant custom tool call "+item.Name+" "+item.CallID+":\n"+item.Input)
+		case "tool_search_call":
+			arguments := item.Arguments
+			if arguments == "" && len(item.ArgumentsJSON) > 0 {
+				arguments = string(item.ArgumentsJSON)
+			}
+			transcript = append(transcript, "Assistant tool search call "+item.CallID+":\n"+arguments)
 		default:
 			return openai.PromptContent{}, "", openai.InvalidRequest("unsupported response input item type", fmt.Sprintf("input.%d.type", i))
 		}
@@ -164,9 +175,9 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 	}
 	return prompt, strings.Join(instructions, "\n\n"), nil
 }
-func responsesInputHasFunctionOutputs(items []openai.ResponseInputItem) bool {
+func responsesInputHasToolOutputs(items []openai.ResponseInputItem) bool {
 	for _, item := range items {
-		if item.Type == "function_call_output" {
+		if isResponsesToolOutput(item.Type) {
 			return true
 		}
 	}
@@ -174,7 +185,7 @@ func responsesInputHasFunctionOutputs(items []openai.ResponseInputItem) bool {
 }
 func responsesInputNeedsTranscript(items []openai.ResponseInputItem) bool {
 	for _, item := range items {
-		if item.Type == "function_call" || item.Type == "custom_tool_call" || item.Type == "function_call_output" || item.Type == "item_reference" {
+		if item.Type == "function_call" || item.Type == "custom_tool_call" || item.Type == "tool_search_call" || isResponsesToolOutput(item.Type) || item.Type == "item_reference" {
 			return true
 		}
 		if (item.Type == "message" || item.Type == "") && item.Role == "assistant" {
@@ -183,15 +194,57 @@ func responsesInputNeedsTranscript(items []openai.ResponseInputItem) bool {
 	}
 	return false
 }
-func parseFunctionOutputItem(item openai.ResponseInputItem, i int) (string, error) {
+func isResponsesToolOutput(typ string) bool {
+	return typ == "function_call_output" || typ == "custom_tool_call_output" || typ == "tool_search_output"
+}
+
+func parseToolOutputItem(item openai.ResponseInputItem, i int) (openai.ResponseToolOutput, error) {
 	if item.CallID == "" {
-		return "", openai.InvalidRequest("function_call_output items require call_id", fmt.Sprintf("input.%d.call_id", i))
+		return openai.ResponseToolOutput{}, openai.InvalidRequest(item.Type+" items require call_id", fmt.Sprintf("input.%d.call_id", i))
+	}
+	kind := openai.ToolKindFunction
+	if item.Type == "custom_tool_call_output" {
+		kind = openai.ToolKindCustom
+	}
+	if item.Type == "tool_search_output" {
+		kind = openai.ToolKindToolSearch
 	}
 	out, err := outputRawToString(item.Output)
 	if err != nil {
-		return "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
+		return openai.ResponseToolOutput{}, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
 	}
-	return out, nil
+	if kind == openai.ToolKindToolSearch {
+		execution := item.Execution
+		if execution == "" {
+			execution = "client"
+		}
+		if execution != "client" {
+			return openai.ResponseToolOutput{}, openai.InvalidRequest("tool_search_output execution must be client", fmt.Sprintf("input.%d.execution", i))
+		}
+		normalizedTools, err := openai.NormalizeToolSearchOutputTools(item.Tools, fmt.Sprintf("input.%d.tools", i))
+		if err != nil {
+			return openai.ResponseToolOutput{}, err
+		}
+		if _, err := toolproxy.FlattenResponsesTools(normalizedTools); err != nil {
+			return openai.ResponseToolOutput{}, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.tools", i))
+		}
+		if len(item.Tools) > 0 && out == "" {
+			out = string(item.Tools)
+		}
+		return openai.ResponseToolOutput{Kind: kind, CallID: item.CallID, Output: out, Status: item.Status, Execution: execution, Tools: item.Tools}, nil
+	}
+	return openai.ResponseToolOutput{Kind: kind, CallID: item.CallID, Name: item.Name, Output: out}, nil
+}
+
+func toolOutputTranscriptLabel(out openai.ResponseToolOutput) string {
+	switch out.Kind {
+	case openai.ToolKindCustom:
+		return "Custom tool output " + out.CallID
+	case openai.ToolKindToolSearch:
+		return "Tool search output " + out.CallID
+	default:
+		return "Function output " + out.CallID
+	}
 }
 func responseRoleLabel(role string) string {
 	switch role {

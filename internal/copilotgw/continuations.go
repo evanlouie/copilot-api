@@ -199,8 +199,30 @@ func functionOutputsWithContinuationInput(outputs map[string]string, input opena
 	return out, nil
 }
 
+func toolOutputsWithContinuationInput(outputs map[string]openai.ResponseToolOutput, input openai.PromptContent) (map[string]openai.ResponseToolOutput, error) {
+	stringsOnly := make(map[string]string, len(outputs))
+	for id, output := range outputs {
+		stringsOnly[id] = output.Output
+	}
+	updatedStrings, err := functionOutputsWithContinuationInput(stringsOnly, input)
+	if err != nil {
+		return nil, err
+	}
+	if len(updatedStrings) == 0 {
+		return outputs, nil
+	}
+	out := make(map[string]openai.ResponseToolOutput, len(outputs))
+	maps.Copy(out, outputs)
+	for id, text := range updatedStrings {
+		entry := out[id]
+		entry.Output = text
+		out[id] = entry
+	}
+	return out, nil
+}
+
 func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error) {
-	batch, activeOutputs, err := g.responseContinuationBatch(req.FunctionOutputs)
+	batch, activeOutputs, err := g.responseContinuationBatch(req.ToolOutputs)
 	if err != nil {
 		if errors.Is(err, toolproxy.ErrNotFound) {
 			return g.continueToolResponseFromRecord(ctx, req)
@@ -225,11 +247,11 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		return nil, openai.PreviousResponseNotFound(previousResponseID)
 	}
 	runner := g.runnerForBatch(batch.ID)
-	outputs, err := functionOutputsWithContinuationInput(activeOutputs, req.Input)
+	outputs, err := toolOutputsWithContinuationInput(activeOutputs, req.Input)
 	if err != nil {
 		return nil, err
 	}
-	if err := batch.CompleteWithSetup(outputs, func() {
+	if err := batch.CompleteToolOutputsWithSetup(outputs, func() {
 		if runner != nil {
 			runner.setCurrentResponseID(req.ResponseID)
 			runner.attachToRequestContext()
@@ -269,7 +291,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	}
 }
 
-func (g *RealGateway) responseContinuationBatch(outputs map[string]string) (*toolproxy.Batch, map[string]string, error) {
+func (g *RealGateway) responseContinuationBatch(outputs map[string]openai.ResponseToolOutput) (*toolproxy.Batch, map[string]openai.ResponseToolOutput, error) {
 	ids := make([]string, 0, len(outputs))
 	for id := range outputs {
 		ids = append(ids, id)
@@ -289,7 +311,7 @@ func (g *RealGateway) responseContinuationBatch(outputs map[string]string) (*too
 		}
 		return nil, nil, openai.InvalidRequest(subsetErr.Error(), "input")
 	}
-	active := make(map[string]string, len(matched))
+	active := make(map[string]openai.ResponseToolOutput, len(matched))
 	for _, id := range matched {
 		active[id] = outputs[id]
 	}
@@ -316,7 +338,7 @@ func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseReq
 	if req.PreviousResponseID == "" {
 		if req.FunctionOutputFallbackAvailable {
 			fallback := req
-			fallback.FunctionOutputs = nil
+			fallback.ToolOutputs = nil
 			fallback.FunctionOutputFallbackInput = openai.PromptContent{}
 			fallback.FunctionOutputFallbackInstructions = ""
 			fallback.FunctionOutputFallbackAvailable = false
@@ -330,32 +352,113 @@ func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseReq
 	if err != nil {
 		return ResponseRequest{}, openai.PreviousResponseNotFound(req.PreviousResponseID)
 	}
-	outputs, err := functionOutputsWithContinuationInput(req.FunctionOutputs, req.Input)
+	outputs, err := toolOutputsWithContinuationInput(req.ToolOutputs, req.Input)
 	if err != nil {
 		return ResponseRequest{}, err
 	}
 	fallback := req
-	fallback.FunctionOutputs = nil
-	fallback.Input = openai.PromptContent{Text: responseFunctionOutputsPrompt(outputs)}
+	fallback.ToolOutputs = nil
+	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, previousRecord.Output)}
 	if !fallback.StoreSet {
 		fallback.Store = previousRecord.Stored
 	}
 	return fallback, nil
 }
 
-func responseFunctionOutputsPrompt(outputs map[string]string) string {
+func responseToolOutputsPrompt(outputs map[string]openai.ResponseToolOutput, previousItems []openai.ResponseOutputItem) string {
 	ids := make([]string, 0, len(outputs))
 	for id := range outputs {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	previousByCallID := map[string]openai.ResponseOutputItem{}
+	for _, item := range previousItems {
+		if item.CallID != "" {
+			previousByCallID[item.CallID] = item
+		}
+	}
 	var b strings.Builder
-	b.WriteString("Function call outputs received for the previous response:")
+	b.WriteString("Tool outputs received for the previous response:")
 	for _, id := range ids {
+		output := outputs[id]
+		previous := previousByCallID[id]
 		b.WriteString("\n\n")
-		b.WriteString(id)
-		b.WriteString(":\n")
-		b.WriteString(outputs[id])
+		b.WriteString(responseToolOutputPromptHeader(id, output, previous))
+		if previous.Type != "" {
+			b.WriteString("\nAssistant call: ")
+			b.WriteString(responseOutputItemPromptSummary(previous))
+		}
+		if len(output.Tools) > 0 {
+			b.WriteString("\nReturned tools: ")
+			b.WriteString(string(output.Tools))
+		}
+		b.WriteString("\nOutput:\n")
+		b.WriteString(output.Output)
 	}
 	return b.String()
+}
+
+func responseToolOutputPromptHeader(id string, output openai.ResponseToolOutput, previous openai.ResponseOutputItem) string {
+	kind := output.Kind
+	if kind == "" {
+		switch previous.Type {
+		case "custom_tool_call":
+			kind = openai.ToolKindCustom
+		case "tool_search_call":
+			kind = openai.ToolKindToolSearch
+		default:
+			kind = openai.ToolKindFunction
+		}
+	}
+	name := output.Name
+	if name == "" {
+		name = previous.Name
+	}
+	if previous.Namespace != "" && name != "" {
+		name = previous.Namespace + "." + name
+	}
+	suffix := ""
+	if name != "" {
+		suffix = " for " + name
+	}
+	switch kind {
+	case openai.ToolKindCustom:
+		return "Custom tool output " + id + suffix + ":"
+	case openai.ToolKindToolSearch:
+		extra := ""
+		if output.Execution != "" || output.Status != "" {
+			parts := []string{}
+			if output.Execution != "" {
+				parts = append(parts, "execution="+output.Execution)
+			}
+			if output.Status != "" {
+				parts = append(parts, "status="+output.Status)
+			}
+			extra = " (" + strings.Join(parts, ", ") + ")"
+		}
+		return "Tool search output " + id + extra + ":"
+	default:
+		return "Function output " + id + suffix + ":"
+	}
+}
+
+func responseOutputItemPromptSummary(item openai.ResponseOutputItem) string {
+	switch item.Type {
+	case "custom_tool_call":
+		return "custom_tool_call " + item.Name + " input=" + item.Input
+	case "tool_search_call":
+		args := item.Arguments
+		if args == "" && len(item.ArgumentsJSON) > 0 {
+			args = string(item.ArgumentsJSON)
+		}
+		return "tool_search_call arguments=" + args
+	case "function_call":
+		name := item.Name
+		if item.Namespace != "" {
+			name = item.Namespace + "." + name
+		}
+		return "function_call " + name + " arguments=" + item.Arguments
+	default:
+		return item.Type
+	}
 }

@@ -25,7 +25,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		storeVisible = false
 	}
 
-	if len(req.FunctionOutputs) > 0 {
+	if len(req.ToolOutputs) > 0 {
 		return g.continueToolResponse(ctx, req)
 	}
 	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
@@ -37,7 +37,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		return nil, err
 	}
 
-	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
+	rt, err := toolproxy.NewResponseRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
@@ -101,8 +101,8 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
 	}
-	if len(req.FunctionOutputs) > 0 {
-		batch, activeOutputs, err := g.responseContinuationBatch(req.FunctionOutputs)
+	if len(req.ToolOutputs) > 0 {
+		batch, activeOutputs, err := g.responseContinuationBatch(req.ToolOutputs)
 		if err != nil {
 			if errors.Is(err, toolproxy.ErrNotFound) {
 				return g.streamToolResponseFromRecord(ctx, req)
@@ -137,13 +137,13 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		if !req.StoreSet {
 			storeVisible = previousRecord.Stored
 		}
-		outputs, err := functionOutputsWithContinuationInput(activeOutputs, req.Input)
+		outputs, err := toolOutputsWithContinuationInput(activeOutputs, req.Input)
 		if err != nil {
 			return nil, err
 		}
 		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
-		if err := batch.CompleteWithSetup(outputs, func() {
+		if err := batch.CompleteToolOutputsWithSetup(outputs, func() {
 			runner.attachToRequestContext()
 			runner.watchContext(ctx)
 			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, req.SuppressReasoning, ctx.Done())
@@ -190,7 +190,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		if req.WarmSession != nil && req.WarmSession.ResponseID() == req.PreviousResponseID {
 			req.WarmSession.Disconnect()
 		}
-		rt, err = toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
+		rt, err = toolproxy.NewResponseRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
 		if err != nil {
 			return nil, openai.InvalidRequest(err.Error(), "tools")
 		}

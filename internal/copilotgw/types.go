@@ -88,6 +88,7 @@ type TurnResult struct {
 	ReasoningEncrypted string
 	ReasoningID        string
 	ToolCalls          []openai.ChatToolCall
+	ResponseToolCalls  []toolproxy.CapturedCall
 	Usage              *openai.Usage
 	FinishReason       string
 	RetainedPath       string
@@ -107,13 +108,13 @@ type ResponseRequest struct {
 	Model                              string
 	Instructions                       string
 	Input                              openai.PromptContent
-	FunctionOutputs                    map[string]string
+	ToolOutputs                        map[string]openai.ResponseToolOutput
 	FunctionOutputFallbackInput        openai.PromptContent
 	FunctionOutputFallbackInstructions string
 	FunctionOutputFallbackAvailable    bool
 	PreviousResponseID                 string
 	WarmSession                        *WarmResponseSession
-	Tools                              []openai.Tool
+	Tools                              []openai.NormalizedTool
 	ToolChoiceNone                     bool
 	Store                              bool
 	StoreSet                           bool
