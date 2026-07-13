@@ -134,7 +134,7 @@ func TestBuildChatHistoryMessagesIncludesUserAttachments(t *testing.T) {
 		Role:    "user",
 		Content: "describe",
 		Attachments: []copilot.Attachment{copilot.AttachmentBlob{
-			Data:        data,
+			Data:        &data,
 			MIMEType:    mimeType,
 			DisplayName: &displayName,
 		}},

@@ -58,7 +58,10 @@ func TestResolvePromptDataURLAttachment(t *testing.T) {
 	if attachment.DisplayName == nil || *attachment.DisplayName != "image_1.png" {
 		t.Fatalf("unexpected display name %#v", attachment.DisplayName)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(attachment.Data)
+	if attachment.Data == nil {
+		t.Fatal("attachment data is nil")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(*attachment.Data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +116,7 @@ func TestResolvePromptFetchesRemoteImage(t *testing.T) {
 	if attachment.DisplayName == nil || *attachment.DisplayName != "shot.png" {
 		t.Fatalf("unexpected display name %#v", attachment.DisplayName)
 	}
-	if attachment.Data != tinyPNG {
+	if attachment.Data == nil || *attachment.Data != tinyPNG {
 		t.Fatalf("unexpected data %#v", attachment.Data)
 	}
 }
