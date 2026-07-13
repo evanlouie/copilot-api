@@ -182,6 +182,44 @@ func TestResolvePromptRejectsAggregateImageSize(t *testing.T) {
 	}
 }
 
+func TestResolvePromptEnforcesAggregateBudgetAcrossMessages(t *testing.T) {
+	raw, err := base64.StdEncoding.DecodeString(tinyPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := maxAggregateImageBytes
+	maxAggregateImageBytes = int64(len(raw)) + 1
+	defer func() { maxAggregateImageBytes = original }()
+
+	gw := cachedModelGateway(Model{
+		ID: "vision", VisionKnown: true, SupportsVision: true,
+		Vision: &VisionLimits{SupportedMediaTypes: []string{"image/png"}, MaxPromptImages: 2},
+	})
+	budget := newImageRequestBudget()
+	prompt := openai.PromptContent{Images: []openai.ImageInput{{URL: "data:image/png;base64," + tinyPNG}}}
+	if _, err := gw.resolvePromptWithImageBudget(context.Background(), "vision", prompt, "messages.0.content", budget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gw.resolvePromptWithImageBudget(context.Background(), "vision", prompt, "messages.1.content", budget); err == nil {
+		t.Fatal("expected the request-wide aggregate image budget to reject the second message")
+	}
+}
+
+func TestResolvePromptEnforcesImageCountAcrossMessages(t *testing.T) {
+	gw := cachedModelGateway(Model{
+		ID: "vision", VisionKnown: true, SupportsVision: true,
+		Vision: &VisionLimits{SupportedMediaTypes: []string{"image/png"}, MaxPromptImages: 1},
+	})
+	budget := newImageRequestBudget()
+	prompt := openai.PromptContent{Images: []openai.ImageInput{{URL: "data:image/png;base64," + tinyPNG}}}
+	if _, err := gw.resolvePromptWithImageBudget(context.Background(), "vision", prompt, "messages.0.content", budget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gw.resolvePromptWithImageBudget(context.Background(), "vision", prompt, "messages.1.content", budget); err == nil {
+		t.Fatal("expected the request-wide image count to reject the second message")
+	}
+}
+
 func TestResolvePromptRejectsDefaultImageCountWithoutMetadata(t *testing.T) {
 	gw := cachedModelGateway(Model{
 		ID:             "vision",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -9,7 +10,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 )
 
-func purge(args []string) error {
+func purge(args []string) (returnErr error) {
 	fs := flag.NewFlagSet("purge", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "show what would be removed without deleting")
 	yes := fs.Bool("yes", false, "confirm deletion without an interactive prompt")
@@ -25,7 +26,7 @@ func purge(args []string) error {
 	if err != nil {
 		return fmt.Errorf("refusing to purge while server lock is active: %w", err)
 	}
-	defer lock.Release()
+	defer func() { returnErr = errors.Join(returnErr, lock.Release()) }()
 	paths, err := store.Purge(true)
 	if err != nil {
 		return err

@@ -247,7 +247,7 @@ func clientToolFromNormalized(tool openai.NormalizedTool, namespace string) (Cli
 	if namespace == "" {
 		namespace = tool.Namespace
 	}
-	params := map[string]any{}
+	var params map[string]any
 	var err error
 	switch tool.Kind {
 	case openai.ToolKindCustom:
@@ -365,15 +365,6 @@ func (rt *RequestTools) CancelCurrent(err error) {
 		batch.Cancel(err)
 	}
 }
-func (rt *RequestTools) context() context.Context {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.ctx == nil {
-		return context.Background()
-	}
-	return rt.ctx
-}
-
 func (rt *RequestTools) PermissionHandler() copilot.PermissionHandlerFunc {
 	allowed := make(map[string]struct{}, len(rt.permitted))
 	for name := range rt.permitted {

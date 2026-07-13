@@ -6,7 +6,6 @@ import (
 	"maps"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
@@ -94,7 +93,7 @@ func (g *RealGateway) StreamContinueChatToolCalls(ctx context.Context, req ChatC
 			if result.PendingBatchID != "" {
 				g.rememberRunner(result.PendingBatchID, runner)
 			}
-			_ = g.store.SaveSessionMetadata(runner.session.SessionID, sessionstore.SessionMetadata{ID: runner.session.SessionID, Kind: "chat", OpenAIID: result.ID, SDKSessionID: runner.session.SessionID, Model: runner.model, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), RetainedPath: runner.retained, FinishReason: result.FinishReason, PendingBatchID: result.PendingBatchID})
+			g.saveChatSessionMetadata(runner.session.SessionID, runner.retained, runner.model, result)
 			return nil
 		})
 	}); err != nil {

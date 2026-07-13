@@ -32,7 +32,7 @@ func TestLiveCopilotTextCompletion(t *testing.T) {
 	if err := gw.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer gw.Stop()
+	defer func() { _ = gw.Stop() }()
 	turn, err := gw.Chat(t.Context(), ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: "gpt-5", FinalUser: openai.ChatMessage{Role: "user", Content: openai.NewTextContent("Reply with OK only.")}})
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 	if err := gw.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer gw.Stop()
+	defer func() { _ = gw.Stop() }()
 
 	ch, err := gw.StreamChat(t.Context(), ChatRequest{
 		OpenAIID:        openai.NewID("chatcmpl_"),
@@ -150,7 +150,7 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 	if err := gw.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer gw.Stop()
+	defer func() { _ = gw.Stop() }()
 
 	tools := []openai.Tool{{
 		Type: "function",

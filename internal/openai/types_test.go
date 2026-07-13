@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+func TestRequestRawFieldsRetainOnlyValidationPresence(t *testing.T) {
+	var chat ChatCompletionRequest
+	if err := json.Unmarshal([]byte(`{"model":"gpt-test","messages":[{"role":"user","content":"large-known-field"}],"n":1}`), &chat); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Raw) != 1 || string(chat.Raw["n"]) != "1" {
+		t.Fatalf("chat.Raw = %#v, want only n presence", chat.Raw)
+	}
+	var responses ResponsesRequest
+	if err := json.Unmarshal([]byte(`{"model":"gpt-test","input":"large-known-field","tools":[],"temperature":0.5}`), &responses); err != nil {
+		t.Fatal(err)
+	}
+	if _, toolsPresent := responses.Raw["tools"]; len(responses.Raw) != 2 || !toolsPresent || string(responses.Raw["temperature"]) != "0.5" {
+		t.Fatalf("responses.Raw = %#v, want only tools and temperature presence", responses.Raw)
+	}
+}
+
 func TestChatCompletionChunkUsageSerialization(t *testing.T) {
 	// Without include_usage, usage is omitted entirely when nil.
 	b, err := json.Marshal(ChatCompletionChunk{ID: "c", Object: ObjectChatChunk})

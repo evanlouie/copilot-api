@@ -24,7 +24,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 	if maxBytes > 0 {
 		body = http.MaxBytesReader(w, r.Body, maxBytes)
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	dec := json.NewDecoder(body)
 	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {

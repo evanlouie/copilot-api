@@ -903,7 +903,7 @@ func TestResponsesWebSocketStreamsResponseCreateAndAllowsLatestStoreFalseContinu
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "store": false, "stream": false, "background": true, "input": "ping"}); err != nil {
 		t.Fatal(err)
@@ -1124,7 +1124,7 @@ func TestResponsesWebSocketIdleTimeoutClosesConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 	ev, err := readOptionalWebSocketErrorEvent(ctx, conn)
 	if err != nil {
@@ -1151,7 +1151,7 @@ func TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": "hi"}); err != nil {
 		t.Fatal(err)
@@ -1183,7 +1183,7 @@ func TestResponsesWebSocketUnknownEventReturnsErrorFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 	if err := wsjson.Write(ctx, conn, map[string]any{"type": "session.update", "event_id": "evt_unknown"}); err != nil {
 		t.Fatal(err)
@@ -1329,7 +1329,7 @@ func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
 	added := strings.Index(out, "event: response.output_item.added")
 	delta := strings.Index(out, "event: response.output_text.delta")
 	completed := strings.Index(out, "event: response.completed")
-	if created < 0 || added < 0 || delta < 0 || completed < 0 || !(created < added && added < delta && delta < completed) {
+	if created < 0 || added < 0 || delta < 0 || completed < 0 || created >= added || added >= delta || delta >= completed {
 		t.Fatalf("unexpected SSE order:\n%s", out)
 	}
 }

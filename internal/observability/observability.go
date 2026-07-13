@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -47,11 +48,29 @@ func TruncateForLog(s string, maxRunes int) string {
 	if maxRunes <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
+	count := 0
+	for byteIndex := range s {
+		if count == maxRunes {
+			return s[:byteIndex] + "\u2026"
+		}
+		count++
 	}
-	return string(runes[:maxRunes]) + "\u2026"
+	return s
+}
+
+func TruncateBytesForLog(b []byte, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	byteIndex := 0
+	for count := 0; byteIndex < len(b); count++ {
+		if count == maxRunes {
+			return string(b[:byteIndex]) + "\u2026"
+		}
+		_, size := utf8.DecodeRune(b[byteIndex:])
+		byteIndex += size
+	}
+	return string(b)
 }
 
 func RequestIDMiddleware(next http.Handler) http.Handler {

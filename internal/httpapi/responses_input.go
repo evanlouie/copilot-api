@@ -103,6 +103,7 @@ func responsesInputHasFallbackContext(items []openai.ResponseInputItem) bool {
 func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.PromptContent, string, error) {
 	transcriptMode := responsesInputNeedsTranscript(items)
 	var prompt openai.PromptContent
+	var promptTexts []string
 	var instructions []string
 	var transcript []string
 	for i, item := range items {
@@ -132,7 +133,7 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 				if err != nil {
 					return openai.PromptContent{}, "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
 				}
-				appendPromptPart(&prompt, part, transcriptMode, &transcript, "User")
+				appendPromptPart(&prompt, &promptTexts, part, transcriptMode, &transcript, "User")
 			case "assistant":
 				text, err := item.Content.Text()
 				if err != nil {
@@ -167,11 +168,12 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 		}
 	}
 	if len(transcript) > 0 {
-		if prompt.Text != "" {
-			transcript = append(transcript, "User:\n"+prompt.Text)
-			prompt.Text = ""
+		if len(promptTexts) > 0 {
+			transcript = append(transcript, "User:\n"+strings.Join(promptTexts, "\n"))
 		}
 		prompt.Text = strings.Join(transcript, "\n\n")
+	} else {
+		prompt.Text = strings.Join(promptTexts, "\n")
 	}
 	return prompt, strings.Join(instructions, "\n\n"), nil
 }
@@ -256,19 +258,13 @@ func responseRoleLabel(role string) string {
 		return role
 	}
 }
-func appendPromptPart(prompt *openai.PromptContent, part openai.PromptContent, transcriptMode bool, transcript *[]string, label string) {
+func appendPromptPart(prompt *openai.PromptContent, promptTexts *[]string, part openai.PromptContent, transcriptMode bool, transcript *[]string, label string) {
 	if transcriptMode {
 		if strings.TrimSpace(part.Text) != "" {
 			*transcript = append(*transcript, label+":\n"+part.Text)
 		}
-		prompt.Images = append(prompt.Images, part.Images...)
-		return
-	}
-	if part.Text != "" {
-		if prompt.Text != "" {
-			prompt.Text += "\n"
-		}
-		prompt.Text += part.Text
+	} else if part.Text != "" {
+		*promptTexts = append(*promptTexts, part.Text)
 	}
 	prompt.Images = append(prompt.Images, part.Images...)
 }

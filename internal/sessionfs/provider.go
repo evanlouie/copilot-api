@@ -14,9 +14,11 @@ import (
 
 const SessionStatePath = "/session-state"
 
+const sessionLockStripes = 64
+
 type Manager struct {
-	Root string
-	mu   sync.Mutex
+	Root  string
+	locks [sessionLockStripes]sync.Mutex
 }
 
 func NewManager(root string) *Manager { return &Manager{Root: root} }
@@ -30,12 +32,34 @@ func (m *Manager) EnsureSession(sessionID string) error {
 }
 
 func (m *Manager) Provider(sessionID string) *Provider {
-	return &Provider{root: m.SessionRoot(sessionID)}
+	root := m.SessionRoot(sessionID)
+	return &Provider{root: root, sharedMu: &m.locks[sessionLockIndex(root)]}
+}
+
+func sessionLockIndex(root string) uint32 {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	hash := uint32(offset32)
+	for i := 0; i < len(root); i++ {
+		hash ^= uint32(root[i])
+		hash *= prime32
+	}
+	return hash % sessionLockStripes
 }
 
 type Provider struct {
-	root string
-	mu   sync.Mutex
+	root     string
+	mu       sync.Mutex
+	sharedMu *sync.Mutex
+}
+
+func (p *Provider) mutex() *sync.Mutex {
+	if p.sharedMu != nil {
+		return p.sharedMu
+	}
+	return &p.mu
 }
 
 func (p *Provider) ReadFile(path string) (string, error) {
@@ -47,8 +71,9 @@ func (p *Provider) ReadFile(path string) (string, error) {
 }
 
 func (p *Provider) WriteFile(path string, content string, mode *int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	mu := p.mutex()
+	mu.Lock()
+	defer mu.Unlock()
 	full := p.fullPath(path)
 	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 		return err
@@ -61,8 +86,9 @@ func (p *Provider) WriteFile(path string, content string, mode *int) error {
 }
 
 func (p *Provider) AppendFile(path string, content string, mode *int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	mu := p.mutex()
+	mu.Lock()
+	defer mu.Unlock()
 	full := p.fullPath(path)
 	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 		return err
@@ -75,9 +101,11 @@ func (p *Provider) AppendFile(path string, content string, mode *int) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = f.WriteString(content)
-	return err
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (p *Provider) Exists(path string) (bool, error) {
@@ -101,8 +129,9 @@ func (p *Provider) Stat(path string) (*copilot.SessionFSFileInfo, error) {
 }
 
 func (p *Provider) MakeDirectory(path string, recursive bool, mode *int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	mu := p.mutex()
+	mu.Lock()
+	defer mu.Unlock()
 	full := p.fullPath(path)
 	perm := os.FileMode(0o700)
 	if mode != nil {
@@ -143,8 +172,9 @@ func (p *Provider) ReadDirectoryWithTypes(path string) ([]rpc.SessionFSReaddirWi
 }
 
 func (p *Provider) Remove(path string, recursive bool, force bool) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	mu := p.mutex()
+	mu.Lock()
+	defer mu.Unlock()
 	full := p.fullPath(path)
 	var err error
 	if recursive {
@@ -159,8 +189,9 @@ func (p *Provider) Remove(path string, recursive bool, force bool) error {
 }
 
 func (p *Provider) Rename(src string, dest string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	mu := p.mutex()
+	mu.Lock()
+	defer mu.Unlock()
 	destPath := p.fullPath(dest)
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o700); err != nil {
 		return err

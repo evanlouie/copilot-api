@@ -35,6 +35,15 @@ func TestBuildChatHistoryTextAndToolEventsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBuildChatHistoryRejectsTrailingToolArgumentJSON(t *testing.T) {
+	_, err := BuildChatHistoryMessages([]Message{
+		{Role: "assistant", ToolCalls: []openai.ChatToolCall{{ID: "call_1", Type: "function", Function: openai.ToolCallFunction{Name: "lookup", Arguments: `{"q":"one"} {"q":"two"}`}}}},
+	}, Options{Model: "gpt-test"})
+	if err == nil {
+		t.Fatal("expected trailing JSON in tool arguments to be rejected")
+	}
+}
+
 func TestBuildChatHistoryRejectsUnknownToolResult(t *testing.T) {
 	_, err := BuildChatHistory([]openai.ChatMessage{{Role: "tool", ToolCallID: "missing", Content: openai.NewTextContent("x")}}, Options{})
 	if err == nil {

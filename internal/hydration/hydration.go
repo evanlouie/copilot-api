@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"time"
 
@@ -137,6 +138,9 @@ func decodeArguments(s string) (any, error) {
 	dec.UseNumber()
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("arguments must contain a single JSON value")
 	}
 	return v, nil
 }

@@ -51,6 +51,30 @@ func TestToolCatalogMergeLoadedRejectsConflictingDefinition(t *testing.T) {
 	}
 }
 
+func TestNewToolCatalogRejectsOversizedInitialCatalog(t *testing.T) {
+	_, err := NewToolCatalog([]NormalizedTool{{Kind: ToolKindFunction, Name: "lookup", Description: strings.Repeat("x", MaxLoadedCatalogBytes)}})
+	if err == nil || !strings.Contains(err.Error(), "catalog is too large") {
+		t.Fatalf("error = %v, want initial catalog size rejection", err)
+	}
+}
+
+func TestNewToolCatalogRejectsEmptyNamespace(t *testing.T) {
+	_, err := NewToolCatalog([]NormalizedTool{{Kind: ToolKindNamespace, Name: "empty"}})
+	if err == nil || !strings.Contains(err.Error(), "at least one child") {
+		t.Fatalf("error = %v, want empty namespace rejection", err)
+	}
+}
+
+func TestNewToolCatalogRejectsDuplicateNamespaces(t *testing.T) {
+	_, err := NewToolCatalog([]NormalizedTool{
+		{Kind: ToolKindNamespace, Name: "duplicate", Children: []NormalizedTool{{Kind: ToolKindFunction, Name: "one"}}},
+		{Kind: ToolKindNamespace, Name: "duplicate", Children: []NormalizedTool{{Kind: ToolKindFunction, Name: "two"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate Responses namespace") {
+		t.Fatalf("error = %v, want duplicate namespace rejection", err)
+	}
+}
+
 func TestToolCatalogMergeLoadedRejectsCumulativeToolCountLimit(t *testing.T) {
 	baseTools := make([]NormalizedTool, 0, MaxInstalledToolCount)
 	for i := 0; i < MaxInstalledToolCount; i++ {

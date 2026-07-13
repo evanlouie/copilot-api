@@ -28,6 +28,10 @@ func (s *SSEWriter) Data(v any) error {
 	if err != nil {
 		return err
 	}
+	return s.DataJSON(b)
+}
+
+func (s *SSEWriter) DataJSON(b []byte) error {
 	if _, err := fmt.Fprintf(s.w, "data: %s\n\n", b); err != nil {
 		return err
 	}
@@ -48,6 +52,10 @@ func (s *SSEWriter) Event(event string, v any) error {
 	if err != nil {
 		return err
 	}
+	return s.EventJSON(event, b)
+}
+
+func (s *SSEWriter) EventJSON(event string, b []byte) error {
 	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, b); err != nil {
 		return err
 	}

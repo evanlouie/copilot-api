@@ -393,7 +393,7 @@ func decodeWebSocketResponseCreate(raw json.RawMessage) (openai.ResponsesRequest
 		return openai.ResponsesRequest{}, ev.EventID, true, openai.InvalidRequest("invalid response.create request: "+err.Error(), "body")
 	}
 	if req.Raw == nil {
-		req.Raw = map[string]any{}
+		req.Raw = map[string]json.RawMessage{}
 	}
 	return req, ev.EventID, generate, nil
 }

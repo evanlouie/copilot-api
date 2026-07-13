@@ -110,16 +110,6 @@ func (w *captureResponseEventWriter) types() []string {
 	return out
 }
 
-func (w *captureResponseEventWriter) itemsOfType(typ string) []openai.ResponseOutputItem {
-	var out []openai.ResponseOutputItem
-	for _, ev := range w.events {
-		if ev.Item != nil && ev.Item.Type == typ {
-			out = append(out, *ev.Item)
-		}
-	}
-	return out
-}
-
 func streamResponse(resp *openai.Response) <-chan copilotgw.ResponseStreamEvent {
 	ch := make(chan copilotgw.ResponseStreamEvent, 1)
 	ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: resp}
@@ -128,12 +118,3 @@ func streamResponse(resp *openai.Response) <-chan copilotgw.ResponseStreamEvent 
 }
 
 func nilContext() context.Context { return context.Background() }
-
-func containsEventType(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}

@@ -59,6 +59,9 @@ func TestCaptureRequestsRehydratesExtendedResponseToolMetadata(t *testing.T) {
 		{ToolCallID: "call_mcp", Name: "mcp__grep_app__searchGitHub", Arguments: map[string]any{"query": "repo:test"}},
 		{ToolCallID: "call_search", Name: "tool_search", Arguments: map[string]any{"query": "grep"}},
 	}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if batch == nil || len(calls) != 3 {
 		t.Fatalf("batch/calls = %#v %#v, want three calls", batch, calls)
 	}

@@ -117,21 +117,21 @@ func (u *ResponseUsage) unmarshalLegacyJSON(data []byte) error {
 }
 
 type ChatCompletionRequest struct {
-	Model               string          `json:"model"`
-	Messages            []ChatMessage   `json:"messages"`
-	Stream              bool            `json:"stream,omitempty"`
-	Tools               []Tool          `json:"tools,omitempty"`
-	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
-	StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
-	Temperature         *float64        `json:"temperature,omitempty"`
-	TopP                *float64        `json:"top_p,omitempty"`
-	PresencePenalty     *float64        `json:"presence_penalty,omitempty"`
-	FrequencyPenalty    *float64        `json:"frequency_penalty,omitempty"`
-	MaxTokens           *int            `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
-	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
-	Raw                 map[string]any  `json:"-"`
+	Model               string                     `json:"model"`
+	Messages            []ChatMessage              `json:"messages"`
+	Stream              bool                       `json:"stream,omitempty"`
+	Tools               []Tool                     `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage            `json:"tool_choice,omitempty"`
+	ParallelToolCalls   *bool                      `json:"parallel_tool_calls,omitempty"`
+	StreamOptions       *StreamOptions             `json:"stream_options,omitempty"`
+	Temperature         *float64                   `json:"temperature,omitempty"`
+	TopP                *float64                   `json:"top_p,omitempty"`
+	PresencePenalty     *float64                   `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    *float64                   `json:"frequency_penalty,omitempty"`
+	MaxTokens           *int                       `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int                       `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string                     `json:"reasoning_effort,omitempty"`
+	Raw                 map[string]json.RawMessage `json:"-"`
 }
 
 type StreamOptions struct {
@@ -139,21 +139,84 @@ type StreamOptions struct {
 }
 
 func (r *ChatCompletionRequest) UnmarshalJSON(data []byte) error {
-	type alias ChatCompletionRequest
-	var a alias
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err := dec.Decode(&a); err != nil {
+	var wire struct {
+		Model               string          `json:"model"`
+		Messages            []ChatMessage   `json:"messages"`
+		Stream              bool            `json:"stream,omitempty"`
+		Tools               []Tool          `json:"tools,omitempty"`
+		ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+		ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+		StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
+		ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+		Audio               json.RawMessage `json:"audio"`
+		FunctionCall        json.RawMessage `json:"function_call"`
+		Functions           json.RawMessage `json:"functions"`
+		LogitBias           json.RawMessage `json:"logit_bias"`
+		Logprobs            json.RawMessage `json:"logprobs"`
+		TopLogprobs         json.RawMessage `json:"top_logprobs"`
+		MaxTokens           json.RawMessage `json:"max_tokens"`
+		MaxCompletionTokens json.RawMessage `json:"max_completion_tokens"`
+		Modalities          json.RawMessage `json:"modalities"`
+		Prediction          json.RawMessage `json:"prediction"`
+		ResponseFormat      json.RawMessage `json:"response_format"`
+		Stop                json.RawMessage `json:"stop"`
+		N                   json.RawMessage `json:"n"`
+		Temperature         json.RawMessage `json:"temperature"`
+		TopP                json.RawMessage `json:"top_p"`
+		PresencePenalty     json.RawMessage `json:"presence_penalty"`
+		FrequencyPenalty    json.RawMessage `json:"frequency_penalty"`
+		Seed                json.RawMessage `json:"seed"`
+		Metadata            json.RawMessage `json:"metadata"`
+		ServiceTier         json.RawMessage `json:"service_tier"`
+		User                json.RawMessage `json:"user"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	var raw map[string]any
-	dec = json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err := dec.Decode(&raw); err != nil {
+	*r = ChatCompletionRequest{
+		Model: wire.Model, Messages: wire.Messages, Stream: wire.Stream, Tools: wire.Tools,
+		ToolChoice: wire.ToolChoice, ParallelToolCalls: wire.ParallelToolCalls,
+		StreamOptions: wire.StreamOptions, ReasoningEffort: wire.ReasoningEffort,
+	}
+	if err := decodeOptionalRaw(wire.Temperature, &r.Temperature); err != nil {
 		return err
 	}
-	*r = ChatCompletionRequest(a)
-	r.Raw = raw
+	if err := decodeOptionalRaw(wire.TopP, &r.TopP); err != nil {
+		return err
+	}
+	if err := decodeOptionalRaw(wire.PresencePenalty, &r.PresencePenalty); err != nil {
+		return err
+	}
+	if err := decodeOptionalRaw(wire.FrequencyPenalty, &r.FrequencyPenalty); err != nil {
+		return err
+	}
+	if err := decodeOptionalRaw(wire.MaxTokens, &r.MaxTokens); err != nil {
+		return err
+	}
+	if err := decodeOptionalRaw(wire.MaxCompletionTokens, &r.MaxCompletionTokens); err != nil {
+		return err
+	}
+	r.Raw = presentRawFields(map[string]json.RawMessage{
+		"audio": wire.Audio, "function_call": wire.FunctionCall, "functions": wire.Functions,
+		"logit_bias": wire.LogitBias, "logprobs": wire.Logprobs, "top_logprobs": wire.TopLogprobs,
+		"max_tokens": wire.MaxTokens, "max_completion_tokens": wire.MaxCompletionTokens,
+		"modalities": wire.Modalities, "prediction": wire.Prediction, "response_format": wire.ResponseFormat,
+		"stop": wire.Stop, "n": wire.N, "temperature": wire.Temperature, "top_p": wire.TopP,
+		"presence_penalty": wire.PresencePenalty, "frequency_penalty": wire.FrequencyPenalty,
+		"seed": wire.Seed, "metadata": wire.Metadata, "service_tier": wire.ServiceTier, "user": wire.User,
+	})
+	return nil
+}
+
+func decodeOptionalRaw[T any](raw json.RawMessage, dst **T) error {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var value T
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	*dst = &value
 	return nil
 }
 
@@ -526,39 +589,85 @@ type ToolCallDeltaFunction struct {
 }
 
 type ResponsesRequest struct {
-	Model              string          `json:"model"`
-	Input              json.RawMessage `json:"input"`
-	Instructions       string          `json:"instructions,omitempty"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
-	Stream             bool            `json:"stream,omitempty"`
-	Tools              []Tool          `json:"tools,omitempty"`
-	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
-	Store              *bool           `json:"store,omitempty"`
-	ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
-	Include            json.RawMessage `json:"include,omitempty"`
-	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
-	Text               json.RawMessage `json:"text,omitempty"`
-	Raw                map[string]any  `json:"-"`
+	Model              string                     `json:"model"`
+	Input              json.RawMessage            `json:"input"`
+	Instructions       string                     `json:"instructions,omitempty"`
+	PreviousResponseID string                     `json:"previous_response_id,omitempty"`
+	Stream             bool                       `json:"stream,omitempty"`
+	Tools              []Tool                     `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage            `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool                      `json:"parallel_tool_calls,omitempty"`
+	Store              *bool                      `json:"store,omitempty"`
+	ReasoningEffort    string                     `json:"reasoning_effort,omitempty"`
+	Include            json.RawMessage            `json:"include,omitempty"`
+	Reasoning          json.RawMessage            `json:"reasoning,omitempty"`
+	Text               json.RawMessage            `json:"text,omitempty"`
+	Raw                map[string]json.RawMessage `json:"-"`
 }
 
 func (r *ResponsesRequest) UnmarshalJSON(data []byte) error {
-	type alias ResponsesRequest
-	var a alias
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err := dec.Decode(&a); err != nil {
+	var wire struct {
+		Model              string          `json:"model"`
+		Input              json.RawMessage `json:"input"`
+		Instructions       string          `json:"instructions,omitempty"`
+		PreviousResponseID string          `json:"previous_response_id,omitempty"`
+		Stream             bool            `json:"stream,omitempty"`
+		Tools              presentToolList `json:"tools,omitempty"`
+		ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
+		ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
+		Store              *bool           `json:"store,omitempty"`
+		ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
+		Include            json.RawMessage `json:"include,omitempty"`
+		Reasoning          json.RawMessage `json:"reasoning,omitempty"`
+		Text               json.RawMessage `json:"text,omitempty"`
+		Background         json.RawMessage `json:"background"`
+		MaxOutputTokens    json.RawMessage `json:"max_output_tokens"`
+		Truncation         json.RawMessage `json:"truncation"`
+		Temperature        json.RawMessage `json:"temperature"`
+		TopP               json.RawMessage `json:"top_p"`
+		Metadata           json.RawMessage `json:"metadata"`
+		ServiceTier        json.RawMessage `json:"service_tier"`
+		User               json.RawMessage `json:"user"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	var raw map[string]any
-	dec = json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err := dec.Decode(&raw); err != nil {
-		return err
+	*r = ResponsesRequest{
+		Model: wire.Model, Input: wire.Input, Instructions: wire.Instructions,
+		PreviousResponseID: wire.PreviousResponseID, Stream: wire.Stream, Tools: wire.Tools.Value,
+		ToolChoice: wire.ToolChoice, ParallelToolCalls: wire.ParallelToolCalls, Store: wire.Store,
+		ReasoningEffort: wire.ReasoningEffort, Include: wire.Include, Reasoning: wire.Reasoning, Text: wire.Text,
 	}
-	*r = ResponsesRequest(a)
-	r.Raw = raw
+	var toolsPresence json.RawMessage
+	if wire.Tools.Present {
+		toolsPresence = json.RawMessage(`true`)
+	}
+	r.Raw = presentRawFields(map[string]json.RawMessage{
+		"background": wire.Background, "max_output_tokens": wire.MaxOutputTokens, "truncation": wire.Truncation,
+		"temperature": wire.Temperature, "top_p": wire.TopP, "include": wire.Include,
+		"reasoning": wire.Reasoning, "text": wire.Text, "metadata": wire.Metadata,
+		"service_tier": wire.ServiceTier, "user": wire.User, "tools": toolsPresence,
+	})
 	return nil
+}
+
+type presentToolList struct {
+	Value   []Tool
+	Present bool
+}
+
+func (p *presentToolList) UnmarshalJSON(data []byte) error {
+	p.Present = true
+	return json.Unmarshal(data, &p.Value)
+}
+
+func presentRawFields(fields map[string]json.RawMessage) map[string]json.RawMessage {
+	for name, raw := range fields {
+		if len(raw) == 0 {
+			delete(fields, name)
+		}
+	}
+	return fields
 }
 
 type Response struct {

@@ -154,6 +154,9 @@ func normalizeResponsesTool(tool Tool, param string, namespaceChild bool) (Norma
 		if tool.Name == "" {
 			return NormalizedTool{}, InvalidRequest("namespace tools require name", param+".name")
 		}
+		if len(tool.Tools) == 0 {
+			return NormalizedTool{}, InvalidRequest("namespace tools require at least one child tool", param+".tools")
+		}
 		children := make([]NormalizedTool, 0, len(tool.Tools))
 		seen := map[string]struct{}{}
 		for i, child := range tool.Tools {
@@ -220,9 +223,17 @@ func normalizeLoadableToolSearchTool(tool Tool, param string) (NormalizedTool, e
 
 func validateNormalizedToolCatalog(tools []NormalizedTool, param string) error {
 	identities := map[string]struct{}{}
+	namespaces := map[string]struct{}{}
 	sdkNames := map[string]string{NoToolsSentinelName: "reserved sentinel"}
 	for _, tool := range tools {
 		if tool.Kind == ToolKindNamespace {
+			if len(tool.Children) == 0 {
+				return InvalidRequest("namespace tools require at least one child tool", param)
+			}
+			if _, exists := namespaces[tool.Name]; exists {
+				return InvalidRequest("duplicate Responses namespace tool name", param)
+			}
+			namespaces[tool.Name] = struct{}{}
 			for _, child := range tool.Children {
 				child.Namespace = tool.Name
 				if err := validateFlattenedToolIdentity(child, param, identities, sdkNames); err != nil {

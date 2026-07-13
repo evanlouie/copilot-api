@@ -28,12 +28,13 @@ type RealGateway struct {
 	store  *sessionstore.Store
 	broker *toolproxy.Broker
 
-	modelsMu          sync.Mutex
-	models            []Model
-	modelsFetched     time.Time
-	modelsCacheTTL    time.Duration
-	modelsRefreshing  bool
-	modelsRefreshDone chan struct{}
+	modelsMu               sync.Mutex
+	models                 []Model
+	modelsFetched          time.Time
+	modelsCacheTTL         time.Duration
+	modelsRefreshing       bool
+	modelsRefreshDone      chan struct{}
+	lastForcedModelRefresh time.Time
 	// modelsFetcher overrides the upstream model fetch. It is nil in production
 	// (the SDK client is used) and set by tests to observe refresh behavior.
 	modelsFetcher  func(context.Context) ([]Model, error)

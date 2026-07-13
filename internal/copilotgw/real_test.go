@@ -461,6 +461,27 @@ func TestNewRealNormalizesNilLogger(t *testing.T) {
 	gw.log.Warn("nil-logger fallback smoke test", "ok", true)
 }
 
+func TestFindModelThrottlesSequentialForcedRefreshes(t *testing.T) {
+	var calls int32
+	gw := &RealGateway{
+		models:         []Model{{ID: "known"}},
+		modelsFetched:  time.Now(),
+		modelsCacheTTL: time.Hour,
+		modelsFetcher: func(context.Context) ([]Model, error) {
+			atomic.AddInt32(&calls, 1)
+			return []Model{{ID: "known"}}, nil
+		},
+	}
+	for range 2 {
+		if _, err := gw.findModel(context.Background(), "missing"); err == nil {
+			t.Fatal("expected missing model error")
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("sequential cache misses fetched models %d times, want 1", got)
+	}
+}
+
 func TestRefreshModelsDeduplicatesConcurrentForcedRefreshes(t *testing.T) {
 	var calls int32
 	release := make(chan struct{})

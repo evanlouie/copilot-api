@@ -77,7 +77,11 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Release()
+	defer func() {
+		if err := lock.Release(); err != nil {
+			logger.Error("failed to release server lock", "error", err)
+		}
+	}()
 
 	gw := copilotgw.NewReal(cfg, store, logger)
 	startupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -85,7 +89,11 @@ func serve(args []string) error {
 	if err := gw.Start(startupCtx); err != nil {
 		return err
 	}
-	defer gw.Stop()
+	defer func() {
+		if err := gw.Stop(); err != nil {
+			logger.Error("failed to stop copilot runtime", "error", err)
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

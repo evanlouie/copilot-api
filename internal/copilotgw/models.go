@@ -9,6 +9,8 @@ import (
 	"github.com/github/copilot-sdk/go/rpc"
 )
 
+const modelMissRefreshInterval = 30 * time.Second
+
 func (g *RealGateway) ListModels(ctx context.Context) ([]Model, error) {
 	return g.refreshModels(ctx, false)
 }
@@ -101,6 +103,20 @@ func (g *RealGateway) finishModelRefresh(done chan struct{}, models []Model, err
 		close(done)
 	}
 	g.modelsMu.Unlock()
+}
+
+func (g *RealGateway) shouldForceModelRefresh() bool {
+	g.modelsMu.Lock()
+	defer g.modelsMu.Unlock()
+	if g.modelsRefreshing {
+		return true
+	}
+	now := time.Now()
+	if !g.lastForcedModelRefresh.IsZero() && now.Sub(g.lastForcedModelRefresh) < modelMissRefreshInterval {
+		return false
+	}
+	g.lastForcedModelRefresh = now
+	return true
 }
 
 func (g *RealGateway) fetchModels(ctx context.Context) ([]Model, error) {

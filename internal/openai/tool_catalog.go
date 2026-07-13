@@ -86,7 +86,11 @@ func NewToolCatalog(tools []NormalizedTool) (ToolCatalog, error) {
 	if err := validateInstalledToolCount(cloned, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
-	return ToolCatalog{Tools: cloned}, nil
+	catalog := ToolCatalog{Tools: cloned}
+	if err := validateStoredCatalogSize(catalog, "tools"); err != nil {
+		return ToolCatalog{}, err
+	}
+	return catalog, nil
 }
 
 func ToolCatalogFromStored(stored *StoredToolCatalog) (ToolCatalog, bool, error) {
@@ -178,7 +182,7 @@ func (c ToolCatalog) mergeTools(tools []NormalizedTool, loadedOnly bool, param s
 	if err := validateInstalledToolCount(merged.Tools, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
-	if err := validateStoredCatalogSize(merged); err != nil {
+	if err := validateStoredCatalogSize(merged, param); err != nil {
 		return ToolCatalog{}, err
 	}
 	return merged, nil
@@ -323,7 +327,7 @@ func SafeResponsesSDKAlias(public string) string {
 		}
 	}
 	alias := b.String()
-	if alias == "" || !((alias[0] >= 'a' && alias[0] <= 'z') || (alias[0] >= 'A' && alias[0] <= 'Z') || alias[0] == '_') {
+	if alias == "" || !isSDKNameStart(alias[0]) {
 		alias = "tool_" + alias
 	}
 	h := sha1.Sum([]byte(public))
@@ -335,6 +339,10 @@ func SafeResponsesSDKAlias(public string) string {
 		}
 	}
 	return alias + suffix
+}
+
+func isSDKNameStart(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_'
 }
 
 func normalizedToolFromStored(spec StoredToolSpec, param string) (NormalizedTool, error) {
@@ -544,13 +552,13 @@ func validateInstalledToolCount(tools []NormalizedTool, param string) error {
 	return nil
 }
 
-func validateStoredCatalogSize(c ToolCatalog) error {
+func validateStoredCatalogSize(c ToolCatalog, param string) error {
 	b, err := json.Marshal(c.StoredDTO())
 	if err != nil {
 		return err
 	}
 	if len(b) > MaxLoadedCatalogBytes {
-		return InvalidRequest("installed tool catalog is too large", "input")
+		return InvalidRequest("installed tool catalog is too large", param)
 	}
 	return nil
 }

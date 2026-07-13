@@ -16,7 +16,7 @@ func TestLockExcludesSecondProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Release()
+	defer func() { _ = lock.Release() }()
 	if _, err := AcquireLock(store.LockPath()); err == nil {
 		t.Fatal("expected second lock acquisition to fail")
 	}

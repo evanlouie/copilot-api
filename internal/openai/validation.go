@@ -12,7 +12,7 @@ var functionNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
 type unsupportedField struct {
 	name    string
 	message string
-	allow   func(any) bool
+	allow   func(json.RawMessage) bool
 }
 
 var alwaysRejectChatFields = []unsupportedField{
@@ -252,7 +252,7 @@ func ResponsesReasoningEffort(req *ResponsesRequest) string {
 	return effort
 }
 
-func validateUnsupportedFields(raw map[string]any, fields []unsupportedField) error {
+func validateUnsupportedFields(raw map[string]json.RawMessage, fields []unsupportedField) error {
 	for _, field := range fields {
 		value, ok := raw[field.name]
 		if !ok {
@@ -347,17 +347,13 @@ func ToolChoiceNone(raw json.RawMessage) bool {
 	return len(raw) > 0 && json.Unmarshal(raw, &s) == nil && s == "none"
 }
 
-func isOne(v any) bool {
-	switch x := v.(type) {
-	case json.Number:
-		return x.String() == "1" || x.String() == "1.0"
-	case float64:
-		return x == 1
-	case int:
-		return x == 1
-	default:
+func isOne(raw json.RawMessage) bool {
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err != nil {
 		return false
 	}
+	value, err := n.Float64()
+	return err == nil && value == 1
 }
 
 func FoldChatInstructions(messages []ChatMessage) (string, []ChatMessage, error) {

@@ -55,6 +55,18 @@ func TestEnsureSessionCreatesReadableProviderRoot(t *testing.T) {
 	}
 }
 
+func TestManagerSharesLockForSessionWithoutRetainingProviders(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	first := manager.Provider("session-1")
+	second := manager.Provider("session-1")
+	if first == second {
+		t.Fatal("Provider unexpectedly retained a provider instance")
+	}
+	if first.mutex() != second.mutex() {
+		t.Fatal("Provider returned independent locks for the same session root")
+	}
+}
+
 func TestWriteEvents(t *testing.T) {
 	root := t.TempDir()
 	path, err := WriteEvents(root, "abc", []byte("{}\n"))

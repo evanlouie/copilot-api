@@ -10,7 +10,6 @@ import (
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
-	"github.com/google/uuid"
 )
 
 func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error) {
@@ -20,72 +19,17 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
 	}
-	storeVisible := req.Store
-	if !storeVisible {
-		// OpenAI Responses defaults store to true. The http layer sets this explicitly.
-		storeVisible = false
-	}
-
 	if len(req.ToolOutputs) > 0 {
 		return g.continueToolResponse(ctx, req)
 	}
-	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
+	prepared, err := g.prepareResponseTurn(ctx, &req, false)
 	if err != nil {
 		return nil, err
 	}
-	prompt, err := g.resolvePrompt(ctx, req.Model, req.Input, "input")
-	if err != nil {
-		return nil, err
-	}
-	var previousRecord *sessionstore.ResponseRecord
-	if req.PreviousResponseID != "" {
-		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
-		if err != nil {
-			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
-		}
-		previousRecord = &record
-	}
-	catalog, err := responseCatalogForRequest(req, previousRecord)
-	if err != nil {
-		return nil, err
-	}
-	rt, err := toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoiceNone)
-	if err != nil {
-		return nil, openai.InvalidRequest(err.Error(), "tools")
-	}
-	events := make(chan copilot.SessionEvent, 256)
-	var session *copilot.Session
-	var sessionID string
-	var previous *string
-	if previousRecord != nil {
-		sessionID = previousRecord.SDKSessionID
-		previous = &req.PreviousResponseID
-		if !req.ForceSynthetic {
-			session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
-		}
-		if req.ForceSynthetic || err != nil || session == nil {
-			if g.log != nil && !req.ForceSynthetic {
-				g.log.Warn("falling back to synthetic Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
-			}
-			prompt = g.responseContinuationPrompt(*previousRecord, prompt)
-			sessionID = "resp_sdk_" + uuid.NewString()
-			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
-		}
-	} else {
-		sessionID = "resp_sdk_" + uuid.NewString()
-		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, false, events)
-	}
-	if err != nil {
-		return nil, openai.Upstream(err.Error())
-	}
-	if session == nil {
-		return nil, openai.Upstream("copilot SDK returned nil session")
-	}
-	retained := g.fs.SessionRoot(sessionID)
-	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
+	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
 	runner.watchContext(ctx)
-	if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
-		_ = session.Disconnect()
+	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.prompt.Text, Attachments: prepared.prompt.Attachments}); err != nil {
+		_ = prepared.session.Disconnect()
 		return nil, openai.Upstream(err.Error())
 	}
 	turn, err := runner.waitInitial(ctx)
@@ -95,11 +39,11 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if turn.PendingBatchID != "" {
 		g.rememberRunner(turn.PendingBatchID, runner)
 	}
-	resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, storeVisible, turn, req.SuppressReasoning)
-	record := recordFromResponse(resp, sessionID, retained)
+	resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, turn, req.SuppressReasoning)
+	record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 	record.InputText = req.Input.Text
 	record.PendingBatchID = turn.PendingBatchID
-	record.InstalledToolCatalog = catalog.StoredDTO()
+	record.InstalledToolCatalog = prepared.catalog.StoredDTO()
 	record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 	record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
 	if err := g.store.SaveResponse(record); err != nil {
@@ -194,98 +138,23 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		go runner.discardInitial()
 		return ch, nil
 	}
-	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
+	prepared, err := g.prepareResponseTurn(ctx, &req, true)
 	if err != nil {
 		return nil, err
 	}
-	events := make(chan copilot.SessionEvent, 256)
-	var session *copilot.Session
-	var sessionID string
-	var previous *string
-	var rt *toolproxy.RequestTools
-	var prompt resolvedPrompt
-	var catalog openai.ToolCatalog
-	retained := ""
-	if warmSession, warmTools, warmEvents, warmRetained, warmPrevious, ok := req.WarmSession.use(&req); ok {
-		session = warmSession
-		rt = warmTools
-		events = warmEvents
-		retained = warmRetained
-		previous = warmPrevious
-		sessionID = session.SessionID
-		catalog, _ = openai.NewToolCatalog(req.Tools)
-	} else {
-		if req.WarmSession != nil && req.WarmSession.ResponseID() == req.PreviousResponseID {
-			req.WarmSession.Disconnect()
-		}
-		prompt, err = g.resolvePrompt(ctx, req.Model, req.Input, "input")
-		if err != nil {
-			return nil, err
-		}
-		var previousRecord *sessionstore.ResponseRecord
-		if req.PreviousResponseID != "" {
-			record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
-			if err != nil {
-				return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
-			}
-			previousRecord = &record
-		}
-		catalog, err = responseCatalogForRequest(req, previousRecord)
-		if err != nil {
-			return nil, err
-		}
-		rt, err = toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoiceNone)
-		if err != nil {
-			return nil, openai.InvalidRequest(err.Error(), "tools")
-		}
-		if previousRecord != nil {
-			sessionID = previousRecord.SDKSessionID
-			previous = &req.PreviousResponseID
-			if !req.ForceSynthetic {
-				session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
-			}
-			if req.ForceSynthetic || err != nil || session == nil {
-				if g.log != nil && !req.ForceSynthetic {
-					g.log.Warn("falling back to synthetic streaming Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
-				}
-				prompt = g.responseContinuationPrompt(*previousRecord, prompt)
-				sessionID = "resp_sdk_" + uuid.NewString()
-				session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
-			}
-		} else {
-			sessionID = "resp_sdk_" + uuid.NewString()
-			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
-		}
-	}
-	if session != nil && prompt.Text == "" && len(prompt.Attachments) == 0 {
-		prompt, err = g.resolvePrompt(ctx, req.Model, req.Input, "input")
-		if err != nil {
-			_ = session.Disconnect()
-			return nil, err
-		}
-	}
-	if err != nil {
-		return nil, openai.Upstream(err.Error())
-	}
-	if session == nil {
-		return nil, openai.Upstream("copilot SDK returned nil session")
-	}
-	if retained == "" {
-		retained = g.fs.SessionRoot(sessionID)
-	}
 	ch := make(chan ResponseStreamEvent, 32)
-	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, session, rt, events, retained, "response", req.ResponseID)
+	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
 	runner.watchContext(ctx)
-	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, previous, req.Store, req.SuppressReasoning, ctx.Done())
+	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, req.SuppressReasoning, ctx.Done())
 	runner.setOnResult(func(turn *TurnResult) error {
 		if turn.PendingBatchID != "" {
 			g.rememberRunner(turn.PendingBatchID, runner)
 		}
-		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, previous, req.Store, turn, req.SuppressReasoning)
-		record := recordFromResponse(resp, sessionID, retained)
+		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, turn, req.SuppressReasoning)
+		record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 		record.InputText = req.Input.Text
 		record.PendingBatchID = turn.PendingBatchID
-		record.InstalledToolCatalog = catalog.StoredDTO()
+		record.InstalledToolCatalog = prepared.catalog.StoredDTO()
 		record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 		record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
 		if err := g.store.SaveResponse(record); err != nil {
@@ -295,10 +164,10 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	})
 	go runner.discardInitial()
 	go func() {
-		runner.debug(g, "copilot send started", "prompt_bytes", len(prompt.Text), "attachment_count", len(prompt.Attachments))
-		if _, err := session.Send(ctx, copilot.MessageOptions{Prompt: prompt.Text, Attachments: prompt.Attachments}); err != nil {
+		runner.debug(g, "copilot send started", "prompt_bytes", len(prepared.prompt.Text), "attachment_count", len(prepared.prompt.Attachments))
+		if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.prompt.Text, Attachments: prepared.prompt.Attachments}); err != nil {
 			runner.debug(g, "copilot send failed", "error", err.Error())
-			runner.failSend(events, err)
+			runner.failSend(prepared.events, err)
 			return
 		}
 		runner.debug(g, "copilot send returned")

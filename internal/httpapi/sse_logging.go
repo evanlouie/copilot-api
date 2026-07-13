@@ -40,9 +40,13 @@ func (s *Server) writeSSEData(ctx context.Context, writer *openai.SSEWriter, lab
 	if !s.debugEnabled(ctx) {
 		return writer.Data(v)
 	}
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
 	start := time.Now()
-	err := writer.Data(v)
-	s.debugSSEWrite(ctx, "sse data written", label, start, err, v, attrs...)
+	err = writer.DataJSON(payload)
+	s.debugSSEWrite(ctx, "sse data written", label, start, err, payload, attrs...)
 	return err
 }
 
@@ -60,14 +64,18 @@ func (s *Server) writeSSEEvent(ctx context.Context, writer *openai.SSEWriter, ev
 	if !s.debugEnabled(ctx) {
 		return writer.Event(event, v)
 	}
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
 	start := time.Now()
-	err := writer.Event(event, v)
+	err = writer.EventJSON(event, payload)
 	attrs = append([]any{"event", event}, attrs...)
-	s.debugSSEWrite(ctx, "sse event written", event, start, err, v, attrs...)
+	s.debugSSEWrite(ctx, "sse event written", event, start, err, payload, attrs...)
 	return err
 }
 
-func (s *Server) debugSSEWrite(ctx context.Context, msg, label string, start time.Time, err error, v any, attrs ...any) {
+func (s *Server) debugSSEWrite(ctx context.Context, msg, label string, start time.Time, err error, payload []byte, attrs ...any) {
 	if !s.debugEnabled(ctx) {
 		return
 	}
@@ -75,14 +83,10 @@ func (s *Server) debugSSEWrite(ctx context.Context, msg, label string, start tim
 	if err != nil {
 		base = append(base, "error", err.Error())
 	}
-	if v != nil {
-		if b, marshalErr := json.Marshal(v); marshalErr == nil {
-			base = append(base, "payload_bytes", len(b))
-			if s.cfg.LogContent {
-				base = append(base, "payload_preview", observability.TruncateForLog(string(b), 240))
-			}
-		} else {
-			base = append(base, "payload_marshal_error", marshalErr.Error())
+	if payload != nil {
+		base = append(base, "payload_bytes", len(payload))
+		if s.cfg.LogContent {
+			base = append(base, "payload_preview", observability.TruncateBytesForLog(payload, 240))
 		}
 	}
 	base = append(base, attrs...)
