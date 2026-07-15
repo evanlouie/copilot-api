@@ -674,9 +674,16 @@ func (b *Batch) CompleteWithSetup(outputs map[string]string, setup func()) error
 
 func (b *Batch) CompleteToolOutputsWithSetup(outputs map[string]openai.ResponseToolOutput, setup func()) error {
 	b.mu.Lock()
-	if b.expired || time.Now().After(b.ExpiresAt) {
-		b.expired = true
+	if b.expired {
 		b.mu.Unlock()
+		return ErrExpired
+	}
+	if time.Now().After(b.ExpiresAt) {
+		b.mu.Unlock()
+		// Use the common close path so calls, contexts, abort callbacks, and
+		// broker/runner expiry hooks are all released even when completion wins
+		// the race with the timer callback.
+		b.closeBatch(ErrExpired, true)
 		return ErrExpired
 	}
 	if b.completed {

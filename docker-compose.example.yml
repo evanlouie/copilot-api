@@ -5,7 +5,7 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       COPILOT_API_ADDR: "0.0.0.0:8080"
-      COPILOT_API_KEY: "change-me"
+      COPILOT_API_KEY: "${COPILOT_API_KEY:?required}"
       # Optional token auth for the Copilot SDK. Otherwise mount/use logged-in auth appropriate for your environment.
       # GITHUB_TOKEN: "${GITHUB_TOKEN}"
     volumes:

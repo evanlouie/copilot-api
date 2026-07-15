@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -127,7 +128,9 @@ func (c Config) EnsureDirs() error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
-		_ = os.Chmod(dir, 0o700)
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("secure %s: %w", dir, err)
+		}
 	}
 	return nil
 }
@@ -148,14 +151,17 @@ func parseDurationEnv(key string, def time.Duration) (time.Duration, error) {
 		return 0, nil
 	}
 	if d, err := time.ParseDuration(v); err == nil {
+		if d < 0 {
+			return 0, fmt.Errorf("%s must be non-negative", key)
+		}
 		return d, nil
 	}
 	seconds, err := strconv.ParseFloat(v, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be a Go duration (for example 5m) or seconds: %w", key, err)
 	}
-	if seconds < 0 {
-		return 0, fmt.Errorf("%s must be non-negative", key)
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 || seconds > float64(math.MaxInt64)/float64(time.Second) {
+		return 0, fmt.Errorf("%s must be finite, non-negative, and within the supported duration range", key)
 	}
 	return time.Duration(seconds * float64(time.Second)), nil
 }

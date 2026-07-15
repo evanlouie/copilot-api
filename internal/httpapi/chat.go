@@ -99,17 +99,19 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req copilotg
 }
 
 func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, streamID, model string, includeUsage bool, start func(context.Context) (<-chan copilotgw.StreamEvent, error)) {
+	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+	// Complete synchronous gateway preflight before committing a 200 SSE
+	// response, so validation/not-found/upstream setup errors retain their HTTP
+	// status and standard JSON error envelope.
+	ch, err := start(ctx)
+	if err != nil {
+		openai.WriteError(w, err)
+		return
+	}
 	writer, ok := openai.NewSSEWriter(w)
 	if !ok {
 		openai.WriteError(w, openai.Internal("streaming unsupported by ResponseWriter"))
-		return
-	}
-	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
-	defer cancel()
-	ch, err := start(ctx)
-	if err != nil {
-		_ = writer.Data(openai.ErrorEnvelope{Error: errorObject(err)})
-		_ = writer.Done()
 		return
 	}
 	created := openai.UnixNow()

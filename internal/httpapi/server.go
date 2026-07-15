@@ -46,7 +46,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	if err := s.gw.Ready(r.Context()); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "error": err.Error()})
+		if s.log != nil {
+			s.log.WarnContext(r.Context(), "readiness check failed", "error", err)
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})

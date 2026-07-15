@@ -78,7 +78,61 @@ func (g *RealGateway) modelsFreshLocked() bool {
 }
 
 func cloneModels(models []Model) []Model {
-	return append([]Model(nil), models...)
+	out := make([]Model, len(models))
+	for i, model := range models {
+		out[i] = model
+		out[i].Metadata = cloneStringAnyMap(model.Metadata)
+		out[i].SupportedReasoningEfforts = append([]string(nil), model.SupportedReasoningEfforts...)
+		if model.Limits != nil {
+			limits := *model.Limits
+			limits.MaxContextWindowTokens = cloneInt64(model.Limits.MaxContextWindowTokens)
+			limits.MaxPromptTokens = cloneInt64(model.Limits.MaxPromptTokens)
+			limits.MaxOutputTokens = cloneInt64(model.Limits.MaxOutputTokens)
+			out[i].Limits = &limits
+		}
+		if model.Vision != nil {
+			vision := *model.Vision
+			vision.SupportedMediaTypes = append([]string(nil), model.Vision.SupportedMediaTypes...)
+			out[i].Vision = &vision
+		}
+	}
+	return out
+}
+
+func cloneInt64(src *int64) *int64 {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
+}
+
+func cloneStringAnyMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]any, len(src))
+	for key, value := range src {
+		switch value := value.(type) {
+		case map[string]any:
+			out[key] = cloneStringAnyMap(value)
+		case []any:
+			items := make([]any, len(value))
+			for i, item := range value {
+				if nested, ok := item.(map[string]any); ok {
+					items[i] = cloneStringAnyMap(nested)
+				} else {
+					items[i] = item
+				}
+			}
+			out[key] = items
+		case []string:
+			out[key] = append([]string(nil), value...)
+		default:
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func (g *RealGateway) refreshModelsInBackground(done chan struct{}) {

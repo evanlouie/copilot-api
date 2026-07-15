@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
 )
 
 func TestRunCommandDispatch(t *testing.T) {
@@ -36,7 +38,8 @@ func TestPurgeDryRunAndConfirmed(t *testing.T) {
 	t.Setenv("COPILOT_API_STATE_DIR", filepath.Join(root, "state"))
 	t.Setenv("COPILOT_API_CACHE_DIR", filepath.Join(root, "cache"))
 	t.Setenv("COPILOT_API_CONFIG_DIR", filepath.Join(root, "config"))
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+	store := sessionstore.New(dataDir, filepath.Join(root, "state"), filepath.Join(root, "cache"))
+	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
 	retained := filepath.Join(dataDir, "retained")

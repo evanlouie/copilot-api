@@ -55,7 +55,7 @@ func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, req ChatContinu
 		}
 		return turn, nil
 	case <-ctx.Done():
-		return nil, openai.InvalidRequest(ctx.Err().Error(), "messages")
+		return nil, requestContextError(ctx)
 	}
 }
 
@@ -295,11 +295,11 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
 		record.InstalledToolCatalog = catalogDTO
 		if err := g.store.SaveResponse(record); err != nil {
-			return nil, openai.Internal(err.Error())
+			return nil, openai.Internal("failed to persist response")
 		}
 		return &ResponseResult{Response: resp}, nil
 	case <-ctx.Done():
-		return nil, openai.InvalidRequest(ctx.Err().Error(), "input")
+		return nil, requestContextError(ctx)
 	}
 }
 

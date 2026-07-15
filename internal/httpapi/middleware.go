@@ -28,9 +28,17 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 	dec := json.NewDecoder(body)
 	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return openai.RequestTooLarge()
+		}
 		return openai.InvalidRequest("invalid JSON request body: "+err.Error(), "body")
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return openai.RequestTooLarge()
+		}
 		return openai.InvalidRequest("request body must contain a single JSON object", "body")
 	}
 	return nil
@@ -119,7 +127,7 @@ func requestLoggingMiddleware(log *slog.Logger, logContent bool, next http.Handl
 			"path", r.URL.EscapedPath(),
 			"remote_ip", remoteIP(r.RemoteAddr),
 		}
-		if ua := r.UserAgent(); ua != "" {
+		if ua := boundedUserAgent(r.UserAgent()); ua != "" {
 			startAttrs = append(startAttrs, "user_agent", ua)
 		}
 		logger.Debug("request received", startAttrs...)
@@ -156,7 +164,7 @@ func requestLoggingMiddleware(log *slog.Logger, logContent bool, next http.Handl
 		if fields.Continuation {
 			attrs = append(attrs, "continuation", true)
 		}
-		if ua := r.UserAgent(); ua != "" {
+		if ua := boundedUserAgent(r.UserAgent()); ua != "" {
 			attrs = append(attrs, "user_agent", ua)
 		}
 		if logContent {
@@ -364,6 +372,14 @@ func (w *loggingResponseWriter) Flush() {
 func (w *loggingResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
+func boundedUserAgent(ua string) string {
+	const max = 512
+	if len(ua) <= max {
+		return ua
+	}
+	return ua[:max] + "…"
+}
+
 func remoteIP(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err == nil {
@@ -387,7 +403,7 @@ func asAPIError(err error) *openai.APIError {
 	if errors.As(err, &api) {
 		return api
 	}
-	return openai.Internal(err.Error())
+	return openai.Internal("internal server error")
 }
 func errorObject(err error) openai.ErrorObject {
 	api := asAPIError(err)

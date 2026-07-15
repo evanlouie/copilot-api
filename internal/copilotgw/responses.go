@@ -22,6 +22,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if len(req.ToolOutputs) > 0 {
 		return g.continueToolResponse(ctx, req)
 	}
+	incrementalInput := req.Input.Text
 	prepared, err := g.prepareResponseTurn(ctx, &req, false)
 	if err != nil {
 		return nil, err
@@ -29,7 +30,8 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
 	runner.watchContext(ctx)
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.prompt.Text, Attachments: prepared.prompt.Attachments}); err != nil {
-		_ = prepared.session.Disconnect()
+		runner.failSend(prepared.events, err)
+		_, _ = runner.waitInitial(ctx)
 		return nil, openai.Upstream(err.Error())
 	}
 	turn, err := runner.waitInitial(ctx)
@@ -41,13 +43,13 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	}
 	resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, turn, req.SuppressReasoning)
 	record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
-	record.InputText = req.Input.Text
+	record.InputText = incrementalInput
 	record.PendingBatchID = turn.PendingBatchID
 	record.InstalledToolCatalog = prepared.catalog.StoredDTO()
 	record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 	record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
 	if err := g.store.SaveResponse(record); err != nil {
-		return nil, openai.Internal(err.Error())
+		return nil, openai.Internal("failed to persist response")
 	}
 	return &ResponseResult{Response: resp}, nil
 }
@@ -125,7 +127,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 				record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
 				record.InstalledToolCatalog = catalogDTO
 				if err := g.store.SaveResponse(record); err != nil {
-					return openai.Internal(err.Error())
+					return openai.Internal("failed to persist response")
 				}
 				return nil
 			})
@@ -138,6 +140,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		go runner.discardInitial()
 		return ch, nil
 	}
+	incrementalInput := req.Input.Text
 	prepared, err := g.prepareResponseTurn(ctx, &req, true)
 	if err != nil {
 		return nil, err
@@ -152,13 +155,13 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, turn, req.SuppressReasoning)
 		record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
-		record.InputText = req.Input.Text
+		record.InputText = incrementalInput
 		record.PendingBatchID = turn.PendingBatchID
 		record.InstalledToolCatalog = prepared.catalog.StoredDTO()
 		record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 		record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
 		if err := g.store.SaveResponse(record); err != nil {
-			return openai.Internal(err.Error())
+			return openai.Internal("failed to persist response")
 		}
 		return nil
 	})
@@ -312,7 +315,7 @@ func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Respo
 		if errors.Is(err, sessionstore.ErrNotFound) {
 			return nil, openai.NotFound("response not found", "not_found")
 		}
-		return nil, openai.Internal(err.Error())
+		return nil, openai.Internal("failed to load response")
 	}
 	resp := &openai.Response{ID: record.ID, Object: openai.ObjectResponse, CreatedAt: record.CreatedAt.Unix(), Status: record.Status, Model: record.Model, Instructions: record.Instructions, Output: record.Output, OutputText: record.OutputText, Store: record.Stored, Usage: record.Usage, Error: nil, IncompleteDetails: nil, ParallelToolCalls: true}
 	if record.PreviousResponseID != "" {
@@ -325,7 +328,7 @@ func (g *RealGateway) DeleteResponse(ctx context.Context, id string) error {
 		if errors.Is(err, sessionstore.ErrNotFound) {
 			return openai.NotFound("response not found", "not_found")
 		}
-		return openai.Internal(err.Error())
+		return openai.Internal("failed to delete response")
 	}
 	return nil
 }

@@ -76,10 +76,22 @@ func TruncateBytesForLog(b []byte, maxRunes int) string {
 func RequestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
-		if id == "" {
+		if !validRequestID(id) {
 			id = NewRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(w, r.WithContext(WithRequestID(r.Context(), id)))
 	})
+}
+
+func validRequestID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x21 || r > 0x7e {
+			return false
+		}
+	}
+	return true
 }

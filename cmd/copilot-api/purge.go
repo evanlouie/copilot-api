@@ -22,11 +22,8 @@ func purge(args []string) (returnErr error) {
 		return err
 	}
 	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
-	lock, err := sessionstore.AcquireLock(store.LockPath())
-	if err != nil {
-		return fmt.Errorf("refusing to purge while server lock is active: %w", err)
-	}
-	defer func() { returnErr = errors.Join(returnErr, lock.Release()) }()
+	// Inventory is genuinely read-only: do not create the state directory or a
+	// lock file for --dry-run.
 	paths, err := store.Purge(true)
 	if err != nil {
 		return err
@@ -43,6 +40,11 @@ func purge(args []string) (returnErr error) {
 		fmt.Println("Dry run only; no files removed.")
 		return nil
 	}
+	lock, err := sessionstore.AcquireLock(store.LockPath())
+	if err != nil {
+		return fmt.Errorf("refusing to purge while server lock is active: %w", err)
+	}
+	defer func() { returnErr = errors.Join(returnErr, lock.Release()) }()
 	if !*yes {
 		fmt.Fprint(os.Stderr, "Type 'yes' to purge retained copilot-api data: ")
 		var answer string

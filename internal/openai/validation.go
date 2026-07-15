@@ -74,9 +74,10 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 			return err
 		}
 	}
-	// parallel_tool_calls=true is accepted: the internal toolproxy batch model
-	// already captures and replays multiple tool calls per turn, so there is no
-	// reason to reject the OpenAI default.
+	// The backend may produce a batch and cannot enforce serial planning.
+	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
+		return InvalidRequest("parallel_tool_calls=false is not supported", "parallel_tool_calls")
+	}
 	if err := ValidateTools(req.Tools); err != nil {
 		return err
 	}

@@ -187,7 +187,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	record.InstalledToolCatalog = catalog.StoredDTO()
 	if err := g.store.SaveResponse(record); err != nil {
 		_ = session.Disconnect()
-		return nil, openai.Internal(err.Error())
+		return nil, openai.Internal("failed to persist response")
 	}
 	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
 	return &WarmResponseResult{Response: resp, WarmSession: warm}, nil

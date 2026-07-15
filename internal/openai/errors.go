@@ -32,6 +32,10 @@ func InvalidRequest(message, param string) *APIError {
 	return &APIError{Status: http.StatusBadRequest, Message: message, Type: "invalid_request_error", Param: param}
 }
 
+func RequestTooLarge() *APIError {
+	return &APIError{Status: http.StatusRequestEntityTooLarge, Message: "request body exceeds the configured size limit", Type: "invalid_request_error", Param: "body", Code: "request_too_large"}
+}
+
 func Unauthorized(message string) *APIError {
 	return &APIError{Status: http.StatusUnauthorized, Message: message, Type: "invalid_request_error", Code: "invalid_api_key"}
 }
@@ -48,6 +52,10 @@ func Upstream(message string) *APIError {
 	return &APIError{Status: http.StatusBadGateway, Message: message, Type: "server_error", Code: "upstream_error"}
 }
 
+func Timeout() *APIError {
+	return &APIError{Status: http.StatusGatewayTimeout, Message: "request timed out", Type: "server_error", Code: "request_timeout"}
+}
+
 func Internal(message string) *APIError {
 	return &APIError{Status: http.StatusInternalServerError, Message: message, Type: "server_error", Code: "internal_error"}
 }
@@ -55,7 +63,7 @@ func Internal(message string) *APIError {
 func WriteError(w http.ResponseWriter, err error) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
-		apiErr = Internal(err.Error())
+		apiErr = Internal("internal server error")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(apiErr.Status)

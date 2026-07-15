@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
@@ -80,7 +79,7 @@ func (p *Provider) WriteFile(path string, content string, mode *int) error {
 	}
 	perm := os.FileMode(0o600)
 	if mode != nil {
-		perm = os.FileMode(*mode)
+		perm = os.FileMode(*mode) & 0o600
 	}
 	return os.WriteFile(full, []byte(content), perm)
 }
@@ -95,7 +94,7 @@ func (p *Provider) AppendFile(path string, content string, mode *int) error {
 	}
 	perm := os.FileMode(0o600)
 	if mode != nil {
-		perm = os.FileMode(*mode)
+		perm = os.FileMode(*mode) & 0o600
 	}
 	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_APPEND, perm)
 	if err != nil {
@@ -135,7 +134,7 @@ func (p *Provider) MakeDirectory(path string, recursive bool, mode *int) error {
 	full := p.fullPath(path)
 	perm := os.FileMode(0o700)
 	if mode != nil {
-		perm = os.FileMode(*mode)
+		perm = os.FileMode(*mode) & 0o700
 	}
 	if recursive {
 		return os.MkdirAll(full, perm)
@@ -220,12 +219,33 @@ func WriteEvents(root string, sessionID string, content []byte) (string, error) 
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	tmp := fmt.Sprintf("%s.%d.tmp", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, content, 0o600); err != nil {
-		return "", err
+	f, err := os.CreateTemp(filepath.Dir(path), ".copilot-api-events-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create temporary events file: %w", err)
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("secure temporary events file: %w", err)
+	}
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("write temporary events file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("sync temporary events file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close temporary events file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return "", err
+		return "", fmt.Errorf("replace events file %s: %w", path, err)
+	}
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return path, nil
 }

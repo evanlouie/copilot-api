@@ -386,7 +386,7 @@ func decodeWebSocketResponseCreate(raw json.RawMessage) (openai.ResponsesRequest
 	delete(merged, "generate")
 	payload, err := json.Marshal(merged)
 	if err != nil {
-		return openai.ResponsesRequest{}, ev.EventID, true, openai.Internal(err.Error())
+		return openai.ResponsesRequest{}, ev.EventID, true, openai.Internal("failed to decode response.create event")
 	}
 	var req openai.ResponsesRequest
 	if err := json.Unmarshal(payload, &req); err != nil {

@@ -51,7 +51,7 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	}
 	retained, err := sessionfs.WriteEvents(g.cfg.DataDir, sessionID, h.JSONL)
 	if err != nil {
-		return nil, openai.Internal("failed to write synthetic session state: " + err.Error())
+		return nil, openai.Internal("failed to write synthetic session state")
 	}
 	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
 	if err != nil {
@@ -76,7 +76,8 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "chat", "")
 	runner.watchContext(ctx)
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.final.Text, Attachments: prepared.final.Attachments}); err != nil {
-		_ = prepared.session.Disconnect()
+		runner.failSend(prepared.events, err)
+		_, _ = runner.waitInitial(ctx)
 		return nil, openai.Upstream(err.Error())
 	}
 	result, err := runner.waitInitial(ctx)

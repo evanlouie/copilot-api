@@ -131,22 +131,24 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 }
 
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req copilotgw.ResponseRequest) {
+	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+	// Do not commit SSE headers until gateway preflight succeeds.
+	ch, err := s.gw.StreamResponse(ctx, req)
+	if err != nil {
+		openai.WriteError(w, err)
+		return
+	}
 	writer, ok := openai.NewSSEWriter(w)
 	if !ok {
 		openai.WriteError(w, openai.Internal("streaming unsupported by ResponseWriter"))
 		return
 	}
-	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
-	defer cancel()
-	ch, err := s.gw.StreamResponse(ctx, req)
 	responseWriter := sseResponseEventWriter{server: s, ctx: ctx, writer: writer}
-	if err != nil {
-		_ = writeResponseFailedEvent(newResponseStreamEncoder(responseWriter), req, err)
+	result := writeResponseStreamEvents(ctx, responseWriter, req, ch)
+	if !result.WriteFailed {
 		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
-		return
 	}
-	_ = writeResponseStreamEvents(ctx, responseWriter, req, ch)
-	_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 }
 func streamedMessageItem(resp *openai.Response, id, text string, insertIndex int) (*openai.ResponseOutputItem, int) {
 	if resp == nil {

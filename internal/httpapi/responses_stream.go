@@ -140,13 +140,12 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 		reasoningItemDone = true
 		return writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item, Status: item.Status})
 	}
-	// reconcileUnstreamedReasoning announces a final reasoning item that produced
-	// no streamable summary text (e.g. encrypted-only reasoning). It is only safe
-	// before the message item has started; once content has streamed at index 0
-	// we cannot retroactively reorder, so the final response.completed stays
-	// authoritative.
+	// reconcileUnstreamedReasoning announces final-only reasoning (including
+	// encrypted-only reasoning). If message content already occupied index 0,
+	// announce the late item at index 1 and keep that ordering in the completed
+	// response rather than silently omitting its lifecycle.
 	reconcileUnstreamedReasoning := func(resp *openai.Response) error {
-		if reasoningStarted || messageStarted {
+		if reasoningStarted {
 			return nil
 		}
 		item, ok := finalReasoningItem(resp)
@@ -156,12 +155,33 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 		reasoningStarted = true
 		reasoningSummaryDone = true
 		reasoningItemDone = true
-		messageOutputIndex = 1
 		idx := 0
+		if messageStarted {
+			idx = 1
+		} else {
+			messageOutputIndex = 1
+		}
 		added := item
 		added.Status = "in_progress"
 		if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &added, Status: added.Status}); err != nil {
 			return err
+		}
+		for summaryIndex, summary := range item.Summary {
+			si := summaryIndex
+			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_part.added", OutputIndex: &idx, SummaryIndex: &si, ItemID: item.ID, Part: openai.ResponseReasoningSummary{Type: summary.Type, Text: ""}}); err != nil {
+				return err
+			}
+			if summary.Text != "" {
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_text.delta", OutputIndex: &idx, SummaryIndex: &si, ItemID: item.ID, Delta: summary.Text}); err != nil {
+					return err
+				}
+			}
+			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_text.done", OutputIndex: &idx, SummaryIndex: &si, ItemID: item.ID, Text: summary.Text}); err != nil {
+				return err
+			}
+			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_part.done", OutputIndex: &idx, SummaryIndex: &si, ItemID: item.ID, Part: summary}); err != nil {
+				return err
+			}
 		}
 		done := item
 		done.Status = "completed"
@@ -170,10 +190,24 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 	for {
 		select {
 		case <-ctx.Done():
-			return responseStreamWriteResult{Response: final, Err: ctx.Err()}
+			if final != nil {
+				return responseStreamWriteResult{Response: final}
+			}
+			err := ctx.Err()
+			if writeErr := writeResponseFailedEvent(writer, req, err); writeErr != nil {
+				return responseStreamWriteResult{Err: writeErr, WriteFailed: true}
+			}
+			return responseStreamWriteResult{Err: err}
 		case ev, ok := <-ch:
 			if !ok {
-				return responseStreamWriteResult{Response: final}
+				if final != nil {
+					return responseStreamWriteResult{Response: final}
+				}
+				err := openai.Upstream("response stream ended before a terminal event")
+				if writeErr := writeResponseFailedEvent(writer, req, err); writeErr != nil {
+					return responseStreamWriteResult{Err: writeErr, WriteFailed: true}
+				}
+				return responseStreamWriteResult{Err: err}
 			}
 			switch ev.Kind {
 			case "reasoning_delta":
