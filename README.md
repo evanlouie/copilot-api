@@ -9,7 +9,7 @@ The implementation follows the decisions in
 [`docs/implementation-plan.html`](docs/implementation-plan.html):
 replacement-mode prompts, Copilot SDK tools disabled by default, OpenAI-shaped
 errors, synthetic Chat history hydration, Responses continuity, client-owned
-function tool execution, SSE streaming, XDG storage, and manual purge.
+function tool execution, SSE streaming, bounded XDG retention, pruning, and safe manual purge.
 
 Current SDK target: `github.com/github/copilot-sdk/go v1.0.6`.
 
@@ -49,7 +49,7 @@ auth.
 | `POST /v1/responses`                 | Implemented | Text/image input, message-array input, function-call outputs, streaming.   |
 | `GET /v1/responses`                  | Implemented | Responses WebSocket mode for streaming `response.create` events.           |
 | `GET /v1/responses/{response_id}`    | Implemented | Only for API-visible stored responses. Debug state is retained regardless. |
-| `DELETE /v1/responses/{response_id}` | Implemented | Removes API-visible retrieval while retaining debug files.                 |
+| `DELETE /v1/responses/{response_id}` | Implemented | Writes a minimal anti-resurrection tombstone and removes the SDK session after its final live reference. |
 
 ## Compatibility matrix
 
@@ -64,11 +64,11 @@ auth.
 | Client-owned tools              | Chat Completions remains function-tool only. Responses accepts client-owned `function`, freeform `custom`, `namespace` child tools, and top-level `tool_search` specs. The proxy flattens them into request-scoped Copilot SDK custom tools, aliases SDK-unsafe names such as dotted function names, and rehydrates output items back to Responses shapes (`function_call`, `custom_tool_call`, and `tool_search_call`). Tool calls are returned to clients; the proxy never executes business logic. Hosted/proxy-executed tools such as provider MCP declarations, hosted `web_search`, and image generation are ignored in permissive mode so mixed Codex catalogs can proceed, and rejected in strict mode. |
 | Tool continuations              | Chat clients append `role: "tool"` messages. Responses clients send `function_call_output`, `custom_tool_call_output`, or `tool_search_output` items with `previous_response_id`; mixed tool-output plus new message arrays are accepted for Responses compatibility. The proxy validates batch ownership, endpoint kind, requested model, pending call kind, and exactly one output per pending call before unblocking parked SDK handlers. `tool_search_output.tools` accepts only loadable client-owned `function` and `namespace` specs. Successful live `tool_search_output` items form an explicit turn boundary: returned tools are merged into the request-scoped catalog, persisted, the stale SDK runner is cut over, and the next Responses turn is configured with the merged catalog. If the live pending batch is no longer available (after a restart or TTL expiry), continuations fall back to replaying the supplied Chat transcript or the persisted previous Responses record and installed catalog so a model turn is still produced. Responses `input` may be omitted when `previous_response_id` is supplied. |
 | `tool_choice`                   | Omitted/`auto` and `none` are supported. Forced function and `required` are rejected because the current SDK/runtime does not expose OpenAI-compatible enforcement for them.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `parallel_tool_calls`           | Chat accepts omitted/`false`/`true`; Responses accepts omitted/`true` and rejects `false`. Internal pending batches capture and replay multiple tool calls per turn, so parallel tool calls round-trip on both surfaces. |
-| Streaming                       | SSE streams are OpenAI-shaped. Chat streams emit reasoning deltas first (when present), then forward SDK text deltas, buffer tool calls, emit complete tool-call deltas, and terminate with `[DONE]`. Responses SSE streams emit lifecycle events (each carrying a monotonically increasing `sequence_number`) such as `response.created`, `response.in_progress`, reasoning summary events (`response.reasoning_summary_part.added`/`.done` and `response.reasoning_summary_text.delta`/`.done`), `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, function-call argument events, and `response.completed` or `response.failed`, then `[DONE]`. Extended Responses tool items (`custom_tool_call`, namespaced `function_call`, and `tool_search_call`) are announced with `response.output_item.added` before `response.output_item.done`; granular custom/tool-search deltas are deferred. Responses WebSocket mode emits the same JSON events and terminates failures with a top-level `error` for client compatibility. |
+| `parallel_tool_calls`           | Chat and Responses accept omitted/`true` and reject `false`, because the backend cannot enforce serial tool planning. Internal pending batches capture and replay multiple tool calls per turn. |
+| Streaming                       | SSE streams are OpenAI-shaped. Chat streams emit reasoning deltas first (when present), then forward SDK text deltas, buffer tool calls, emit complete tool-call deltas, and terminate with `[DONE]`. Responses SSE streams emit lifecycle events (each carrying a monotonically increasing `sequence_number`) such as `response.created`, `response.in_progress`, reasoning summary events (`response.reasoning_summary_part.added`/`.done` and `response.reasoning_summary_text.delta`/`.done`), `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, function-call argument events, and `response.completed` or `response.failed`, then `[DONE]`. Extended Responses tool items (`custom_tool_call`, namespaced `function_call`, and `tool_search_call`) are announced with `response.output_item.added` before `response.output_item.done`; granular custom/tool-search deltas are deferred. Responses WebSocket mode emits the same JSON events, uses `response.failed` for failures after lifecycle start, and reserves top-level `error` for envelope or preflight failures. |
 | Usage                           | SDK input/output/reasoning token events are mapped when available; unavailable fields are omitted. When Chat `stream_options.include_usage` is set, every streamed chunk carries `usage` (null until the terminal chunk) and a final empty-choices usage chunk is always emitted, using `usage: null` when upstream usage is unavailable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Multimodal                      | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; remote image fetches reject loopback, private, link-local, multicast, and otherwise non-public hosts to avoid SSRF; selected models must advertise vision support. Per-image size is capped at the model-advertised limit or 50 MiB, with a 100 MiB aggregate cap per request and a fallback limit of 20 images when model metadata omits a count. `function_call_output` content arrays are parsed: text parts become plain text, while image and file output parts are summarized as redacted text markers. Image `file_id` inputs and binary/image/file tool-output artifacts are deferred. JSON object/array tool outputs are serialized to JSON text.                                                                                                                         |
-| Responses WebSocket differences | The OpenAI beta header is accepted but not required; instead of OpenAI's fixed 60-minute socket lifetime, connection limits are configurable via `COPILOT_WEBSOCKET_*` (an idle timeout, default 2m, that never closes a connection while a response is still generating; an optional hard max lifetime; and server ping keepalive); `response.create.response` nested payloads are accepted as an extension with nested fields taking precedence. `generate:false` creates a warmed Copilot SDK session and returns an empty completed response; tool-output continuations with `generate:false` fail clearly until warm post-search planning is supported. Warm sessions store and compare the normalized Responses tool catalog, including custom, namespace, unsafe-name aliases, and `tool_search`. Responses `store:false` is not API-visible but is still persisted locally for debugging and continuation, including dynamic tool catalogs until purge. |
+| Multimodal                      | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; remote image fetches reject loopback, private, link-local, multicast, reserved, documentation, benchmarking, shared-address, and otherwise non-public hosts to avoid SSRF; selected models must advertise vision support. Image count and size constraints are enforced only when advertised by the selected model; the proxy does not add its own image quotas. `function_call_output` content arrays are parsed: text parts become plain text, while image and file output parts are summarized as redacted text markers. Image `file_id` inputs and binary/image/file tool-output artifacts are deferred. JSON object/array tool outputs are serialized to JSON text.                                                                                                                         |
+| Responses WebSocket differences | The OpenAI beta header is accepted but not required; instead of OpenAI's fixed 60-minute socket lifetime, connection limits are configurable via `COPILOT_WEBSOCKET_*` (an idle timeout, default 2m, that never closes a connection while a response is still generating; an optional hard max lifetime; and server ping keepalive); `response.create.response` nested payloads are accepted as an extension with nested fields taking precedence. `generate:false` creates a warmed Copilot SDK session and returns an empty completed response; tool-output continuations with `generate:false` fail clearly until warm post-search planning is supported. Warm sessions store and compare the normalized Responses tool catalog, including custom, namespace, unsafe-name aliases, and `tool_search`. Responses `store:false` is not API-visible but is still persisted locally for debugging and continuation, including dynamic tool catalogs, subject to configured retention quotas. |
 | Unsupported fields              | Strict compatibility defaults to disabled, so harmless unsupported client knobs such as `temperature` are ignored. For Codex CLI compatibility, Responses `include: ["reasoning.encrypted_content"]` and `text.verbosity` are accepted as no-ops in permissive mode. Unsupported semantics that would mislead clients still fail closed with OpenAI-shaped `invalid_request_error` responses.                                                                                                                                                                                                                                  |
 
 ## Known Responses API limitations
@@ -92,9 +92,9 @@ limitations and intentional differences are:
   Omitted/`auto` and `none` are supported. Forced function choices and
   `required` are rejected because the Copilot SDK/runtime does not expose
   OpenAI-compatible enforcement.
-- **Responses cannot enforce `parallel_tool_calls:false`.** Responses accepts
-  omitted/`true` and rejects explicit `false`; the SDK Responses path exposes no
-  public control to force serial tool planning.
+- **Serial tool planning cannot be enforced.** Chat Completions and Responses
+  accept omitted/`true` and reject explicit `parallel_tool_calls:false`; the SDK
+  exposes no public control to force serial tool planning.
 - **Background Responses are unsupported.** Requests with `background` are
   rejected; WebSocket `background` fields are treated as transport-only no-ops
   when decoding `response.create` payloads.
@@ -132,9 +132,9 @@ limitations and intentional differences are:
   unavailable token counts are omitted or emitted as `null` in streaming usage
   chunks where the OpenAI wire shape requires it.
 - **Local debug retention differs from OpenAI.** `store:false` responses are not
-  API-visible, but local continuation/debug records can still be retained until
-  `copilot-api purge` is run, including prompts, tool outputs, and dynamic tool
-  catalog metadata.
+  API-visible, but local continuation/debug records are retained subject to the
+  configured age, response-count, and byte quotas. `copilot-api prune --dry-run`
+  previews quota cleanup; `copilot-api purge` removes all marked storage roots.
 
 ## Configuration
 
@@ -148,7 +148,11 @@ limitations and intentional differences are:
 | `COPILOT_MODELS_CACHE_TTL`         | `10m`                                                | Successful model-list cache TTL.                                                                                                                                                                                                                                                              |
 | `COPILOT_TOOL_CALL_TTL`            | `5m`                                                 | Liveness guard for parked tool-call continuations.                                                                                                                                                                                                                                            |
 | `COPILOT_REQUEST_TIMEOUT`          | `0`                                                  | Optional generation timeout; `0` disables proxy-imposed generation timeouts. Client disconnects and configured timeouts abort/disconnect the upstream SDK session.                                                                                                                            |
-| `COPILOT_MAX_REQUEST_BODY_BYTES`   | `104857600`                                          | Optional HTTP body cap; `0` disables the proxy-specific cap. Default is 100 MiB to leave room for base64-encoded image data while bounding memory use.                                                                                                                                        |
+| `COPILOT_MAX_REQUEST_BODY_BYTES`   | `0`                                                  | Optional HTTP body cap; `0` disables the proxy-specific cap. Oversized bodies return HTTP 413 when configured. |
+| `COPILOT_MAX_TURN_OUTPUT_BYTES`    | `33554432`                                           | Aggregate content and reasoning bytes retained for one model turn. |
+| `COPILOT_RETENTION_MAX_AGE`        | `720h`                                               | Maximum age for retained response/session/cache entries; `0` disables the age quota. |
+| `COPILOT_RETENTION_MAX_RESPONSES`  | `10000`                                              | Maximum retained response records; `0` disables the count quota. |
+| `COPILOT_RETENTION_MAX_BYTES`      | `2147483648`                                         | Maximum retained bytes across managed response/session/cache entries; `0` disables the byte quota. |
 | `COPILOT_WEBSOCKET_IDLE_TIMEOUT`   | `2m`                                                 | Idle timeout for Responses WebSocket connections. A connection closes only after the client has been silent this long while no response is generating; `0` disables it.                                                                                                                       |
 | `COPILOT_WEBSOCKET_MAX_LIFETIME`   | `0`                                                  | Optional hard cap on total Responses WebSocket connection lifetime; `0` (default) disables it.                                                                                                                                                                                               |
 | `COPILOT_WEBSOCKET_PING_INTERVAL`  | `30s`                                                | Server-side ping keepalive interval for Responses WebSocket connections; `0` disables pings.                                                                                                                                                                                                 |
@@ -372,21 +376,31 @@ SDK turn boundary by merging them into the persisted request-scoped catalog and
 starting a fresh/synthetic continuation configured with that merged catalog; the
 proxy still never executes those client-owned tools itself.
 
-## State, locking, and purge
+## State, locking, pruning, and purge
 
 The proxy stores Copilot SDK session state and `metadata.json` under the
-configured XDG directories. Files are retained forever by default for debugging,
-including when Responses `store:false` disables API-visible retrieval.
+configured XDG directories. Automatic retention quotas bound age, response
+count, and aggregate managed bytes, including records created for Responses
+`store:false`. Preview or run quota cleanup explicitly with:
 
-A server lock in the state directory prevents two servers from sharing the same
-store. Manual cleanup is explicit:
+```sh
+copilot-api prune --dry-run
+copilot-api prune
+```
+
+A state lock prevents two servers from sharing the same store, while a second
+lifecycle lock outside purgeable roots prevents restart races during destructive
+cleanup. Complete cleanup remains explicit:
 
 ```sh
 copilot-api purge --dry-run
 copilot-api purge --yes
 ```
 
-`purge` refuses while the server lock is active.
+`prune` and `purge` refuse destructive work while the server lock is active.
+Storage roots are canonicalized, checked against protected/overlapping paths,
+and must contain a valid application ownership marker; existing non-empty
+unmarked directories are never claimed automatically.
 
 ## Embedded Copilot CLI
 

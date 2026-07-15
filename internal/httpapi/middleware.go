@@ -61,6 +61,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if !validBearerToken(r.Header.Values("Authorization"), s.cfg.APIKey) {
+			if s.authFailures.Allow(remoteIP(r.RemoteAddr), time.Now()) && s.log != nil {
+				attrs := []any{"path", r.URL.EscapedPath(), "remote_ip", remoteIP(r.RemoteAddr)}
+				if ua := boundedUserAgent(r.UserAgent()); ua != "" {
+					attrs = append(attrs, "user_agent", ua)
+				}
+				observability.Logger(r.Context(), s.log).Warn("authentication failed", attrs...)
+			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="copilot-api"`)
 			openai.WriteError(w, openai.Unauthorized("invalid bearer token"))
 			return

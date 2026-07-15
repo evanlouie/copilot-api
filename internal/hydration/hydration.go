@@ -49,6 +49,14 @@ func BuildChatHistory(messages []openai.ChatMessage, opts Options) (Result, erro
 }
 
 func BuildChatHistoryMessages(messages []Message, opts Options) (Result, error) {
+	return buildChatHistoryMessages(messages, opts, true, true)
+}
+
+func BuildChatHistoryJSONL(messages []Message, opts Options) (Result, error) {
+	return buildChatHistoryMessages(messages, opts, false, false)
+}
+
+func buildChatHistoryMessages(messages []Message, opts Options, retainEvents, validateEvents bool) (Result, error) {
 	if opts.SessionID == "" {
 		opts.SessionID = "chat_" + uuid.NewString()
 	}
@@ -58,7 +66,7 @@ func BuildChatHistoryMessages(messages []Message, opts Options) (Result, error) 
 	if opts.Now.IsZero() {
 		opts.Now = time.Now().UTC()
 	}
-	b := builder{now: opts.Now}
+	b := builder{now: opts.Now, retainEvents: retainEvents, validateEvents: validateEvents}
 	selectedModel := opts.Model
 	b.add(copilot.SessionEventTypeSessionStart, &copilot.SessionStartData{
 		CopilotVersion: "synthetic",
@@ -146,31 +154,47 @@ func decodeArguments(s string) (any, error) {
 }
 
 type builder struct {
-	events []copilot.SessionEvent
-	lastID *string
-	now    time.Time
+	events         []copilot.SessionEvent
+	lastID         *string
+	now            time.Time
+	count          int
+	out            bytes.Buffer
+	err            error
+	retainEvents   bool
+	validateEvents bool
 }
 
 func (b *builder) add(t copilot.SessionEventType, data copilot.SessionEventData) {
+	if b.err != nil {
+		return
+	}
 	id := uuid.NewString()
-	e := copilot.SessionEvent{ID: id, Timestamp: b.now.Add(time.Duration(len(b.events)) * time.Millisecond), ParentID: b.lastID, Data: data}
-	b.events = append(b.events, e)
-	b.lastID = &b.events[len(b.events)-1].ID
+	e := copilot.SessionEvent{ID: id, Timestamp: b.now.Add(time.Duration(b.count) * time.Millisecond), ParentID: b.lastID, Data: data}
+	b.count++
+	line, err := e.Marshal()
+	if err != nil {
+		b.err = err
+		return
+	}
+	if b.validateEvents {
+		var decoded copilot.SessionEvent
+		if err := json.Unmarshal(line, &decoded); err != nil {
+			b.err = fmt.Errorf("generated invalid session event %s: %w", e.Type(), err)
+			return
+		}
+	}
+	b.out.Write(line)
+	b.out.WriteByte('\n')
+	if b.retainEvents {
+		b.events = append(b.events, e)
+	}
+	lastID := id
+	b.lastID = &lastID
 }
 
 func (b *builder) jsonl() ([]byte, error) {
-	var out bytes.Buffer
-	for i := range b.events {
-		line, err := b.events[i].Marshal()
-		if err != nil {
-			return nil, err
-		}
-		var event copilot.SessionEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			return nil, fmt.Errorf("generated invalid session event %s: %w", b.events[i].Type(), err)
-		}
-		out.Write(line)
-		out.WriteByte('\n')
+	if b.err != nil {
+		return nil, b.err
 	}
-	return out.Bytes(), nil
+	return b.out.Bytes(), nil
 }

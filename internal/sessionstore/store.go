@@ -1,10 +1,10 @@
 package sessionstore
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,24 +12,59 @@ import (
 	"sync"
 	"time"
 
-	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/safepath"
 )
 
 type Store struct {
-	DataDir  string
-	StateDir string
-	CacheDir string
-	mu       sync.Mutex
+	DataDir        string
+	StateDir       string
+	CacheDir       string
+	mu             sync.Mutex
+	retention      RetentionPolicy
+	deletedIDs     map[string]struct{}
+	pins           map[string]int
+	orphanSessions map[string]struct{}
+	maintenanceErr error
 }
 
-const ownershipMarker = ".copilot-api-owned"
+const (
+	ownershipMarker              = ".copilot-api-owned"
+	ownershipMarkerContent       = "copilot-api storage root v1\n"
+	legacyOwnershipMarkerContent = "copilot-api storage root\n"
+)
 
 func New(dataDir, stateDir, cacheDir string) *Store {
-	return &Store{DataDir: dataDir, StateDir: stateDir, CacheDir: cacheDir}
+	return &Store{DataDir: dataDir, StateDir: stateDir, CacheDir: cacheDir, deletedIDs: map[string]struct{}{}, pins: map[string]int{}, orphanSessions: map[string]struct{}{}}
+}
+
+// TakeMaintenanceError returns and clears the latest asynchronous retention or
+// orphan-cleanup failure so readiness and shutdown can surface it once.
+func (s *Store) TakeMaintenanceError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.maintenanceErr
+	s.maintenanceErr = nil
+	return err
+}
+
+func (s *Store) recordMaintenanceErrorLocked(err error) {
+	if err != nil {
+		s.maintenanceErr = err
+	}
 }
 
 func (s *Store) Ensure() error {
-	for _, dir := range []string{s.DataDir, s.StateDir, s.CacheDir, s.sessionsDir(), s.responsesDir()} {
+	roots, err := s.ValidateRoots()
+	if err != nil {
+		return err
+	}
+	legacyNames := [][]string{{"sessions"}, {"responses", "server.lock"}, nil}
+	for i, root := range roots {
+		if err := ensureOwnedRoot(root, legacyNames[i]); err != nil {
+			return err
+		}
+	}
+	for _, dir := range []string{s.sessionsDir(), s.responsesDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
@@ -37,10 +72,85 @@ func (s *Store) Ensure() error {
 			return fmt.Errorf("secure %s: %w", dir, err)
 		}
 	}
-	for _, root := range []string{s.DataDir, s.StateDir, s.CacheDir} {
-		if err := os.WriteFile(filepath.Join(root, ownershipMarker), []byte("copilot-api storage root\n"), 0o600); err != nil {
-			return fmt.Errorf("write ownership marker in %s: %w", root, err)
+	return nil
+}
+
+func (s *Store) ValidateRoots() ([]string, error) {
+	return validatedPurgeRoots([]string{s.DataDir, s.StateDir, s.CacheDir})
+}
+
+func ensureOwnedRoot(root string, allowedLegacyNames []string) error {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return fmt.Errorf("create storage root %s: %w", root, err)
+	}
+	marker := filepath.Join(root, ownershipMarker)
+	if content, err := os.ReadFile(marker); err == nil {
+		if !validOwnershipMarker(content) {
+			return fmt.Errorf("refusing storage root %s with an invalid ownership marker", root)
 		}
+		if err := os.Chmod(root, 0o700); err != nil {
+			return fmt.Errorf("secure storage root %s: %w", root, err)
+		}
+		if string(content) == legacyOwnershipMarkerContent {
+			if err := writeOwnershipMarker(root); err != nil {
+				return err
+			}
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read ownership marker in %s: %w", root, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("inspect storage root %s: %w", root, err)
+	}
+	allowed := make(map[string]bool, len(allowedLegacyNames))
+	for _, name := range allowedLegacyNames {
+		allowed[name] = true
+	}
+	for _, entry := range entries {
+		if !allowed[entry.Name()] {
+			return fmt.Errorf("refusing to claim non-empty storage root %s (unexpected entry %s)", root, entry.Name())
+		}
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return fmt.Errorf("secure storage root %s: %w", root, err)
+	}
+	return writeOwnershipMarker(root)
+}
+
+func validOwnershipMarker(content []byte) bool {
+	return string(content) == ownershipMarkerContent || string(content) == legacyOwnershipMarkerContent
+}
+
+func writeOwnershipMarker(root string) error {
+	marker := filepath.Join(root, ownershipMarker)
+	tmp, err := os.CreateTemp(root, ".copilot-api-marker-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create ownership marker in %s: %w", root, err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secure ownership marker in %s: %w", root, err)
+	}
+	if _, err := tmp.WriteString(ownershipMarkerContent); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write ownership marker in %s: %w", root, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync ownership marker in %s: %w", root, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close ownership marker in %s: %w", root, err)
+	}
+	if err := os.Rename(tmpName, marker); err != nil {
+		return fmt.Errorf("replace ownership marker in %s: %w", root, err)
+	}
+	if err := syncDirectory(root); err != nil {
+		return fmt.Errorf("sync ownership marker directory %s: %w", root, err)
 	}
 	return nil
 }
@@ -50,6 +160,8 @@ func (s *Store) sessionsDir() string  { return filepath.Join(s.DataDir, "session
 func (s *Store) responsesDir() string { return filepath.Join(s.StateDir, "responses") }
 
 func (s *Store) SaveSessionMetadata(sessionID string, meta SessionMetadata) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	path := filepath.Join(s.sessionsDir(), safeName(sessionID), "metadata.json")
 	return writeJSON(path, meta)
 }
@@ -70,26 +182,26 @@ type SessionMetadata struct {
 const ResponseRecordVersion = 3
 
 type ResponseRecord struct {
-	Version              int                            `json:"version"`
-	ID                   string                         `json:"id"`
-	SDKSessionID         string                         `json:"sdk_session_id"`
-	Model                string                         `json:"model"`
-	Instructions         string                         `json:"instructions,omitempty"`
-	CreatedAt            time.Time                      `json:"created_at"`
-	UpdatedAt            time.Time                      `json:"updated_at"`
-	Status               string                         `json:"status"`
-	Stored               bool                           `json:"stored"`
-	Deleted              bool                           `json:"deleted"`
-	InputText            string                         `json:"input_text,omitempty"`
-	Output               []openai.ResponseOutputItem    `json:"output"`
-	OutputText           string                         `json:"output_text"`
-	Usage                *openai.ResponseUsage          `json:"usage,omitempty"`
-	PreviousResponseID   string                         `json:"previous_response_id,omitempty"`
-	PendingBatchID       string                         `json:"pending_batch_id,omitempty"`
-	RetainedPath         string                         `json:"retained_path,omitempty"`
-	InstalledToolCatalog *openai.StoredToolCatalog      `json:"installed_tool_catalog,omitempty"`
-	LoadedToolEvents     []openai.StoredLoadedToolEvent `json:"loaded_tool_events,omitempty"`
-	ToolOutputs          []openai.StoredToolOutput      `json:"tool_outputs,omitempty"`
+	Version              int                     `json:"version"`
+	ID                   string                  `json:"id"`
+	SDKSessionID         string                  `json:"sdk_session_id"`
+	Model                string                  `json:"model"`
+	Instructions         string                  `json:"instructions,omitempty"`
+	CreatedAt            time.Time               `json:"created_at"`
+	UpdatedAt            time.Time               `json:"updated_at"`
+	Status               string                  `json:"status"`
+	Stored               bool                    `json:"stored"`
+	Deleted              bool                    `json:"deleted"`
+	InputText            string                  `json:"input_text,omitempty"`
+	Output               []ResponseOutputItem    `json:"output"`
+	OutputText           string                  `json:"output_text"`
+	Usage                *ResponseUsage          `json:"usage,omitempty"`
+	PreviousResponseID   string                  `json:"previous_response_id,omitempty"`
+	PendingBatchID       string                  `json:"pending_batch_id,omitempty"`
+	RetainedPath         string                  `json:"retained_path,omitempty"`
+	InstalledToolCatalog *StoredToolCatalog      `json:"installed_tool_catalog,omitempty"`
+	LoadedToolEvents     []StoredLoadedToolEvent `json:"loaded_tool_events,omitempty"`
+	ToolOutputs          []StoredToolOutput      `json:"tool_outputs,omitempty"`
 }
 
 func (s *Store) SaveResponse(record ResponseRecord) error {
@@ -102,16 +214,30 @@ func (s *Store) SaveResponse(record ResponseRecord) error {
 		return fmt.Errorf("unsupported response record version %d", record.Version)
 	}
 	// Deletion is a tombstone: a late streaming callback must not resurrect or
-	// overwrite a response that the client has deleted.
+	// overwrite a response that the client has deleted, even if retention has
+	// already removed the on-disk tombstone during this process lifetime.
+	markDeleted := record.Deleted
 	if !record.Deleted {
+		if _, deleted := s.deletedIDs[record.ID]; deleted {
+			return ErrNotFound
+		}
 		if existing, err := s.loadResponseRecord(record.ID); err == nil && existing.Deleted {
+			if s.pins[s.responsePath(record.ID)] > 0 {
+				s.deletedIDs[record.ID] = struct{}{}
+			}
 			return ErrNotFound
 		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
 	}
 	record.UpdatedAt = time.Now().UTC()
-	return writeJSON(s.responsePath(record.ID), record)
+	if err := writeJSON(s.responsePath(record.ID), record); err != nil {
+		return err
+	}
+	if markDeleted && s.pins[s.responsePath(record.ID)] > 0 {
+		s.deletedIDs[record.ID] = struct{}{}
+	}
+	return nil
 }
 
 func (s *Store) LoadResponse(id string) (ResponseRecord, error) {
@@ -137,14 +263,32 @@ func (s *Store) LoadResponseForContinuation(id string) (ResponseRecord, error) {
 }
 
 func (s *Store) DeleteResponse(id string) error {
-	record, err := s.LoadResponseForContinuation(id)
-	if err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.loadResponseRecord(id)
+	if err != nil || record.Deleted {
+		if err == nil {
+			err = ErrNotFound
+		}
 		return err
 	}
-	record.Deleted = true
-	record.Stored = false
-	record.Status = "deleted"
-	return s.SaveResponse(record)
+	tombstone := ResponseRecord{
+		Version:      ResponseRecordVersion,
+		ID:           record.ID,
+		SDKSessionID: record.SDKSessionID,
+		CreatedAt:    record.CreatedAt,
+		UpdatedAt:    time.Now().UTC(),
+		Deleted:      true,
+		Status:       "deleted",
+	}
+	if err := writeJSON(s.responsePath(id), tombstone); err != nil {
+		return err
+	}
+	if s.pins[s.responsePath(id)] > 0 {
+		s.deletedIDs[id] = struct{}{}
+	}
+	s.recordMaintenanceErrorLocked(s.cleanupSessionIfUnreferencedLocked(record.SDKSessionID))
+	return nil
 }
 
 func (s *Store) loadResponseRecord(id string) (ResponseRecord, error) {
@@ -159,8 +303,8 @@ func (s *Store) loadResponseRecord(id string) (ResponseRecord, error) {
 	if err := json.Unmarshal(b, &record); err != nil {
 		return record, fmt.Errorf("decode response record %q: %w", id, err)
 	}
-	if record.Version != ResponseRecordVersion {
-		return record, fmt.Errorf("unsupported response record version %d for %q", record.Version, id)
+	if err := migrateResponseRecord(&record); err != nil {
+		return record, fmt.Errorf("response record %q: %w", id, err)
 	}
 	return record, nil
 }
@@ -171,8 +315,37 @@ func (s *Store) responsePath(id string) string {
 
 var ErrNotFound = errors.New("not found")
 
+type UnsupportedRecordVersionError struct {
+	Version int
+}
+
+func (e *UnsupportedRecordVersionError) Error() string {
+	return fmt.Sprintf("unsupported response record version %d", e.Version)
+}
+
+func migrateResponseRecord(record *ResponseRecord) error {
+	switch record.Version {
+	case 0, 1, 2:
+		// Records written before explicit versioning decode as version 0. Versions
+		// 0-2 used field shapes retained by the v3 persistence DTO.
+		if record.ID == "" {
+			return fmt.Errorf("response record is missing id")
+		}
+		// Normalize missing lifecycle fields explicitly.
+		if record.Status == "" {
+			record.Status = "completed"
+		}
+		record.Version = ResponseRecordVersion
+		return nil
+	case ResponseRecordVersion:
+		return nil
+	default:
+		return &UnsupportedRecordVersionError{Version: record.Version}
+	}
+}
+
 func (s *Store) Purge(dryRun bool) ([]string, error) {
-	roots, err := validatedPurgeRoots([]string{s.DataDir, s.StateDir, s.CacheDir})
+	roots, err := s.ValidateRoots()
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +357,8 @@ func (s *Store) Purge(dryRun bool) ([]string, error) {
 			}
 			return nil, err
 		}
-		if _, err := os.Stat(filepath.Join(root, ownershipMarker)); err != nil {
+		marker, err := os.ReadFile(filepath.Join(root, ownershipMarker))
+		if err != nil || !validOwnershipMarker(marker) {
 			return nil, fmt.Errorf("refusing to purge unmarked storage root %s", root)
 		}
 		paths = append(paths, root)
@@ -202,61 +376,7 @@ func (s *Store) Purge(dryRun bool) ([]string, error) {
 }
 
 func validatedPurgeRoots(roots []string) ([]string, error) {
-	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
-	protected := map[string]bool{}
-	for _, path := range []string{home, cwd, string(filepath.Separator)} {
-		if path != "" {
-			abs, _ := filepath.Abs(path)
-			protected[filepath.Clean(abs)] = true
-		}
-	}
-	cleaned := make([]string, 0, len(roots))
-	for _, root := range roots {
-		abs, err := filepath.Abs(root)
-		if err != nil {
-			return nil, fmt.Errorf("resolve purge root %q: %w", root, err)
-		}
-		abs = filepath.Clean(abs)
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = filepath.Clean(resolved)
-		}
-		if protected[abs] {
-			return nil, fmt.Errorf("refusing to purge protected path %s", abs)
-		}
-		cleaned = append(cleaned, abs)
-	}
-	for i := range cleaned {
-		for j := i + 1; j < len(cleaned); j++ {
-			sep := string(filepath.Separator)
-			if cleaned[i] == cleaned[j] || strings.HasPrefix(cleaned[i]+sep, cleaned[j]+sep) || strings.HasPrefix(cleaned[j]+sep, cleaned[i]+sep) {
-				return nil, fmt.Errorf("refusing to purge overlapping roots %s and %s", cleaned[i], cleaned[j])
-			}
-		}
-	}
-	return cleaned, nil
-}
-
-func (s *Store) SizeSummary() (map[string]int64, error) {
-	out := map[string]int64{}
-	for _, root := range []string{s.DataDir, s.StateDir, s.CacheDir} {
-		var total int64
-		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
-			}
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			total += info.Size()
-			return nil
-		}); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		out[root] = total
-	}
-	return out, nil
+	return safepath.ValidateApplicationRoots(roots)
 }
 
 func writeJSON(path string, v any) error {
@@ -293,25 +413,39 @@ func writeJSON(path string, v any) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("sync directory for %s: %w", path, err)
 	}
 	return nil
 }
 
 func safeName(id string) string {
 	if id == "" {
-		return "empty"
+		return "~"
 	}
-	b := make([]rune, 0, len(id))
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			b = append(b, r)
-		default:
-			b = append(b, '_')
+	if id != "." && id != ".." && !strings.HasSuffix(id, ".") && !windowsReservedName(id) {
+		safe := true
+		for _, r := range id {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			default:
+				safe = false
+			}
+			if !safe {
+				break
+			}
+		}
+		if safe {
+			return id
 		}
 	}
-	return string(b)
+	return "~" + base64.RawURLEncoding.EncodeToString([]byte(id))
+}
+
+func windowsReservedName(name string) bool {
+	base := strings.ToLower(strings.SplitN(name, ".", 2)[0])
+	if base == "con" || base == "prn" || base == "aux" || base == "nul" {
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "com") || strings.HasPrefix(base, "lpt")) && base[3] >= '1' && base[3] <= '9'
 }

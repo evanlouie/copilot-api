@@ -53,6 +53,7 @@ type Broker struct {
 	batches map[string]*Batch
 	byCall  map[string]*Batch
 	ttl     time.Duration
+	closed  bool
 }
 
 func NewBroker(ttl time.Duration) *Broker {
@@ -68,6 +69,11 @@ func (b *Broker) Register(batch *Batch) {
 		return
 	}
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		batch.Cancel(context.Canceled)
+		return
+	}
 	defer b.mu.Unlock()
 	b.batches[batch.ID] = batch
 	for id := range batch.Calls {
@@ -139,6 +145,24 @@ func (b *Broker) Remove(batch *Batch) {
 	delete(b.batches, batch.ID)
 	for id := range batch.Calls {
 		delete(b.byCall, id)
+	}
+}
+
+func (b *Broker) CancelAll(err error) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	batches := make([]*Batch, 0, len(b.batches))
+	for _, batch := range b.batches {
+		batches = append(batches, batch)
+	}
+	b.batches = map[string]*Batch{}
+	b.byCall = map[string]*Batch{}
+	b.closed = true
+	b.mu.Unlock()
+	for _, batch := range batches {
+		batch.Cancel(err)
 	}
 }
 

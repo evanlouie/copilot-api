@@ -20,7 +20,7 @@ type WebSocketErrorEvent struct {
 func NewWebSocketErrorEvent(err error, eventID string) WebSocketErrorEvent {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
-		apiErr = Internal(err.Error())
+		apiErr = Internal("internal server error")
 	}
 	return WebSocketErrorEvent{EventID: eventID, Type: "error", Status: apiErr.Status, Error: ErrorObject{Message: apiErr.Message, Type: apiErr.Type, Param: apiErr.Param, Code: apiErr.Code}}
 }

@@ -16,7 +16,7 @@ type responseCatalogMergeResult struct {
 
 func responseCatalogForRequest(req ResponseRequest, previous *sessionstore.ResponseRecord) (openai.ToolCatalog, error) {
 	if previous != nil && previous.InstalledToolCatalog != nil {
-		catalog, _, err := openai.ToolCatalogFromStored(previous.InstalledToolCatalog)
+		catalog, _, err := openai.ToolCatalogFromStored(wireToolCatalog(previous.InstalledToolCatalog))
 		if err != nil {
 			return openai.ToolCatalog{}, err
 		}
@@ -83,7 +83,7 @@ func responseOutputsContainLoadedTools(outputs map[string]openai.ResponseToolOut
 
 func activeResponseToolOutputsFromRecord(record sessionstore.ResponseRecord, outputs map[string]openai.ResponseToolOutput) (map[string]openai.ResponseToolOutput, error) {
 	expected := map[string]openai.ResponseOutputItem{}
-	for _, item := range record.Output {
+	for _, item := range wireOutputItems(record.Output) {
 		if item.CallID == "" {
 			continue
 		}

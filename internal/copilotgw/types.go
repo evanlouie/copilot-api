@@ -33,21 +33,41 @@ type VisionLimits struct {
 	MaxPromptImageSize  int64
 }
 
-type Gateway interface {
+type LifecycleGateway interface {
 	Start(ctx context.Context) error
 	Stop() error
+}
+
+type ModelGateway interface {
 	Ready(ctx context.Context) error
 	ListModels(ctx context.Context) ([]Model, error)
 	ValidateModel(ctx context.Context, model string) error
+}
+
+type ChatGateway interface {
 	Chat(ctx context.Context, req ChatRequest) (*TurnResult, error)
 	ContinueChatToolCalls(ctx context.Context, req ChatContinuationRequest) (*TurnResult, error)
 	StreamContinueChatToolCalls(ctx context.Context, req ChatContinuationRequest) (<-chan StreamEvent, error)
 	StreamChat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
+}
+
+type ResponsesGateway interface {
 	CreateResponse(ctx context.Context, req ResponseRequest) (*ResponseResult, error)
 	WarmResponse(ctx context.Context, req ResponseRequest) (*WarmResponseResult, error)
 	StreamResponse(ctx context.Context, req ResponseRequest) (<-chan ResponseStreamEvent, error)
 	GetResponse(ctx context.Context, id string) (*openai.Response, error)
 	DeleteResponse(ctx context.Context, id string) error
+}
+
+type HTTPGateway interface {
+	ModelGateway
+	ChatGateway
+	ResponsesGateway
+}
+
+type Gateway interface {
+	LifecycleGateway
+	HTTPGateway
 }
 
 type ChatRequest struct {

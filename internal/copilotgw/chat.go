@@ -15,12 +15,13 @@ import (
 )
 
 type preparedChatTurn struct {
-	sessionID string
-	retained  string
-	final     resolvedPrompt
-	rt        *toolproxy.RequestTools
-	events    chan copilot.SessionEvent
-	session   *copilot.Session
+	sessionID  string
+	retained   string
+	final      resolvedPrompt
+	rt         *toolproxy.RequestTools
+	events     chan copilot.SessionEvent
+	session    *copilot.Session
+	pinRelease func()
 }
 
 func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, streaming bool) (*preparedChatTurn, error) {
@@ -45,7 +46,14 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 		return nil, err
 	}
 	sessionID := "chat_" + uuid.NewString()
-	h, err := hydration.BuildChatHistoryMessages(history, hydration.Options{SessionID: sessionID, Model: req.Model})
+	pinRelease := g.store.PinSession(sessionID)
+	keepPin := false
+	defer func() {
+		if !keepPin {
+			pinRelease()
+		}
+	}()
+	h, err := hydration.BuildChatHistoryJSONL(history, hydration.Options{SessionID: sessionID, Model: req.Model})
 	if err != nil {
 		return nil, openai.InvalidRequest("failed to hydrate chat history: "+err.Error(), "messages")
 	}
@@ -65,7 +73,8 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	if session == nil {
 		return nil, openai.Upstream("copilot SDK returned nil session")
 	}
-	return &preparedChatTurn{sessionID: sessionID, retained: retained, final: final, rt: rt, events: events, session: session}, nil
+	keepPin = true
+	return &preparedChatTurn{sessionID: sessionID, retained: retained, final: final, rt: rt, events: events, session: session, pinRelease: pinRelease}, nil
 }
 
 func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, error) {
@@ -73,6 +82,9 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	if err != nil {
 		return nil, err
 	}
+	releaseSession := g.store.PinSession(prepared.sessionID)
+	defer releaseSession()
+	defer prepared.pinRelease()
 	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "chat", "")
 	runner.watchContext(ctx)
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.final.Text, Attachments: prepared.final.Attachments}); err != nil {
@@ -97,6 +109,7 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 		return nil, err
 	}
 	ch := make(chan StreamEvent, 32)
+	defer prepared.pinRelease()
 	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "chat", "")
 	runner.watchContext(ctx)
 	runner.enableChatStream(ch, ctx.Done())

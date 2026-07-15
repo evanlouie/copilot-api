@@ -1051,21 +1051,22 @@ func TestResponsesWebSocketStreamErrorClosesTextItemAndFailsResponse(t *testing.
 		ev := readWebSocketEvent(t, ctx, conn)
 		got = append(got, ev.Type)
 		if ev.Type == "response.failed" {
-			if ev.Response == nil || ev.Response.Status != "failed" {
+			if ev.Response == nil || ev.Response.Status != "failed" || ev.Error == nil || ev.Error.Code != "upstream_error" {
 				t.Fatalf("failed event = %#v", ev)
-			}
-			continue
-		}
-		if ev.Type == "error" {
-			if ev.Error == nil || ev.Error.Code != "upstream_error" {
-				t.Fatalf("terminal error event = %#v, want upstream_error", ev)
 			}
 			break
 		}
 	}
-	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.failed", "error"}
+	want := []string{"response.created", "response.in_progress", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.failed"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("event order = %v, want %v", got, want)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "session.update", "event_id": "evt_probe"}); err != nil {
+		t.Fatal(err)
+	}
+	probe := readWebSocketEvent(t, ctx, conn)
+	if probe.Type != "error" || probe.EventID != "evt_probe" {
+		t.Fatalf("unexpected event after response.failed: %#v", probe)
 	}
 }
 

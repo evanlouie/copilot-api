@@ -28,6 +28,9 @@ func TestLiveCopilotTextCompletion(t *testing.T) {
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
 	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
 	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := gw.Start(t.Context()); err != nil {
 		t.Fatal(err)
@@ -65,6 +68,9 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
 	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
 	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := gw.Start(t.Context()); err != nil {
 		t.Fatal(err)
@@ -146,6 +152,9 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
 	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
 	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := gw.Start(t.Context()); err != nil {
 		t.Fatal(err)

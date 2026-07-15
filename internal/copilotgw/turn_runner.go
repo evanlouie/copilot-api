@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/observability"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
@@ -17,17 +18,16 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 )
 
-const maxTurnOutputBytes = 100 << 20
-
 type turnRunner struct {
-	id       string
-	model    string
-	ctx      context.Context
-	session  *copilot.Session
-	rt       *toolproxy.RequestTools
-	events   <-chan copilot.SessionEvent
-	retained string
-	kind     string
+	id             string
+	model          string
+	ctx            context.Context
+	session        *copilot.Session
+	rt             *toolproxy.RequestTools
+	events         <-chan copilot.SessionEvent
+	retained       string
+	kind           string
+	maxOutputBytes int64
 
 	responseID string
 	created    int64
@@ -44,6 +44,10 @@ type turnRunner struct {
 	responseStream    chan<- ResponseStreamEvent
 	responseMeta      *responseStreamMeta
 	onResult          func(*TurnResult) error
+	store             *sessionstore.Store
+	pinMu             sync.Mutex
+	pinReleases       []func()
+	pinsReleased      bool
 }
 
 type responseStreamMeta struct {
@@ -72,7 +76,26 @@ func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, sessi
 	// request. Request cancellation is still enforced by watchContext before the
 	// first result, and after a tool-call result the batch TTL owns cleanup.
 	rt.SetContext(context.Background())
-	r := &turnRunner{id: id, model: model, ctx: ctx, session: session, rt: rt, events: events, retained: retained, kind: kind, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), created: openai.UnixNow()}
+	maxOutputBytes := g.cfg.MaxTurnOutputBytes
+	if maxOutputBytes <= 0 {
+		maxOutputBytes = config.DefaultMaxTurnOutputBytes
+	}
+	r := &turnRunner{id: id, model: model, ctx: ctx, session: session, rt: rt, events: events, retained: retained, kind: kind, maxOutputBytes: maxOutputBytes, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), created: openai.UnixNow(), store: g.store}
+	if g.store != nil && session != nil {
+		r.addPin(g.store.PinSession(session.SessionID))
+	}
+	if kind == "response" && responseID != "" && g.store != nil {
+		r.addPin(g.store.PinResponse(responseID))
+	}
+	if g.active == nil {
+		g.active = newActiveRunnerRegistry()
+	}
+	if !g.active.add(r) {
+		r.abort()
+		r.releasePins()
+		close(r.closed)
+		return r
+	}
 	go r.loop(g)
 	return r
 }
@@ -161,9 +184,13 @@ func (r *turnRunner) setCurrentResponseID(id string) {
 		return
 	}
 	r.mu.Lock()
+	changed := r.responseID != id
 	r.id = id
 	r.responseID = id
 	r.mu.Unlock()
+	if changed && r.store != nil {
+		r.addPin(r.store.PinResponse(id))
+	}
 }
 
 func (r *turnRunner) setOnResult(fn func(*TurnResult) error) {
@@ -215,10 +242,16 @@ func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, respons
 
 func (r *turnRunner) loop(g *RealGateway) {
 	defer close(r.closed)
+	if g != nil && g.active != nil {
+		defer g.active.remove(r)
+	}
 	defer r.closeStreams()
+	defer r.releasePins()
 	var text string
 	var reason reasoningAccumulator
 	var usage *openai.Usage
+	var contentBytes int64
+	var reasoningStreamBytes int64
 	stats := newTurnDebugStats()
 	debugEnabled := g != nil && g.log != nil && g.log.Enabled(r.ctx, slog.LevelDebug)
 	for event := range r.events {
@@ -227,12 +260,14 @@ func (r *turnRunner) loop(g *RealGateway) {
 			reason.reset()
 			text = ""
 			usage = nil
+			contentBytes = 0
+			reasoningStreamBytes = 0
 			stats.reset()
 			r.debug(g, "copilot turn started")
 		case *copilot.AssistantMessageStartData:
 			r.debug(g, "copilot assistant message started", "message_id", d.MessageID, "phase", optionalString(d.Phase), "ms_since_turn_start", stats.msSinceTurnStart())
 		case *copilot.AssistantReasoningDeltaData:
-			if reason.size()+len(d.DeltaContent) > maxTurnOutputBytes {
+			if contentBytes+reasoningStreamBytes+int64(len(d.DeltaContent)) > r.maxOutputBytes || contentBytes+reason.retainedSizeAfterDelta(d.DeltaContent) > r.maxOutputBytes {
 				r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
 				r.abort()
 				return
@@ -241,6 +276,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			// thread it through here. Accumulate a plaintext fallback and forward
 			// the delta so encoders can interleave it ahead of content.
 			reason.addDelta(d.DeltaContent, d.ReasoningID)
+			reasoningStreamBytes += int64(len(d.DeltaContent))
 			if d.DeltaContent != "" {
 				if debugEnabled {
 					deltaStats := stats.observeReasoningDelta(d.DeltaContent)
@@ -250,6 +286,12 @@ func (r *turnRunner) loop(g *RealGateway) {
 			}
 		case *copilot.AssistantMessageDeltaData:
 			if d.DeltaContent != "" {
+				if contentBytes+int64(len(d.DeltaContent))+reasoningStreamBytes > r.maxOutputBytes || contentBytes+int64(len(d.DeltaContent))+reason.retainedSize() > r.maxOutputBytes {
+					r.emitError(openai.Upstream("copilot output exceeded size limit"))
+					r.abort()
+					return
+				}
+				contentBytes += int64(len(d.DeltaContent))
 				if debugEnabled {
 					deltaStats := stats.observeContentDelta(d.DeltaContent)
 					r.debugDelta(g, "copilot content delta", d.DeltaContent, deltaStats, "message_id", d.MessageID)
@@ -257,7 +299,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 				r.emitDelta(d.DeltaContent)
 			}
 		case *copilot.AssistantReasoningData:
-			if len(d.Content) > maxTurnOutputBytes {
+			if contentBytes+reason.retainedSizeAfterConsolidated(d.Content) > r.maxOutputBytes {
 				r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
 				r.abort()
 				return
@@ -268,14 +310,25 @@ func (r *turnRunner) loop(g *RealGateway) {
 			reason.addConsolidated(d.Content, d.ReasoningID)
 			r.debug(g, "copilot final reasoning block", "reasoning_id", d.ReasoningID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "ms_since_turn_start", stats.msSinceTurnStart())
 		case *copilot.AssistantMessageData:
-			reasoningBytes := optionalStringByteLen(d.ReasoningText) + optionalStringByteLen(d.ReasoningOpaque) + optionalStringByteLen(d.EncryptedContent)
-			if len(d.Content) > maxTurnOutputBytes || reasoningBytes > maxTurnOutputBytes {
+			toolRequestBytes, err := toolRequestPayloadSize(d.ToolRequests)
+			if err != nil {
+				r.emitError(openai.Upstream("failed to measure copilot tool-call output"))
+				r.abort()
+				return
+			}
+			reasoningText := reason.resolve()
+			if d.ReasoningText != nil && *d.ReasoningText != "" {
+				reasoningText = *d.ReasoningText
+			}
+			reasoningBytes := len(reasoningText) + optionalStringByteLen(d.ReasoningOpaque) + optionalStringByteLen(d.EncryptedContent)
+			if int64(len(d.Content)+reasoningBytes)+toolRequestBytes > r.maxOutputBytes {
 				r.emitError(openai.Upstream("copilot output exceeded size limit"))
 				r.abort()
 				return
 			}
 			if d.ReasoningText != nil && *d.ReasoningText != "" {
 				reason.consolidated = *d.ReasoningText
+				reason.deltas = strings.Builder{}
 			}
 			if d.ReasoningOpaque != nil {
 				reason.opaque = *d.ReasoningOpaque
@@ -306,6 +359,8 @@ func (r *turnRunner) loop(g *RealGateway) {
 				// block is absent.
 				text = ""
 				usage = nil
+				contentBytes = 0
+				reasoningStreamBytes = 0
 				reason.markToolBoundary()
 				stats.reset()
 			} else {
@@ -469,6 +524,24 @@ func (r *turnRunner) sessionID() string {
 	return r.session.SessionID
 }
 
+type byteCounter int64
+
+func (c *byteCounter) Write(p []byte) (int, error) {
+	*c += byteCounter(len(p))
+	return len(p), nil
+}
+
+func toolRequestPayloadSize(requests []copilot.AssistantMessageToolRequest) (int64, error) {
+	if len(requests) == 0 {
+		return 0, nil
+	}
+	var counter byteCounter
+	if err := json.NewEncoder(&counter).Encode(requests); err != nil {
+		return 0, err
+	}
+	return int64(counter), nil
+}
+
 func optionalString(v *string) string {
 	if v == nil {
 		return ""
@@ -506,8 +579,24 @@ type reasoningAccumulator struct {
 	ignoreLateFinalID string
 }
 
-func (a *reasoningAccumulator) size() int {
-	return len(a.consolidated) + a.deltas.Len() + len(a.opaque) + len(a.encrypted)
+func (a *reasoningAccumulator) retainedSize() int64 {
+	textBytes := len(a.consolidated)
+	if textBytes == 0 {
+		textBytes = a.deltas.Len()
+	}
+	return int64(textBytes + len(a.opaque) + len(a.encrypted))
+}
+
+func (a *reasoningAccumulator) retainedSizeAfterDelta(delta string) int64 {
+	textBytes := len(a.consolidated)
+	if textBytes == 0 {
+		textBytes = a.deltas.Len() + len(delta)
+	}
+	return int64(textBytes + len(a.opaque) + len(a.encrypted))
+}
+
+func (a *reasoningAccumulator) retainedSizeAfterConsolidated(content string) int64 {
+	return int64(len(content) + len(a.opaque) + len(a.encrypted))
 }
 
 func (a *reasoningAccumulator) addDelta(delta, id string) {
@@ -518,7 +607,7 @@ func (a *reasoningAccumulator) addDelta(delta, id string) {
 	if id != "" {
 		a.id = id
 	}
-	if delta != "" {
+	if delta != "" && a.consolidated == "" {
 		a.deltas.WriteString(delta)
 	}
 }
@@ -533,6 +622,7 @@ func (a *reasoningAccumulator) addConsolidated(content, id string) {
 	}
 	if content != "" {
 		a.consolidated = content
+		a.deltas = strings.Builder{}
 	}
 	if id != "" {
 		a.id = id
@@ -566,7 +656,7 @@ func (a *reasoningAccumulator) markToolBoundary() {
 // reset clears all per-turn reasoning state at a turn boundary.
 func (a *reasoningAccumulator) reset() {
 	a.consolidated = ""
-	a.deltas.Reset()
+	a.deltas = strings.Builder{}
 	a.opaque = ""
 	a.encrypted = ""
 	a.id = ""
@@ -637,7 +727,6 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 	chatDone := r.chatDone
 	responseStream := r.responseStream
 	meta := r.responseMeta
-	streaming := chatStream != nil || responseStream != nil
 	if res.FinishReason == "tool_calls" {
 		r.chatStream = nil
 		r.chatDone = nil
@@ -645,17 +734,16 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 		r.responseMeta = nil
 	}
 	r.mu.Unlock()
-	if res.FinishReason == "tool_calls" && !streaming {
-		// Non-streaming callers receive the parked tool-call result through
-		// r.updates; detach before publishing so the handler's deferred request
-		// cancellation does not abort the live SDK session needed for continuation.
+	if res.FinishReason == "tool_calls" {
+		// Once a tool-call result exists, its batch TTL owns liveness. Detach
+		// before publishing to any transport so cancellation cannot win the narrow
+		// interval between result delivery and detachment.
 		r.detachFromRequestContext()
 	}
 	r.updates <- toolproxy.TurnFinalResult{Value: res}
 	if chatStream != nil {
 		sent := sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "result", Result: res})
 		if res.FinishReason == "tool_calls" && sent {
-			r.detachFromRequestContext()
 			close(chatStream)
 		}
 	}
@@ -680,7 +768,6 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 		}
 		sent := sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "response", Response: responseFromTurn(responseID, model, instructions, previous, store, res, suppressReasoning)})
 		if res.FinishReason == "tool_calls" && sent {
-			r.detachFromRequestContext()
 			close(responseStream)
 		}
 	}
@@ -746,6 +833,35 @@ func sendResponseStreamEvent(ch chan<- ResponseStreamEvent, meta *responseStream
 		return true
 	case <-meta.done:
 		return false
+	}
+}
+
+func (r *turnRunner) addPin(release func()) {
+	if release == nil {
+		return
+	}
+	r.pinMu.Lock()
+	if r.pinsReleased {
+		r.pinMu.Unlock()
+		release()
+		return
+	}
+	r.pinReleases = append(r.pinReleases, release)
+	r.pinMu.Unlock()
+}
+
+func (r *turnRunner) releasePins() {
+	r.pinMu.Lock()
+	if r.pinsReleased {
+		r.pinMu.Unlock()
+		return
+	}
+	r.pinsReleased = true
+	releases := r.pinReleases
+	r.pinReleases = nil
+	r.pinMu.Unlock()
+	for _, release := range releases {
+		release()
 	}
 }
 
@@ -904,5 +1020,5 @@ func recordFromResponse(resp *openai.Response, sessionID, retained string) sessi
 	if resp.PreviousResponseID != nil {
 		previous = *resp.PreviousResponseID
 	}
-	return sessionstore.ResponseRecord{ID: resp.ID, SDKSessionID: sessionID, Model: resp.Model, Instructions: resp.Instructions, CreatedAt: time.Unix(resp.CreatedAt, 0).UTC(), UpdatedAt: time.Now().UTC(), Status: resp.Status, Stored: resp.Store, Output: resp.Output, OutputText: resp.OutputText, Usage: resp.Usage, PreviousResponseID: previous, RetainedPath: retained}
+	return sessionstore.ResponseRecord{ID: resp.ID, SDKSessionID: sessionID, Model: resp.Model, Instructions: resp.Instructions, CreatedAt: time.Unix(resp.CreatedAt, 0).UTC(), UpdatedAt: time.Now().UTC(), Status: resp.Status, Stored: resp.Store, Output: storeOutputItems(resp.Output), OutputText: resp.OutputText, Usage: storeUsage(resp.Usage), PreviousResponseID: previous, RetainedPath: retained}
 }

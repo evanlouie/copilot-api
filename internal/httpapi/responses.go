@@ -75,18 +75,20 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 	if s.cfg.LogContent {
 		s.logResponsesToolSummary(ctx, normalizedTools)
 	}
-	input, outputs, inputInstructions, err := parseResponsesInput(req.Input)
+	parsedInput, err := parseResponsesInputOnce(req.Input)
 	if err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 	}
+	input := parsedInput.input
+	outputs := parsedInput.outputs
+	inputInstructions := parsedInput.instructions
 	var fallbackInput openai.PromptContent
 	fallbackInstructions := ""
 	fallbackAvailable := false
 	if len(outputs) > 0 && req.PreviousResponseID == "" {
-		fallbackInput, fallbackInstructions, fallbackAvailable, err = parseResponsesFallbackInput(req.Input)
-		if err != nil {
-			return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
-		}
+		fallbackInput = parsedInput.fallbackInput
+		fallbackInstructions = parsedInput.fallbackInstructions
+		fallbackAvailable = parsedInput.fallbackAvailable
 		if fallbackAvailable {
 			fallbackInstructions = combineInstructions(req.Instructions, fallbackInstructions)
 		}
@@ -145,7 +147,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		return
 	}
 	responseWriter := sseResponseEventWriter{server: s, ctx: ctx, writer: writer}
-	result := writeResponseStreamEvents(ctx, responseWriter, req, ch)
+	result := writeResponseStreamEvents(ctx, responseWriter, req, s.cfg.MaxTurnOutputBytes, ch)
 	if !result.WriteFailed {
 		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 	}

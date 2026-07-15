@@ -3,6 +3,7 @@ package copilotgw
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
@@ -10,6 +11,29 @@ import (
 )
 
 const modelMissRefreshInterval = 30 * time.Second
+
+type modelCache struct {
+	mu                sync.Mutex
+	models            []Model
+	fetched           time.Time
+	ttl               time.Duration
+	refreshing        bool
+	refreshDone       chan struct{}
+	lastForcedRefresh time.Time
+}
+
+func newModelCache(ttl time.Duration) *modelCache {
+	return &modelCache{ttl: ttl}
+}
+
+func (g *RealGateway) modelsState() *modelCache {
+	g.modelCacheOnce.Do(func() {
+		if g.modelCache == nil {
+			g.modelCache = newModelCache(0)
+		}
+	})
+	return g.modelCache
+}
 
 func (g *RealGateway) ListModels(ctx context.Context) ([]Model, error) {
 	return g.refreshModels(ctx, false)
@@ -19,51 +43,52 @@ func (g *RealGateway) ValidateModel(ctx context.Context, model string) error {
 	return err
 }
 func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, error) {
+	cache := g.modelsState()
 	for {
-		g.modelsMu.Lock()
-		if !force && g.modelsFreshLocked() {
-			out := cloneModels(g.models)
-			g.modelsMu.Unlock()
+		cache.mu.Lock()
+		if !force && cache.freshLocked() {
+			out := cloneModels(cache.models)
+			cache.mu.Unlock()
 			return out, nil
 		}
-		if !force && len(g.models) > 0 {
-			if !g.modelsRefreshing {
+		if !force && len(cache.models) > 0 {
+			if !cache.refreshing {
 				done := make(chan struct{})
-				g.modelsRefreshing = true
-				g.modelsRefreshDone = done
+				cache.refreshing = true
+				cache.refreshDone = done
 				go g.refreshModelsInBackground(done)
 			}
-			out := cloneModels(g.models)
-			g.modelsMu.Unlock()
+			out := cloneModels(cache.models)
+			cache.mu.Unlock()
 			return out, nil
 		}
-		if g.modelsRefreshing {
+		if cache.refreshing {
 			// A refresh is already in flight. Join it instead of issuing a duplicate
 			// upstream call, even for forced refreshes, so concurrent validations on
 			// an expired cache share a single fetch (singleflight).
-			done := g.modelsRefreshDone
-			before := g.modelsFetched
-			g.modelsMu.Unlock()
+			done := cache.refreshDone
+			before := cache.fetched
+			cache.mu.Unlock()
 			select {
 			case <-done:
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
-			g.modelsMu.Lock()
-			if g.models != nil && g.modelsFetched.After(before) {
-				out := cloneModels(g.models)
-				g.modelsMu.Unlock()
+			cache.mu.Lock()
+			if cache.models != nil && cache.fetched.After(before) {
+				out := cloneModels(cache.models)
+				cache.mu.Unlock()
 				return out, nil
 			}
 			// The joined refresh failed and left the cache unchanged; loop so this
 			// caller issues its own fetch.
-			g.modelsMu.Unlock()
+			cache.mu.Unlock()
 			continue
 		}
 		done := make(chan struct{})
-		g.modelsRefreshing = true
-		g.modelsRefreshDone = done
-		g.modelsMu.Unlock()
+		cache.refreshing = true
+		cache.refreshDone = done
+		cache.mu.Unlock()
 		out, err := g.fetchModels(ctx)
 		g.finishModelRefresh(done, out, err)
 		if err != nil {
@@ -73,8 +98,8 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 	}
 }
 
-func (g *RealGateway) modelsFreshLocked() bool {
-	return g.models != nil && (g.modelsCacheTTL <= 0 || time.Since(g.modelsFetched) < g.modelsCacheTTL)
+func (c *modelCache) freshLocked() bool {
+	return c.models != nil && (c.ttl <= 0 || time.Since(c.fetched) < c.ttl)
 }
 
 func cloneModels(models []Model) []Model {
@@ -113,26 +138,40 @@ func cloneStringAnyMap(src map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(src))
 	for key, value := range src {
-		switch value := value.(type) {
-		case map[string]any:
-			out[key] = cloneStringAnyMap(value)
-		case []any:
-			items := make([]any, len(value))
-			for i, item := range value {
-				if nested, ok := item.(map[string]any); ok {
-					items[i] = cloneStringAnyMap(nested)
-				} else {
-					items[i] = item
-				}
-			}
-			out[key] = items
-		case []string:
-			out[key] = append([]string(nil), value...)
-		default:
-			out[key] = value
-		}
+		out[key] = cloneMetadataValue(value)
 	}
 	return out
+}
+
+func cloneMetadataValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneStringAnyMap(value)
+	case []any:
+		items := make([]any, len(value))
+		for i, item := range value {
+			items[i] = cloneMetadataValue(item)
+		}
+		return items
+	case []string:
+		return append([]string(nil), value...)
+	case *int64:
+		return cloneInt64(value)
+	case *string:
+		if value == nil {
+			return (*string)(nil)
+		}
+		cloned := *value
+		return &cloned
+	case *bool:
+		if value == nil {
+			return (*bool)(nil)
+		}
+		cloned := *value
+		return &cloned
+	default:
+		return value
+	}
 }
 
 func (g *RealGateway) refreshModelsInBackground(done chan struct{}) {
@@ -146,30 +185,32 @@ func (g *RealGateway) refreshModelsInBackground(done chan struct{}) {
 }
 
 func (g *RealGateway) finishModelRefresh(done chan struct{}, models []Model, err error) {
-	g.modelsMu.Lock()
+	cache := g.modelsState()
+	cache.mu.Lock()
 	if err == nil {
-		g.models = cloneModels(models)
-		g.modelsFetched = time.Now()
+		cache.models = cloneModels(models)
+		cache.fetched = time.Now()
 	}
-	if g.modelsRefreshDone == done {
-		g.modelsRefreshing = false
-		g.modelsRefreshDone = nil
+	if cache.refreshDone == done {
+		cache.refreshing = false
+		cache.refreshDone = nil
 		close(done)
 	}
-	g.modelsMu.Unlock()
+	cache.mu.Unlock()
 }
 
 func (g *RealGateway) shouldForceModelRefresh() bool {
-	g.modelsMu.Lock()
-	defer g.modelsMu.Unlock()
-	if g.modelsRefreshing {
+	cache := g.modelsState()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.refreshing {
 		return true
 	}
 	now := time.Now()
-	if !g.lastForcedModelRefresh.IsZero() && now.Sub(g.lastForcedModelRefresh) < modelMissRefreshInterval {
+	if !cache.lastForcedRefresh.IsZero() && now.Sub(cache.lastForcedRefresh) < modelMissRefreshInterval {
 		return false
 	}
-	g.lastForcedModelRefresh = now
+	cache.lastForcedRefresh = now
 	return true
 }
 

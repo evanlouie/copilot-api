@@ -61,6 +61,78 @@ func TestFailSendUnblocksWhenRunnerClosed(t *testing.T) {
 	}
 }
 
+func TestStaleRequestGenerationCannotAbortReattachedRunner(t *testing.T) {
+	r := &turnRunner{}
+	oldGeneration := r.requestGeneration
+	r.detachFromRequestContext()
+	r.attachToRequestContext()
+	if r.shouldAbortForRequestGeneration(oldGeneration) {
+		t.Fatal("stale request generation could abort a newer attachment")
+	}
+	if !r.shouldAbortForRequestGeneration(r.requestGeneration) {
+		t.Fatal("current attached generation should abort on cancellation")
+	}
+}
+
+func TestOnResultCallbackIsConsumedByOneTurn(t *testing.T) {
+	r := &turnRunner{updates: make(chan toolproxy.TurnFinalResult, 2)}
+	calls := 0
+	r.setOnResult(func(*TurnResult) error {
+		calls++
+		return nil
+	})
+	r.emitResult(&TurnResult{ID: "resp_first", FinishReason: "stop"})
+	r.emitResult(&TurnResult{ID: "resp_second", FinishReason: "stop"})
+	if calls != 1 {
+		t.Fatalf("onResult called %d times, want exactly once", calls)
+	}
+}
+
+func TestTurnRunnerRejectsOversizedToolRequestPayload(t *testing.T) {
+	events := make(chan copilot.SessionEvent, 1)
+	runner := &turnRunner{
+		maxOutputBytes: 128,
+		events:         events,
+		updates:        make(chan toolproxy.TurnFinalResult, 1),
+		closed:         make(chan struct{}),
+		session:        &copilot.Session{SessionID: "sdk"},
+	}
+	runner.abortOnce.Do(func() {})
+	go runner.loop(&RealGateway{})
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"payload": strings.Repeat("x", 1024)}}}}}
+	select {
+	case update := <-runner.updates:
+		if update.Err == nil || !strings.Contains(update.Err.Error(), "size limit") {
+			t.Fatalf("update = %#v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner did not reject oversized tool payload")
+	}
+}
+
+func TestToolRequestPayloadSizeIncludesArguments(t *testing.T) {
+	requests := []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"payload": strings.Repeat("x", 1024)}}}
+	size, err := toolRequestPayloadSize(requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size <= 1024 {
+		t.Fatalf("tool payload size = %d, want serialized metadata plus arguments", size)
+	}
+}
+
+func TestReasoningAccumulatorReplacesDeltaBufferWithConsolidatedText(t *testing.T) {
+	var accumulator reasoningAccumulator
+	accumulator.addDelta(strings.Repeat("a", 64), "reasoning")
+	accumulator.addConsolidated("final", "reasoning")
+	if accumulator.deltas.Len() != 0 || accumulator.resolve() != "final" {
+		t.Fatalf("accumulator retained duplicate reasoning: %#v", accumulator)
+	}
+	if got := accumulator.retainedSizeAfterConsolidated(strings.Repeat("b", 10)); got != 10 {
+		t.Fatalf("retained size = %d, want 10", got)
+	}
+}
+
 func TestCurrentResponseIDUsesContinuationMetadata(t *testing.T) {
 	r := &turnRunner{responseID: "resp_initial"}
 	if got := r.currentResponseID(); got != "resp_initial" {

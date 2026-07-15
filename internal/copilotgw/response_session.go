@@ -11,14 +11,16 @@ import (
 )
 
 type preparedResponseTurn struct {
-	session   *copilot.Session
-	sessionID string
-	previous  *string
-	rt        *toolproxy.RequestTools
-	events    chan copilot.SessionEvent
-	prompt    resolvedPrompt
-	catalog   openai.ToolCatalog
-	retained  string
+	session     *copilot.Session
+	sessionID   string
+	previous    *string
+	rt          *toolproxy.RequestTools
+	events      chan copilot.SessionEvent
+	prompt      resolvedPrompt
+	catalog     openai.ToolCatalog
+	retained    string
+	imageBudget *imageRequestBudget
+	pinReleases []func()
 }
 
 func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequest, streaming bool) (*preparedResponseTurn, error) {
@@ -27,16 +29,34 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 		return nil, err
 	}
 
-	prepared := &preparedResponseTurn{events: make(chan copilot.SessionEvent, 256)}
+	prepared := &preparedResponseTurn{events: make(chan copilot.SessionEvent, 256), imageBudget: newImageRequestBudget()}
+	keepPins := false
+	defer func() {
+		if !keepPins {
+			releaseAll(prepared.pinReleases)
+		}
+	}()
 	promptResolved := false
 	if streaming {
-		if warmSession, warmTools, warmEvents, warmRetained, warmPrevious, ok := req.WarmSession.use(req); ok {
-			prepared.session = warmSession
-			prepared.rt = warmTools
-			prepared.events = warmEvents
-			prepared.retained = warmRetained
-			prepared.previous = warmPrevious
-			prepared.sessionID = warmSession.SessionID
+		if warmUse, ok := req.WarmSession.use(req); ok {
+			prepared.imageBudget = warmUse.imageBudget
+			prepared.pinReleases = warmUse.pinReleases
+			if prepared.imageBudget == nil {
+				prepared.imageBudget = newImageRequestBudget()
+			}
+			currentPrompt, resolveErr := g.resolvePromptWithImageBudget(ctx, req.Model, req.Input, "input", prepared.imageBudget)
+			if resolveErr != nil {
+				_ = warmUse.session.Disconnect()
+				return nil, resolveErr
+			}
+			prepared.prompt = combineResolvedPrompts(warmUse.prompt, currentPrompt)
+			promptResolved = true
+			prepared.session = warmUse.session
+			prepared.rt = warmUse.tools
+			prepared.events = warmUse.events
+			prepared.retained = warmUse.retained
+			prepared.previous = warmUse.previous
+			prepared.sessionID = warmUse.session.SessionID
 			prepared.catalog, err = openai.NewToolCatalog(req.Tools)
 			if err != nil {
 				_ = prepared.session.Disconnect()
@@ -48,17 +68,19 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 	}
 
 	if prepared.session == nil {
-		prepared.prompt, err = g.resolvePrompt(ctx, req.Model, req.Input, "input")
+		prepared.prompt, err = g.resolvePromptWithImageBudget(ctx, req.Model, req.Input, "input", prepared.imageBudget)
 		if err != nil {
 			return nil, err
 		}
 		promptResolved = true
 		var previousRecord *sessionstore.ResponseRecord
 		if req.PreviousResponseID != "" {
+			prepared.pinReleases = append(prepared.pinReleases, g.store.PinResponse(req.PreviousResponseID))
 			record, loadErr := g.store.LoadResponseForContinuation(req.PreviousResponseID)
 			if loadErr != nil {
 				return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
 			}
+			prepared.pinReleases = append(prepared.pinReleases, g.store.PinSession(record.SDKSessionID))
 			previousRecord = &record
 		}
 		prepared.catalog, err = responseCatalogForRequest(*req, previousRecord)
@@ -81,10 +103,12 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 				}
 				prepared.prompt = g.responseContinuationPrompt(*previousRecord, prepared.prompt)
 				prepared.sessionID = "resp_sdk_" + uuid.NewString()
+				prepared.pinReleases = append(prepared.pinReleases, g.store.PinSession(prepared.sessionID))
 				prepared.session, err = g.createSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
 			}
 		} else {
 			prepared.sessionID = "resp_sdk_" + uuid.NewString()
+			prepared.pinReleases = append(prepared.pinReleases, g.store.PinSession(prepared.sessionID))
 			prepared.session, err = g.createSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
 		}
 		if err != nil {
@@ -96,7 +120,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 		return nil, openai.Upstream("copilot SDK returned nil session")
 	}
 	if !promptResolved {
-		prepared.prompt, err = g.resolvePrompt(ctx, req.Model, req.Input, "input")
+		prepared.prompt, err = g.resolvePromptWithImageBudget(ctx, req.Model, req.Input, "input", prepared.imageBudget)
 		if err != nil {
 			_ = prepared.session.Disconnect()
 			return nil, err
@@ -105,5 +129,20 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 	if prepared.retained == "" {
 		prepared.retained = g.fs.SessionRoot(prepared.sessionID)
 	}
+	keepPins = true
 	return prepared, nil
+}
+
+func combineResolvedPrompts(previous, current resolvedPrompt) resolvedPrompt {
+	if previous.Text != "" {
+		if current.Text != "" {
+			current.Text = previous.Text + "\n\n" + current.Text
+		} else {
+			current.Text = previous.Text
+		}
+	}
+	if len(previous.Attachments) > 0 {
+		current.Attachments = append(append([]copilot.Attachment{}, previous.Attachments...), current.Attachments...)
+	}
+	return current
 }

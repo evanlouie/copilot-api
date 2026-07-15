@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
@@ -118,29 +119,86 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 	if err := s.writeSSEData(ctx, writer, "chat.role", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "role"); err != nil {
 		return
 	}
-	for ev := range ch {
-		s.logChatStreamEvent(ctx, ev)
-		switch ev.Kind {
-		case "reasoning_delta":
-			if err := s.writeChatReasoningDelta(ctx, writer, streamID, created, model, ev.Delta, includeUsage); err != nil {
+	var streamedText strings.Builder
+	var streamedReasoning strings.Builder
+	writeFailure := func(streamErr error) {
+		if s.writeSSEData(ctx, writer, "chat.error", openai.ErrorEnvelope{Error: errorObject(streamErr)}, "stream_kind", "chat", "chunk_kind", "error") == nil {
+			_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				writeFailure(openai.Timeout())
+			}
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				if ctx.Err() == context.Canceled {
+					return
+				}
+				if ctx.Err() == context.DeadlineExceeded {
+					writeFailure(openai.Timeout())
+				} else {
+					writeFailure(openai.Upstream("chat stream ended before a terminal event"))
+				}
 				return
 			}
-		case "delta":
-			if err := s.writeSSEData(ctx, writer, "chat.content_delta", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "content", ev.Delta)...); err != nil {
+			s.logChatStreamEvent(ctx, ev)
+			switch ev.Kind {
+			case "reasoning_delta":
+				if err := s.writeChatReasoningDelta(ctx, writer, streamID, created, model, ev.Delta, includeUsage); err != nil {
+					return
+				}
+				streamedReasoning.WriteString(ev.Delta)
+			case "delta":
+				if err := s.writeSSEData(ctx, writer, "chat.content_delta", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: ev.Delta}}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "content", ev.Delta)...); err != nil {
+					return
+				}
+				streamedText.WriteString(ev.Delta)
+			case "result":
+				if ev.Result == nil {
+					writeFailure(openai.Internal("chat stream returned an empty result"))
+					return
+				}
+				streamedReason := streamedReasoning.String()
+				if ev.Result.Reasoning != streamedReason {
+					if !strings.HasPrefix(ev.Result.Reasoning, streamedReason) {
+						writeFailure(openai.Upstream("chat stream terminal reasoning does not match streamed reasoning"))
+						return
+					}
+					remainingReasoning := strings.TrimPrefix(ev.Result.Reasoning, streamedReason)
+					if remainingReasoning != "" {
+						if err := s.writeChatReasoningDelta(ctx, writer, streamID, created, model, remainingReasoning, includeUsage); err != nil {
+							return
+						}
+					}
+				}
+				streamed := streamedText.String()
+				if ev.Result.Text != streamed {
+					if !strings.HasPrefix(ev.Result.Text, streamed) {
+						writeFailure(openai.Upstream("chat stream terminal text does not match streamed content"))
+						return
+					}
+					remaining := strings.TrimPrefix(ev.Result.Text, streamed)
+					if remaining != "" {
+						if err := s.writeSSEData(ctx, writer, "chat.content_delta", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: remaining}}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "content", remaining)...); err != nil {
+							return
+						}
+					}
+				}
+				if err := s.writeChatTerminalWithID(ctx, writer, streamID, created, model, ev.Result, includeUsage); err != nil {
+					return
+				}
+				_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
 				return
-			}
-		case "result":
-			if err := s.writeChatTerminalWithID(ctx, writer, streamID, created, model, ev.Result, includeUsage); err != nil {
-				return
-			}
-		case "error":
-			if err := s.writeSSEData(ctx, writer, "chat.error", openai.ErrorEnvelope{Error: errorObject(ev.Error)}, "stream_kind", "chat", "chunk_kind", "error"); err != nil {
+			case "error":
+				writeFailure(ev.Error)
 				return
 			}
 		}
 	}
-	s.debugStream(ctx, "chat stream channel closed", "stream_kind", "chat", "stream_id", streamID)
-	_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
 }
 func (s *Server) writeChatReasoningDelta(ctx context.Context, writer *openai.SSEWriter, id string, created int64, model, delta string, includeUsage bool) error {
 	if delta == "" {

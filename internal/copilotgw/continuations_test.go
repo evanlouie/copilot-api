@@ -254,7 +254,7 @@ func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalo
 		t.Fatal(err)
 	}
 	record := recordFromResponse(previous, "sdk-session", "")
-	record.InstalledToolCatalog = catalog.StoredDTO()
+	record.InstalledToolCatalog = storeToolCatalog(catalog.StoredDTO())
 	if err := store.SaveResponse(record); err != nil {
 		t.Fatal(err)
 	}
@@ -284,15 +284,15 @@ func TestResponseContinuationPromptIncludesStructuredToolState(t *testing.T) {
 	previous := sessionstore.ResponseRecord{
 		ID:        "resp_prev",
 		InputText: "find tools",
-		Output: []openai.ResponseOutputItem{
+		Output: storeOutputItems([]openai.ResponseOutputItem{
 			{Type: "tool_search_call", CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"agents"}`)},
-		},
-		ToolOutputs: []openai.StoredToolOutput{
+		}),
+		ToolOutputs: storeToolOutputs([]openai.StoredToolOutput{
 			{Type: "tool_search_output", CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`)},
-		},
-		LoadedToolEvents: []openai.StoredLoadedToolEvent{
+		}),
+		LoadedToolEvents: storeLoadedToolEvents([]openai.StoredLoadedToolEvent{
 			{SourceCallID: "call_search", LoadedTools: []openai.StoredToolSpec{{Type: openai.ToolKindNamespace, Name: "multi_agent_v1", Tools: []openai.StoredToolSpec{{Type: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
-		},
+		}),
 	}
 	prompt := g.responseContinuationPrompt(previous, resolvedPrompt{Text: "continue"})
 	for _, want := range []string{

@@ -2,6 +2,7 @@ package copilotgw
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -451,6 +452,55 @@ func assertBoolPtr(t *testing.T, name string, got *bool, want bool) {
 	}
 }
 
+func TestCloneModelsDeepClonesNestedMetadata(t *testing.T) {
+	pointer := int64(7)
+	original := []Model{{Metadata: map[string]any{"nested": []any{[]any{map[string]any{"value": "before"}}, &pointer}}}}
+	cloned := cloneModels(original)
+	originalNested := original[0].Metadata["nested"].([]any)
+	originalNested[0].([]any)[0].(map[string]any)["value"] = "after"
+	pointer = 9
+	clonedNested := cloned[0].Metadata["nested"].([]any)
+	if got := clonedNested[0].([]any)[0].(map[string]any)["value"]; got != "before" {
+		t.Fatalf("nested map was shared: %v", got)
+	}
+	if got := *clonedNested[1].(*int64); got != 7 {
+		t.Fatalf("nested pointer was shared: %d", got)
+	}
+}
+
+func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	gateway := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
+	closed := make(chan struct{})
+	close(closed)
+	runner := &turnRunner{closed: closed}
+	runner.abortOnce.Do(func() {})
+	gateway.pending.put("batch_runner", runner)
+
+	requestTools, err := toolproxy.NewRequestTools(gateway.broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, _, err := requestTools.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_stop", Name: requestTools.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if gateway.pending.get("batch_runner") != nil {
+		t.Fatal("pending runner remained after Stop")
+	}
+	if _, err := gateway.broker.FindByCallIDs([]string{"call_stop"}); !errors.Is(err, toolproxy.ErrNotFound) {
+		t.Fatalf("batch remained after Stop: %v", err)
+	}
+	select {
+	case <-batch.Context().Done():
+	default:
+		t.Fatal("batch context was not canceled")
+	}
+}
+
 func TestNewRealNormalizesNilLogger(t *testing.T) {
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{}, store, nil)
@@ -464,9 +514,7 @@ func TestNewRealNormalizesNilLogger(t *testing.T) {
 func TestFindModelThrottlesSequentialForcedRefreshes(t *testing.T) {
 	var calls int32
 	gw := &RealGateway{
-		models:         []Model{{ID: "known"}},
-		modelsFetched:  time.Now(),
-		modelsCacheTTL: time.Hour,
+		modelCache: &modelCache{models: []Model{{ID: "known"}}, fetched: time.Now(), ttl: time.Hour},
 		modelsFetcher: func(context.Context) ([]Model, error) {
 			atomic.AddInt32(&calls, 1)
 			return []Model{{ID: "known"}}, nil
@@ -487,7 +535,7 @@ func TestRefreshModelsDeduplicatesConcurrentForcedRefreshes(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
 	gw := &RealGateway{
-		modelsCacheTTL: time.Hour,
+		modelCache: &modelCache{ttl: time.Hour},
 		modelsFetcher: func(context.Context) ([]Model, error) {
 			atomic.AddInt32(&calls, 1)
 			select {

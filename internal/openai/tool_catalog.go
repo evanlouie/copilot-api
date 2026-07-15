@@ -26,7 +26,9 @@ const (
 var ResponsesSDKToolNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
 
 type ToolCatalog struct {
-	Tools []NormalizedTool
+	tools  []NormalizedTool
+	key    string
+	stored *StoredToolCatalog
 }
 
 type LoadedToolEvent struct {
@@ -86,11 +88,11 @@ func NewToolCatalog(tools []NormalizedTool) (ToolCatalog, error) {
 	if err := validateInstalledToolCount(cloned, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
-	catalog := ToolCatalog{Tools: cloned}
+	catalog := ToolCatalog{tools: cloned}
 	if err := validateStoredCatalogSize(catalog, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
-	return catalog, nil
+	return catalog.withCache(), nil
 }
 
 func ToolCatalogFromStored(stored *StoredToolCatalog) (ToolCatalog, bool, error) {
@@ -116,15 +118,22 @@ func ToolCatalogFromStored(stored *StoredToolCatalog) (ToolCatalog, bool, error)
 }
 
 func (c ToolCatalog) WithoutRaw() ToolCatalog {
-	return ToolCatalog{Tools: cloneNormalizedTools(c.Tools, false)}
+	return ToolCatalog{tools: cloneNormalizedTools(c.tools, false), key: c.Key(), stored: cloneStoredToolCatalog(c.stored)}
 }
 
 func (c ToolCatalog) Flatten() []NormalizedTool {
-	return cloneNormalizedTools(c.Tools, true)
+	return cloneNormalizedTools(c.tools, true)
 }
 
 func (c ToolCatalog) StoredDTO() *StoredToolCatalog {
-	tools := c.WithoutRaw().Tools
+	if c.stored != nil {
+		return cloneStoredToolCatalog(c.stored)
+	}
+	return c.buildStoredDTO()
+}
+
+func (c ToolCatalog) buildStoredDTO() *StoredToolCatalog {
+	tools := cloneNormalizedTools(c.tools, false)
 	stored := &StoredToolCatalog{SchemaVersion: ToolCatalogSchemaVersion, CatalogKey: c.Key(), KnownEmpty: len(tools) == 0}
 	stored.Tools = make([]StoredToolSpec, 0, len(tools))
 	for _, tool := range tools {
@@ -134,12 +143,49 @@ func (c ToolCatalog) StoredDTO() *StoredToolCatalog {
 }
 
 func (c ToolCatalog) Key() string {
-	b, err := json.Marshal(comparableTools(c.Tools))
+	if c.key != "" {
+		return c.key
+	}
+	b, err := json.Marshal(comparableTools(c.tools))
 	if err != nil {
 		return ""
 	}
 	h := sha1.Sum(b)
 	return hex.EncodeToString(h[:])
+}
+
+func (c ToolCatalog) withCache() ToolCatalog {
+	c.key = c.Key()
+	c.stored = c.buildStoredDTO()
+	return c
+}
+
+func cloneStoredToolCatalog(catalog *StoredToolCatalog) *StoredToolCatalog {
+	if catalog == nil {
+		return nil
+	}
+	out := &StoredToolCatalog{SchemaVersion: catalog.SchemaVersion, CatalogKey: catalog.CatalogKey, KnownEmpty: catalog.KnownEmpty}
+	out.Tools = cloneStoredToolSpecs(catalog.Tools)
+	return out
+}
+
+func cloneStoredToolSpecs(specs []StoredToolSpec) []StoredToolSpec {
+	out := make([]StoredToolSpec, len(specs))
+	for i, spec := range specs {
+		out[i] = spec
+		out[i].Parameters = cloneRaw(spec.Parameters)
+		out[i].Format = cloneRaw(spec.Format)
+		if spec.Strict != nil {
+			value := *spec.Strict
+			out[i].Strict = &value
+		}
+		if spec.DeferLoading != nil {
+			value := *spec.DeferLoading
+			out[i].DeferLoading = &value
+		}
+		out[i].Tools = cloneStoredToolSpecs(spec.Tools)
+	}
+	return out
 }
 
 func (c ToolCatalog) MergeLoaded(sourceCallID string, loaded []NormalizedTool) (ToolCatalog, error) {
@@ -164,6 +210,8 @@ func (c ToolCatalog) MergeRequestTools(tools []NormalizedTool) (ToolCatalog, err
 
 func (c ToolCatalog) mergeTools(tools []NormalizedTool, loadedOnly bool, param string) (ToolCatalog, error) {
 	merged := c.WithoutRaw()
+	merged.key = ""
+	merged.stored = nil
 	incoming := cloneNormalizedTools(tools, false)
 	canonicalizeNamespaceChildren(incoming)
 	if err := validateNormalizedToolCatalog(incoming, param); err != nil {
@@ -171,21 +219,21 @@ func (c ToolCatalog) mergeTools(tools []NormalizedTool, loadedOnly bool, param s
 	}
 	for _, tool := range incoming {
 		var err error
-		merged.Tools, err = mergeCatalogTool(merged.Tools, tool, loadedOnly)
+		merged.tools, err = mergeCatalogTool(merged.tools, tool, loadedOnly)
 		if err != nil {
 			return ToolCatalog{}, err
 		}
 	}
-	if err := validateNormalizedToolCatalog(merged.Tools, "tools"); err != nil {
+	if err := validateNormalizedToolCatalog(merged.tools, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
-	if err := validateInstalledToolCount(merged.Tools, "tools"); err != nil {
+	if err := validateInstalledToolCount(merged.tools, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
 	if err := validateStoredCatalogSize(merged, param); err != nil {
 		return ToolCatalog{}, err
 	}
-	return merged, nil
+	return merged.withCache(), nil
 }
 
 func StoredLoadedToolEventFromLoaded(e LoadedToolEvent) StoredLoadedToolEvent {

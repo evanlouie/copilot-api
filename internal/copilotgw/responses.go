@@ -27,7 +27,13 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if err != nil {
 		return nil, err
 	}
+	releaseSession := g.store.PinSession(prepared.sessionID)
+	releaseResponse := g.store.PinResponse(req.ResponseID)
+	defer releaseSession()
+	defer releaseResponse()
 	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
+	releaseAll(prepared.pinReleases)
+	prepared.pinReleases = nil
 	runner.watchContext(ctx)
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.prompt.Text, Attachments: prepared.prompt.Attachments}); err != nil {
 		runner.failSend(prepared.events, err)
@@ -45,9 +51,9 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 	record.InputText = incrementalInput
 	record.PendingBatchID = turn.PendingBatchID
-	record.InstalledToolCatalog = prepared.catalog.StoredDTO()
-	record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
-	record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
+	record.InstalledToolCatalog = storeToolCatalog(prepared.catalog.StoredDTO())
+	record.ToolOutputs = storeToolOutputs(openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs))
+	record.LoadedToolEvents = storeLoadedToolEvents(req.LoadedToolEvents)
 	if err := g.store.SaveResponse(record); err != nil {
 		return nil, openai.Internal("failed to persist response")
 	}
@@ -114,6 +120,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
 		if err := batch.CompleteToolOutputsWithSetup(outputs, func() {
+			runner.setCurrentResponseID(req.ResponseID)
 			runner.attachToRequestContext()
 			runner.watchContext(ctx)
 			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, req.SuppressReasoning, ctx.Done())
@@ -124,8 +131,8 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 				record.PendingBatchID = turn.PendingBatchID
-				record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
-				record.InstalledToolCatalog = catalogDTO
+				record.ToolOutputs = storeToolOutputs(openai.StoredToolOutputsFromMap(outputs))
+				record.InstalledToolCatalog = storeToolCatalog(catalogDTO)
 				if err := g.store.SaveResponse(record); err != nil {
 					return openai.Internal("failed to persist response")
 				}
@@ -147,6 +154,8 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	}
 	ch := make(chan ResponseStreamEvent, 32)
 	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
+	releaseAll(prepared.pinReleases)
+	prepared.pinReleases = nil
 	runner.watchContext(ctx)
 	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, req.SuppressReasoning, ctx.Done())
 	runner.setOnResult(func(turn *TurnResult) error {
@@ -157,9 +166,9 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 		record.InputText = incrementalInput
 		record.PendingBatchID = turn.PendingBatchID
-		record.InstalledToolCatalog = prepared.catalog.StoredDTO()
-		record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
-		record.LoadedToolEvents = append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...)
+		record.InstalledToolCatalog = storeToolCatalog(prepared.catalog.StoredDTO())
+		record.ToolOutputs = storeToolOutputs(openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs))
+		record.LoadedToolEvents = storeLoadedToolEvents(req.LoadedToolEvents)
 		if err := g.store.SaveResponse(record); err != nil {
 			return openai.Internal("failed to persist response")
 		}
@@ -222,7 +231,7 @@ func appendResponseRecordTranscript(b *strings.Builder, record sessionstore.Resp
 		b.WriteString(text)
 		b.WriteString("\n\n")
 	}
-	for _, item := range record.Output {
+	for _, item := range wireOutputItems(record.Output) {
 		switch item.Type {
 		case "function_call", "custom_tool_call", "tool_search_call":
 			b.WriteString("Assistant call: ")
@@ -234,11 +243,11 @@ func appendResponseRecordTranscript(b *strings.Builder, record sessionstore.Resp
 			b.WriteString("\n\n")
 		}
 	}
-	for _, output := range record.ToolOutputs {
+	for _, output := range wireToolOutputs(record.ToolOutputs) {
 		b.WriteString(storedToolOutputPrompt(output))
 		b.WriteString("\n\n")
 	}
-	for _, event := range record.LoadedToolEvents {
+	for _, event := range wireLoadedToolEvents(record.LoadedToolEvents) {
 		if len(event.LoadedTools) == 0 {
 			continue
 		}
@@ -317,7 +326,7 @@ func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Respo
 		}
 		return nil, openai.Internal("failed to load response")
 	}
-	resp := &openai.Response{ID: record.ID, Object: openai.ObjectResponse, CreatedAt: record.CreatedAt.Unix(), Status: record.Status, Model: record.Model, Instructions: record.Instructions, Output: record.Output, OutputText: record.OutputText, Store: record.Stored, Usage: record.Usage, Error: nil, IncompleteDetails: nil, ParallelToolCalls: true}
+	resp := &openai.Response{ID: record.ID, Object: openai.ObjectResponse, CreatedAt: record.CreatedAt.Unix(), Status: record.Status, Model: record.Model, Instructions: record.Instructions, Output: wireOutputItems(record.Output), OutputText: record.OutputText, Store: record.Stored, Usage: wireUsage(record.Usage), Error: nil, IncompleteDetails: nil, ParallelToolCalls: true}
 	if record.PreviousResponseID != "" {
 		resp.PreviousResponseID = &record.PreviousResponseID
 	}

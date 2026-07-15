@@ -606,59 +606,16 @@ type ResponsesRequest struct {
 }
 
 func (r *ResponsesRequest) UnmarshalJSON(data []byte) error {
-	var wire struct {
-		Model              string          `json:"model"`
-		Input              json.RawMessage `json:"input"`
-		Instructions       string          `json:"instructions,omitempty"`
-		PreviousResponseID string          `json:"previous_response_id,omitempty"`
-		Stream             bool            `json:"stream,omitempty"`
-		Tools              presentToolList `json:"tools,omitempty"`
-		ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
-		ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
-		Store              *bool           `json:"store,omitempty"`
-		ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
-		Include            json.RawMessage `json:"include,omitempty"`
-		Reasoning          json.RawMessage `json:"reasoning,omitempty"`
-		Text               json.RawMessage `json:"text,omitempty"`
-		Background         json.RawMessage `json:"background"`
-		MaxOutputTokens    json.RawMessage `json:"max_output_tokens"`
-		Truncation         json.RawMessage `json:"truncation"`
-		Temperature        json.RawMessage `json:"temperature"`
-		TopP               json.RawMessage `json:"top_p"`
-		Metadata           json.RawMessage `json:"metadata"`
-		ServiceTier        json.RawMessage `json:"service_tier"`
-		User               json.RawMessage `json:"user"`
-	}
-	if err := json.Unmarshal(data, &wire); err != nil {
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	*r = ResponsesRequest{
-		Model: wire.Model, Input: wire.Input, Instructions: wire.Instructions,
-		PreviousResponseID: wire.PreviousResponseID, Stream: wire.Stream, Tools: wire.Tools.Value,
-		ToolChoice: wire.ToolChoice, ParallelToolCalls: wire.ParallelToolCalls, Store: wire.Store,
-		ReasoningEffort: wire.ReasoningEffort, Include: wire.Include, Reasoning: wire.Reasoning, Text: wire.Text,
+	decoded, err := ResponsesRequestFromFields(fields)
+	if err != nil {
+		return err
 	}
-	var toolsPresence json.RawMessage
-	if wire.Tools.Present {
-		toolsPresence = json.RawMessage(`true`)
-	}
-	r.Raw = presentRawFields(map[string]json.RawMessage{
-		"background": wire.Background, "max_output_tokens": wire.MaxOutputTokens, "truncation": wire.Truncation,
-		"temperature": wire.Temperature, "top_p": wire.TopP, "include": wire.Include,
-		"reasoning": wire.Reasoning, "text": wire.Text, "metadata": wire.Metadata,
-		"service_tier": wire.ServiceTier, "user": wire.User, "tools": toolsPresence,
-	})
+	*r = decoded
 	return nil
-}
-
-type presentToolList struct {
-	Value   []Tool
-	Present bool
-}
-
-func (p *presentToolList) UnmarshalJSON(data []byte) error {
-	p.Present = true
-	return json.Unmarshal(data, &p.Value)
 }
 
 func presentRawFields(fields map[string]json.RawMessage) map[string]json.RawMessage {

@@ -2,8 +2,31 @@ package openai
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
+
+func TestResponsesRequestHTTPAndFieldDecodersStayEquivalent(t *testing.T) {
+	data := []byte(`{"model":"gpt-5","input":"hi","tools":[],"parallel_tool_calls":true,"store":false,"reasoning_effort":"high","include":["reasoning.encrypted_content"],"temperature":0.5}`)
+	var fromJSON ResponsesRequest
+	if err := json.Unmarshal(data, &fromJSON); err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fromFields, err := ResponsesRequestFromFields(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fromJSON, fromFields) {
+		t.Fatalf("decoders differ:\nJSON %#v\nfields %#v", fromJSON, fromFields)
+	}
+	if fromFields.Model != "gpt-5" || string(fromFields.Input) != `"hi"` || fromFields.Tools == nil || len(fromFields.Tools) != 0 || fromFields.ParallelToolCalls == nil || !*fromFields.ParallelToolCalls || fromFields.Store == nil || *fromFields.Store || fromFields.ReasoningEffort != "high" || string(fromFields.Include) != `["reasoning.encrypted_content"]` || string(fromFields.Raw["temperature"]) != "0.5" {
+		t.Fatalf("decoded fields = %#v", fromFields)
+	}
+}
 
 func TestResolveReasoningEmission(t *testing.T) {
 	tests := []struct {

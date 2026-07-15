@@ -28,18 +28,13 @@ type RealGateway struct {
 	store  *sessionstore.Store
 	broker *toolproxy.Broker
 
-	modelsMu               sync.Mutex
-	models                 []Model
-	modelsFetched          time.Time
-	modelsCacheTTL         time.Duration
-	modelsRefreshing       bool
-	modelsRefreshDone      chan struct{}
-	lastForcedModelRefresh time.Time
+	modelCache     *modelCache
+	modelCacheOnce sync.Once
 	// modelsFetcher overrides the upstream model fetch. It is nil in production
 	// (the SDK client is used) and set by tests to observe refresh behavior.
-	modelsFetcher  func(context.Context) ([]Model, error)
-	pendingMu      sync.Mutex
-	pendingRunners map[string]*turnRunner
+	modelsFetcher func(context.Context) ([]Model, error)
+	pending       *pendingRunnerRegistry
+	active        *activeRunnerRegistry
 }
 
 func NewReal(cfg config.Config, store *sessionstore.Store, log *slog.Logger) *RealGateway {
@@ -48,7 +43,7 @@ func NewReal(cfg config.Config, store *sessionstore.Store, log *slog.Logger) *Re
 	}
 	fs := sessionfs.NewManager(cfg.DataDir)
 	opts := newRealClientOptions(cfg)
-	return &RealGateway{cfg: cfg, log: log, client: copilot.NewClient(opts), fs: fs, store: store, broker: toolproxy.NewBroker(cfg.ToolCallTTL), modelsCacheTTL: cfg.ModelsCacheTTL, pendingRunners: map[string]*turnRunner{}}
+	return &RealGateway{cfg: cfg, log: log, client: copilot.NewClient(opts), fs: fs, store: store, broker: toolproxy.NewBroker(cfg.ToolCallTTL), modelCache: newModelCache(cfg.ModelsCacheTTL), pending: newPendingRunnerRegistry(), active: newActiveRunnerRegistry()}
 }
 func newRealClientOptions(cfg config.Config) *copilot.ClientOptions {
 	return &copilot.ClientOptions{
@@ -66,9 +61,6 @@ func newRealClientOptions(cfg config.Config) *copilot.ClientOptions {
 	}
 }
 func (g *RealGateway) Start(ctx context.Context) error {
-	if err := g.store.Ensure(); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(filepath.Join(g.cfg.DataDir, "sessions"), 0o700); err != nil {
 		return err
 	}
@@ -88,11 +80,48 @@ func (g *RealGateway) Start(ctx context.Context) error {
 	}
 	return nil
 }
-func (g *RealGateway) Stop() error { return g.client.Stop() }
+func (g *RealGateway) Stop() error {
+	active := g.active.closeAndSnapshot()
+	pending := g.pending.drain()
+	runners := make([]*turnRunner, 0, len(active)+len(pending))
+	seen := map[*turnRunner]struct{}{}
+	for _, runner := range append(active, pending...) {
+		if runner == nil {
+			continue
+		}
+		if _, exists := seen[runner]; exists {
+			continue
+		}
+		seen[runner] = struct{}{}
+		runners = append(runners, runner)
+	}
+	g.broker.CancelAll(context.Canceled)
+	for _, runner := range runners {
+		runner.abort()
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	var waitErr error
+	for _, runner := range runners {
+		select {
+		case <-runner.closed:
+		case <-deadline.C:
+			waitErr = fmt.Errorf("timed out waiting for pending turns to stop")
+			// Stop the SDK before releasing retention pins so no late callback can
+			// save or prune state after its protection has been removed.
+			stopErr := g.client.Stop()
+			// Do not force-release pins for a runner that has not closed. Its loop
+			// remains the sole owner and will release them if it exits; otherwise the
+			// process is shutting down and retaining state is safer than pruning it.
+			return errors.Join(waitErr, stopErr, g.store.TakeMaintenanceError())
+		}
+	}
+	return errors.Join(waitErr, g.client.Stop(), g.store.TakeMaintenanceError())
+}
 func (g *RealGateway) Ready(ctx context.Context) error {
 	if g.client.RPC == nil {
 		return fmt.Errorf("copilot client is not connected")
 	}
 	_, err := g.ListModels(ctx)
-	return err
+	return errors.Join(err, g.store.TakeMaintenanceError())
 }

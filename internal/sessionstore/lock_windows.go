@@ -61,7 +61,7 @@ func (l *Lock) Release() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	_, _, unlockErr := procUnlockFileEx.Call(
+	unlocked, _, unlockErr := procUnlockFileEx.Call(
 		l.file.Fd(),
 		0,
 		1,
@@ -69,9 +69,14 @@ func (l *Lock) Release() error {
 		uintptr(unsafe.Pointer(&l.overlapped)),
 	)
 	closeErr := l.file.Close()
-	_ = os.Remove(l.path)
+	// Keep the rendezvous pathname stable. Removing it after unlock allows a
+	// new owner to lock the old file while another process recreates and locks a
+	// different file at the same path.
 	l.file = nil
-	if unlockErr != syscall.Errno(0) {
+	if unlocked == 0 {
+		if unlockErr == syscall.Errno(0) {
+			return fmt.Errorf("UnlockFileEx failed")
+		}
 		return unlockErr
 	}
 	return closeErr

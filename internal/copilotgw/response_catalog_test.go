@@ -56,7 +56,7 @@ func TestMergeLoadedToolSearchOutputsUsesPreviousCatalogAndPersistsEvent(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	previous := sessionstore.ResponseRecord{ID: "resp_prev", InstalledToolCatalog: base.StoredDTO()}
+	previous := sessionstore.ResponseRecord{ID: "resp_prev", InstalledToolCatalog: storeToolCatalog(base.StoredDTO())}
 	outputs := map[string]openai.ResponseToolOutput{
 		"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`), LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
 	}
@@ -104,7 +104,7 @@ func TestResponseCatalogForContinuationMergesRequestToolsIntoStoredCatalog(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	previous := sessionstore.ResponseRecord{ID: "resp_prev", InstalledToolCatalog: base.StoredDTO()}
+	previous := sessionstore.ResponseRecord{ID: "resp_prev", InstalledToolCatalog: storeToolCatalog(base.StoredDTO())}
 	catalog, err := responseCatalogForRequest(ResponseRequest{ToolsSet: true, Tools: []openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}}, &previous)
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestResponseCatalogForContinuationMergesRequestToolsIntoStoredCatalog(t *te
 }
 
 func TestActiveResponseToolOutputsFromRecordRejectsSpoofedLoadedToolCallID(t *testing.T) {
-	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "tool_search_call", CallID: "call_real", Execution: "client"}}}
+	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: storeOutputItems([]openai.ResponseOutputItem{{Type: "tool_search_call", CallID: "call_real", Execution: "client"}})}
 	_, err := activeResponseToolOutputsFromRecord(record, map[string]openai.ResponseToolOutput{
 		"call_real":  {Kind: openai.ToolKindToolSearch, CallID: "call_real", Execution: "client", Output: "none"},
 		"call_spoof": {Kind: openai.ToolKindToolSearch, CallID: "call_spoof", Execution: "client", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "evil"}}},
@@ -127,7 +127,7 @@ func TestActiveResponseToolOutputsFromRecordRejectsSpoofedLoadedToolCallID(t *te
 }
 
 func TestActiveResponseToolOutputsFromRecordRejectsLoadedToolsForFunctionCall(t *testing.T) {
-	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "function_call", CallID: "call_lookup", Name: "lookup"}}}
+	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: storeOutputItems([]openai.ResponseOutputItem{{Type: "function_call", CallID: "call_lookup", Name: "lookup"}})}
 	_, err := activeResponseToolOutputsFromRecord(record, map[string]openai.ResponseToolOutput{
 		"call_lookup": {Kind: openai.ToolKindFunction, CallID: "call_lookup", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "evil"}}},
 	})

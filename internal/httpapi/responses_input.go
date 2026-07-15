@@ -11,20 +11,37 @@ import (
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
 
+type parsedResponsesInput struct {
+	input                openai.PromptContent
+	outputs              map[string]openai.ResponseToolOutput
+	instructions         string
+	fallbackInput        openai.PromptContent
+	fallbackInstructions string
+	fallbackAvailable    bool
+}
+
 func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]openai.ResponseToolOutput, string, error) {
+	parsed, err := parseResponsesInputOnce(raw)
+	return parsed.input, parsed.outputs, parsed.instructions, err
+}
+
+const maxResponsesFallbackTranscriptBytes = 256 * 1024
+
+func parseResponsesInputOnce(raw json.RawMessage) (parsedResponsesInput, error) {
 	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
-		return openai.PromptContent{}, nil, "", nil
+		return parsedResponsesInput{}, nil
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return openai.PromptContent{Text: s}, nil, "", nil
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return parsedResponsesInput{input: openai.PromptContent{Text: text}}, nil
 	}
 	var items []openai.ResponseInputItem
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return openai.PromptContent{}, nil, "", openai.InvalidRequest("input must be a string or an array of response input items", "input")
+		return parsedResponsesInput{}, openai.InvalidRequest("input must be a string or an array of response input items", "input")
 	}
+	parsed := parsedResponsesInput{}
 	if responsesInputHasToolOutputs(items) {
-		outputs := map[string]openai.ResponseToolOutput{}
+		parsed.outputs = map[string]openai.ResponseToolOutput{}
 		lastOutput := -1
 		for i, item := range items {
 			if !isResponsesToolOutput(item.Type) {
@@ -32,60 +49,49 @@ func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]
 			}
 			out, err := parseToolOutputItem(item, i)
 			if err != nil {
-				return openai.PromptContent{}, nil, "", err
+				return parsedResponsesInput{}, err
 			}
-			if _, exists := outputs[item.CallID]; exists {
-				return openai.PromptContent{}, nil, "", openai.InvalidRequest("duplicate tool output call_id", fmt.Sprintf("input.%d.call_id", i))
+			if _, exists := parsed.outputs[item.CallID]; exists {
+				return parsedResponsesInput{}, openai.InvalidRequest("duplicate tool output call_id", fmt.Sprintf("input.%d.call_id", i))
 			}
-			outputs[item.CallID] = out
+			parsed.outputs[item.CallID] = out
 			lastOutput = i
 		}
-		// Codex HTTP sends stateless full input arrays without previous_response_id,
-		// so earlier messages/function_call/function_call_output items are history for
-		// the live SDK session, not same-turn user input. Only preserve a suffix after
-		// the last tool output as an explicit mixed-continuation follow-up.
+		// Only items after the final tool output are same-turn follow-up input.
 		remaining := make([]openai.ResponseInputItem, 0, len(items)-lastOutput-1)
 		for _, item := range items[lastOutput+1:] {
 			if !isResponsesToolOutput(item.Type) {
 				remaining = append(remaining, item)
 			}
 		}
-		if len(remaining) == 0 {
-			return openai.PromptContent{}, outputs, "", nil
+		if len(remaining) > 0 {
+			input, instructions, err := parseResponsesTranscriptItems(remaining)
+			if err != nil {
+				return parsedResponsesInput{}, err
+			}
+			parsed.input = input
+			parsed.instructions = instructions
 		}
-		b, _ := json.Marshal(remaining)
-		input, _, inputInstructions, err := parseResponsesInput(b)
+	} else {
+		input, instructions, err := parseResponsesTranscriptItems(items)
 		if err != nil {
-			return openai.PromptContent{}, nil, "", err
+			return parsedResponsesInput{}, err
 		}
-		return input, outputs, inputInstructions, nil
+		parsed.input = input
+		parsed.instructions = instructions
 	}
-
-	prompt, instructions, err := parseResponsesTranscriptItems(items)
-	return prompt, nil, instructions, err
-}
-
-const maxResponsesFallbackTranscriptBytes = 256 * 1024
-
-func parseResponsesFallbackInput(raw json.RawMessage) (openai.PromptContent, string, bool, error) {
-	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
-		return openai.PromptContent{}, "", false, nil
+	if len(parsed.outputs) > 0 && responsesInputHasFallbackContext(items) {
+		fallback, instructions, err := parseResponsesTranscriptItems(items)
+		if err != nil {
+			return parsedResponsesInput{}, err
+		}
+		if len(fallback.Text)+len(instructions) <= maxResponsesFallbackTranscriptBytes {
+			parsed.fallbackInput = fallback
+			parsed.fallbackInstructions = instructions
+			parsed.fallbackAvailable = true
+		}
 	}
-	var items []openai.ResponseInputItem
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return openai.PromptContent{}, "", false, openai.InvalidRequest("input must be a string or an array of response input items", "input")
-	}
-	if !responsesInputHasFallbackContext(items) {
-		return openai.PromptContent{}, "", false, nil
-	}
-	prompt, instructions, err := parseResponsesTranscriptItems(items)
-	if err != nil {
-		return openai.PromptContent{}, "", false, err
-	}
-	if len(prompt.Text)+len(instructions) > maxResponsesFallbackTranscriptBytes {
-		return openai.PromptContent{}, "", false, nil
-	}
-	return prompt, instructions, true, nil
+	return parsed, nil
 }
 
 func responsesInputHasFallbackContext(items []openai.ResponseInputItem) bool {

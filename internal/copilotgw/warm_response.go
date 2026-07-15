@@ -20,7 +20,9 @@ type WarmResponseSession struct {
 	reasoningEffort string
 	tools           []openai.NormalizedTool
 	toolChoiceNone  bool
-	input           openai.PromptContent
+	input           resolvedPrompt
+	imageBudget     *imageRequestBudget
+	pinReleases     []func()
 	previous        *string
 	store           bool
 	retained        string
@@ -50,45 +52,74 @@ func (w *WarmResponseSession) Disconnect() {
 	}
 	w.disconnected = true
 	session := w.session
+	pinReleases := w.pinReleases
+	w.imageBudget = nil
+	w.pinReleases = nil
 	w.mu.Unlock()
+	releaseAll(pinReleases)
 	if session != nil {
 		_ = session.Disconnect()
 	}
 }
 
-func (w *WarmResponseSession) use(req *ResponseRequest) (*copilot.Session, *toolproxy.RequestTools, chan copilot.SessionEvent, string, *string, bool) {
+type warmResponseUse struct {
+	session     *copilot.Session
+	tools       *toolproxy.RequestTools
+	events      chan copilot.SessionEvent
+	retained    string
+	previous    *string
+	prompt      resolvedPrompt
+	imageBudget *imageRequestBudget
+	pinReleases []func()
+}
+
+func (w *WarmResponseSession) use(req *ResponseRequest) (warmResponseUse, bool) {
 	if w == nil || req == nil || req.PreviousResponseID == "" {
-		return nil, nil, nil, "", nil, false
+		return warmResponseUse{}, false
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.disconnected || req.PreviousResponseID != w.responseID || req.Model != w.model {
-		return nil, nil, nil, "", nil, false
+		return warmResponseUse{}, false
 	}
 	if req.Instructions == "" {
 		req.Instructions = w.instructions
 	} else if req.Instructions != w.instructions {
-		return nil, nil, nil, "", nil, false
+		return warmResponseUse{}, false
 	}
 	requestReasoningEffort := cleanReasoningEffort(req.ReasoningEffort)
 	if requestReasoningEffort == "" {
 		req.ReasoningEffort = w.reasoningEffort
 	} else if requestReasoningEffort != w.reasoningEffort {
-		return nil, nil, nil, "", nil, false
+		return warmResponseUse{}, false
 	}
 	if !req.ToolsSet && len(req.Tools) == 0 {
 		req.Tools = append([]openai.NormalizedTool{}, w.tools...)
 	} else if !responseToolsEqual(req.Tools, w.tools) {
-		return nil, nil, nil, "", nil, false
+		return warmResponseUse{}, false
 	}
 	if w.toolChoiceNone {
 		req.ToolChoiceNone = true
 	} else if req.ToolChoiceNone {
-		return nil, nil, nil, "", nil, false
+		return warmResponseUse{}, false
 	}
-	req.Input = combinePromptContent(w.input, req.Input)
+	used := warmResponseUse{
+		session: w.session, tools: w.rt, events: w.events, retained: w.retained,
+		previous: &w.responseID, prompt: w.input, imageBudget: w.imageBudget,
+		pinReleases: w.pinReleases,
+	}
+	w.imageBudget = nil
+	w.pinReleases = nil
 	w.disconnected = true
-	return w.session, w.rt, w.events, w.retained, &w.responseID, true
+	return used, true
+}
+
+func releaseAll(releases []func()) {
+	for _, release := range releases {
+		if release != nil {
+			release()
+		}
+	}
 }
 
 func responseToolsEqual(a, b []openai.NormalizedTool) bool {
@@ -103,20 +134,6 @@ func responseToolsEqual(a, b []openai.NormalizedTool) bool {
 	return ac.Key() == bc.Key()
 }
 
-func combinePromptContent(previous openai.PromptContent, current openai.PromptContent) openai.PromptContent {
-	if previous.Text != "" {
-		if current.Text != "" {
-			current.Text = previous.Text + "\n\n" + current.Text
-		} else {
-			current.Text = previous.Text
-		}
-	}
-	if len(previous.Images) > 0 {
-		current.Images = append(append([]openai.ImageInput{}, previous.Images...), current.Images...)
-	}
-	return current
-}
-
 func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*WarmResponseResult, error) {
 	if len(req.ToolOutputs) > 0 {
 		return nil, openai.InvalidRequest("generate:false with tool-output continuations is not supported", "input")
@@ -127,20 +144,26 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	if req.ResponseID == "" {
 		req.ResponseID = openai.NewID("resp_")
 	}
+	incrementalInput := req.Input.Text
 	reasoningEffort, err := g.requestReasoningEffort(ctx, req.Model, req.ReasoningEffort, req.DefaultReasoningEffort, req.ResolvedReasoningEffort, req.ReasoningEffortResolved)
 	if err != nil {
 		return nil, err
 	}
-	prompt, err := g.resolvePrompt(ctx, req.Model, req.Input, "input")
+	imageBudget := newImageRequestBudget()
+	prompt, err := g.resolvePromptWithImageBudget(ctx, req.Model, req.Input, "input", imageBudget)
 	if err != nil {
 		return nil, err
 	}
 	var previousRecord *sessionstore.ResponseRecord
+	var previousPins []func()
+	defer func() { releaseAll(previousPins) }()
 	if req.PreviousResponseID != "" {
+		previousPins = append(previousPins, g.store.PinResponse(req.PreviousResponseID))
 		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
 		if err != nil {
 			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
 		}
+		previousPins = append(previousPins, g.store.PinSession(record.SDKSessionID))
 		previousRecord = &record
 	}
 	catalog, err := responseCatalogForRequest(req, previousRecord)
@@ -155,6 +178,13 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	var session *copilot.Session
 	var sessionID string
 	var previous *string
+	var earlySessionPin func()
+	keepSessionPin := false
+	defer func() {
+		if !keepSessionPin && earlySessionPin != nil {
+			earlySessionPin()
+		}
+	}()
 	if previousRecord != nil {
 		sessionID = previousRecord.SDKSessionID
 		previous = &req.PreviousResponseID
@@ -168,10 +198,12 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 			prompt = g.responseContinuationPrompt(*previousRecord, prompt)
 			req.Input.Text = prompt.Text
 			sessionID = "resp_sdk_" + uuid.NewString()
+			earlySessionPin = g.store.PinSession(sessionID)
 			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 		}
 	} else {
 		sessionID = "resp_sdk_" + uuid.NewString()
+		earlySessionPin = g.store.PinSession(sessionID)
 		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 	}
 	if err != nil {
@@ -181,14 +213,26 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		return nil, openai.Upstream("copilot SDK returned nil session")
 	}
 	retained := g.fs.SessionRoot(sessionID)
+	if earlySessionPin == nil {
+		earlySessionPin = g.store.PinSession(sessionID)
+	}
+	pinReleases := []func(){earlySessionPin, g.store.PinResponse(req.ResponseID)}
+	keepSessionPin = true
+	keepPins := false
+	defer func() {
+		if !keepPins {
+			releaseAll(pinReleases)
+		}
+	}()
 	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
 	record := recordFromResponse(resp, sessionID, retained)
-	record.InputText = req.Input.Text
-	record.InstalledToolCatalog = catalog.StoredDTO()
+	record.InputText = incrementalInput
+	record.InstalledToolCatalog = storeToolCatalog(catalog.StoredDTO())
 	if err := g.store.SaveResponse(record); err != nil {
 		_ = session.Disconnect()
 		return nil, openai.Internal("failed to persist response")
 	}
-	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: req.Input, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: prompt, imageBudget: imageBudget, pinReleases: pinReleases, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	keepPins = true
 	return &WarmResponseResult{Response: resp, WarmSession: warm}, nil
 }

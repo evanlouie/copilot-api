@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/observability"
@@ -12,25 +15,82 @@ import (
 )
 
 type Server struct {
-	cfg config.Config
-	gw  copilotgw.Gateway
-	log *slog.Logger
-	mux *http.ServeMux
+	cfg          config.Config
+	gw           copilotgw.HTTPGateway
+	log          *slog.Logger
+	mux          *http.ServeMux
+	webSocketMu  sync.Mutex
+	webSockets   map[*websocket.Conn]func()
+	webSocketWG  sync.WaitGroup
+	shuttingDown bool
+	authFailures *failureLogSampler
 }
 
-func New(cfg config.Config, gw copilotgw.Gateway, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, gw: gw, log: log, mux: http.NewServeMux()}
+func New(cfg config.Config, gw copilotgw.HTTPGateway, log *slog.Logger) *Server {
+	s := &Server{cfg: cfg, gw: gw, log: log, mux: http.NewServeMux(), webSockets: map[*websocket.Conn]func(){}, authFailures: newFailureLogSampler(time.Minute)}
 	s.routes()
 	return s
 }
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
+	h = requestLoggingMiddleware(s.log, s.cfg.LogContent, h)
 	h = s.authMiddleware(h)
 	h = recoverMiddleware(s.log, h)
-	h = requestLoggingMiddleware(s.log, s.cfg.LogContent, h)
 	h = observability.RequestIDMiddleware(h)
 	return h
 }
+
+func (s *Server) registerWebSocket(conn *websocket.Conn, shutdown func()) bool {
+	s.webSocketMu.Lock()
+	if s.shuttingDown {
+		s.webSocketMu.Unlock()
+		shutdown()
+		return false
+	}
+	s.webSockets[conn] = shutdown
+	s.webSocketWG.Add(1)
+	s.webSocketMu.Unlock()
+	return true
+}
+
+func (s *Server) unregisterWebSocket(conn *websocket.Conn) {
+	s.webSocketMu.Lock()
+	if _, ok := s.webSockets[conn]; ok {
+		delete(s.webSockets, conn)
+		s.webSocketWG.Done()
+	}
+	s.webSocketMu.Unlock()
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.webSocketMu.Lock()
+	s.shuttingDown = true
+	connections := make([]*websocket.Conn, 0, len(s.webSockets))
+	shutdowns := make([]func(), 0, len(s.webSockets))
+	for conn, shutdown := range s.webSockets {
+		shutdowns = append(shutdowns, shutdown)
+		connections = append(connections, conn)
+	}
+	s.webSocketMu.Unlock()
+	for _, shutdown := range shutdowns {
+		go shutdown()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.webSocketWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		for _, conn := range connections {
+			_ = conn.CloseNow()
+		}
+		return ctx.Err()
+	}
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.health)
 	s.mux.HandleFunc("GET /readyz", s.ready)

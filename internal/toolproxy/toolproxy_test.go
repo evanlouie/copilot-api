@@ -3,6 +3,7 @@ package toolproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -232,6 +233,50 @@ func TestFindByAnyCallIDsRejectsMultipleLiveBatches(t *testing.T) {
 	_, _, err = broker.FindByAnyCallIDs([]string{"call_1", "call_2"})
 	if err == nil || !strings.Contains(err.Error(), "different pending batches") {
 		t.Fatalf("error = %v, want different pending batches", err)
+	}
+}
+
+func TestCompletionAfterDeadlineRunsAllExpiryCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	call := &Call{OpenAIID: "call_1", outCh: make(chan string, 1), errCh: make(chan error, 1)}
+	aborted := make(chan struct{}, 1)
+	hooked := make(chan struct{}, 1)
+	batch := &Batch{
+		ExpiresAt: time.Now().Add(-time.Second),
+		Calls:     map[string]*Call{"call_1": call},
+		ctx:       ctx,
+		cancel:    cancel,
+		abort:     func() { aborted <- struct{}{} },
+		expireHooks: []func(*Batch){func(*Batch) {
+			hooked <- struct{}{}
+		}},
+	}
+	if err := batch.Complete(map[string]string{"call_1": "late"}); !errors.Is(err, ErrExpired) {
+		t.Fatalf("Complete error = %v, want ErrExpired", err)
+	}
+	select {
+	case err := <-call.errCh:
+		if !errors.Is(err, ErrExpired) {
+			t.Fatalf("call error = %v", err)
+		}
+	default:
+		t.Fatal("pending call was not failed")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("batch context was not canceled")
+	}
+	select {
+	case <-aborted:
+	default:
+		t.Fatal("abort callback was not invoked")
+	}
+	select {
+	case <-hooked:
+	default:
+		t.Fatal("expiry hook was not invoked")
 	}
 }
 

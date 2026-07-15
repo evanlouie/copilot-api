@@ -52,7 +52,7 @@ func TestResponseStreamEmitsExtendedToolCallItems(t *testing.T) {
 		{ID: "tsc_call_search", Type: "tool_search_call", Status: "completed", CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"grep"}`)},
 	}, ParallelToolCalls: true, Store: true}
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(nilContext(), writer, copilotgw.ResponseRequest{ResponseID: "resp_1", Model: "gpt-test", Store: true}, streamResponse(resp))
+	result := writeResponseStreamEvents(nilContext(), writer, copilotgw.ResponseRequest{ResponseID: "resp_1", Model: "gpt-test", Store: true}, 0, streamResponse(resp))
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
