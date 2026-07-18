@@ -185,15 +185,28 @@ async function selectedModel(config: TestConfig): Promise<string> {
   return await selectedModelPromise;
 }
 
+async function canonicalListedModel(
+  config: TestConfig,
+  model: string,
+): Promise<string> {
+  const separator = model.lastIndexOf(":");
+  if (separator <= 0) {
+    return model;
+  }
+  const canonical = model.slice(0, separator);
+  const models = await listedModels(config);
+  return models.data?.some((item) => item.id === canonical) ? canonical : model;
+}
+
 async function selectedReasoningModel(
   config: TestConfig,
   effort: string,
 ): Promise<string | undefined> {
   if (config.reasoningModel != null && config.reasoningModel !== "") {
-    return config.reasoningModel;
+    return await canonicalListedModel(config, config.reasoningModel);
   }
   if (config.model != null && config.model !== "") {
-    return config.model;
+    return await canonicalListedModel(config, config.model);
   }
   const models = await listedModels(config);
   const model = models.data?.find((item) => {
@@ -773,6 +786,56 @@ integrationTest(
         JSON.stringify(
           result.usage,
         )
+      })`,
+    );
+  },
+);
+
+integrationTest(
+  "AI SDK forwards reasoning effort through the model suffix",
+  async (config) => {
+    const effort = env("COPILOT_API_TEST_REASONING_EFFORT") ??
+      DEFAULT_REASONING_EFFORT;
+    const model = await selectedReasoningModel(config, effort);
+    if (model == null) {
+      console.warn(
+        `No model advertised supported_reasoning_efforts containing ${effort}; set COPILOT_API_TEST_REASONING_MODEL to force this test.`,
+      );
+      return;
+    }
+
+    const result = await generateText({
+      abortSignal: AbortSignal.timeout(config.timeoutMs),
+      model: config.openai.responses(`${model}:${effort}`),
+      prompt:
+        "Use the model selector's reasoning effort and reply with one concise sentence about why 17 * 41 = 697.",
+      providerOptions: {
+        openai: {
+          forceReasoning: true,
+          store: false,
+        },
+      },
+    });
+
+    assertNonEmptyText(result.text, "model suffix reasoning generateText");
+    assert(
+      result.finishReason != null,
+      "model suffix reasoning generateText did not report a finish reason",
+    );
+    const reasoningText = (result as { reasoningText?: string }).reasoningText;
+    const reasoningParts =
+      (result as { reasoning?: Array<unknown> }).reasoning ?? [];
+    const reasoningTokens =
+      (result.usage as { reasoningTokens?: number } | undefined)
+        ?.reasoningTokens ?? 0;
+    assert(
+      (reasoningText != null && reasoningText.length > 0) ||
+        reasoningParts.length > 0 ||
+        reasoningTokens > 0,
+      `model suffix reasoning generated no reasoning signal (reasoningText=${
+        JSON.stringify(reasoningText)
+      }, reasoningParts=${reasoningParts.length}, reasoningTokens=${reasoningTokens}, usage=${
+        JSON.stringify(result.usage)
       })`,
     );
   },

@@ -183,7 +183,7 @@ func validateResponsesReasoning(req *ResponsesRequest) error {
 		if err := json.Unmarshal(raw, &effort); err != nil || effort == "" {
 			return InvalidRequest("reasoning.effort must be a string", "reasoning.effort")
 		}
-		if req.ReasoningEffort != "" && req.ReasoningEffort != effort {
+		if req.ReasoningEffort != "" && NormalizeReasoningEffort(req.ReasoningEffort) != NormalizeReasoningEffort(effort) {
 			return InvalidRequest("reasoning.effort conflicts with reasoning_effort", "reasoning.effort")
 		}
 	}
@@ -233,7 +233,7 @@ func rawObject(raw json.RawMessage, param string) (map[string]json.RawMessage, e
 
 func ResponsesReasoningEffort(req *ResponsesRequest) string {
 	if req.ReasoningEffort != "" {
-		return req.ReasoningEffort
+		return NormalizeReasoningEffort(req.ReasoningEffort)
 	}
 	if len(req.Reasoning) == 0 || string(req.Reasoning) == "null" {
 		return ""
@@ -250,7 +250,7 @@ func ResponsesReasoningEffort(req *ResponsesRequest) string {
 	if err := json.Unmarshal(raw, &effort); err != nil {
 		return ""
 	}
-	return effort
+	return NormalizeReasoningEffort(effort)
 }
 
 func validateUnsupportedFields(raw map[string]json.RawMessage, fields []unsupportedField) error {

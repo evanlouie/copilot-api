@@ -19,9 +19,10 @@ Coverage:
   `response.created` → `response.in_progress` → `response.output_text.delta` →
   `response.output_text.done` → `response.completed` event sequence; asserts
   `usage` and `finishReason`
-- Responses API reasoning effort via AI SDK provider options, with an assertion
-  that the AI SDK surfaces reasoning output via `reasoningText`, reasoning
-  parts, or `usage.reasoningTokens`
+- Responses API reasoning effort via both AI SDK provider options and the
+  `model:effort` selector (without `reasoningEffort` provider options), with an
+  assertion that the AI SDK surfaces reasoning output via `reasoningText`,
+  reasoning parts, or `usage.reasoningTokens`
 - Responses API `previous_response_id` continuation across two turns, including
   `store:false` continuation through the AI SDK WebSocket transport
 - Multi-turn Chat Completions history
@@ -70,7 +71,7 @@ Optional environment variables:
 | `COPILOT_API_TEST_API_KEY`          | `COPILOT_API_KEY` or `not-needed`              | Bearer token sent by the AI SDK client.                                                                                |
 | `COPILOT_API_TEST_MODEL`            | first model from `/v1/models`                  | Model ID to use for general text generation, multi-turn, and MCP tool tests.                                           |
 | `COPILOT_API_TEST_REASONING_MODEL`  | first model advertising the requested effort   | Model ID to use for reasoning-effort tests. Set this if `/v1/models` does not advertise `supported_reasoning_efforts`. |
-| `COPILOT_API_TEST_REASONING_EFFORT` | `low`                                          | Reasoning effort sent through AI SDK OpenAI provider options.                                                          |
+| `COPILOT_API_TEST_REASONING_EFFORT` | `low`                                          | Reasoning effort sent through AI SDK OpenAI provider options and the model-selector suffix case.                       |
 | `COPILOT_API_TEST_VISION_MODEL`     | first model advertising `supports_vision=true` | Model ID to use for image-input tests. Set this if `/v1/models` does not advertise vision support.                     |
 | `COPILOT_API_TEST_TIMEOUT_MS`       | `120000`                                       | Per-request timeout in milliseconds.                                                                                   |
 

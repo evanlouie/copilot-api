@@ -64,10 +64,20 @@ func (s *Server) logResponsesToolSummary(ctx context.Context, tools []openai.Nor
 }
 
 func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.ResponsesRequest, responseID string) (copilotgw.ResponseRequest, preparedResponseLogFields, error) {
-	reasoningEffort := openai.ResponsesReasoningEffort(req)
+	selector, err := openai.ParseModelSelector(req.Model)
+	if err != nil {
+		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+	}
+	mergedEffort, err := openai.MergeReasoningEffort(selector, req.ReasoningEffort, "reasoning_effort")
+	if err != nil {
+		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+	}
+	req.Model = selector.Model
+	req.ReasoningEffort = mergedEffort
 	if err := openai.ValidateResponsesRequest(req, s.cfg.StrictCompat); err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 	}
+	reasoningEffort := openai.ResponsesReasoningEffort(req)
 	normalizedTools, err := openai.NormalizeResponsesToolsWithMode(req.Tools, s.cfg.StrictCompat)
 	if err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err

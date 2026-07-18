@@ -153,6 +153,7 @@ type resolvingChatGateway struct {
 	resolveDefault   string
 	resolvedEffort   string
 	continueCalled   bool
+	continueGot      copilotgw.ChatContinuationRequest
 }
 
 func (g *resolvingChatGateway) ResolveReasoningEffort(_ context.Context, model, requestedEffort, defaultEffort string) (string, error) {
@@ -170,6 +171,7 @@ func (g *resolvingChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest
 
 func (g *resolvingChatGateway) ContinueChatToolCalls(_ context.Context, req copilotgw.ChatContinuationRequest) (*copilotgw.TurnResult, error) {
 	g.continueCalled = true
+	g.continueGot = req
 	return &copilotgw.TurnResult{Model: req.Model, Text: req.Outputs["call_1"], FinishReason: "stop"}, nil
 }
 
@@ -306,7 +308,9 @@ func TestModelsEndpointIncludesContextWindowLimits(t *testing.T) {
 
 func TestModelsEndpointIncludesReasoningAndVisionMetadata(t *testing.T) {
 	s := New(config.Config{}, modelsGateway{models: []copilotgw.Model{{
-		ID: "gpt-5-vision",
+		ID:                        "gpt-5-vision",
+		SupportedReasoningEfforts: []string{"low", "medium", "high"},
+		DefaultReasoningEffort:    "medium",
 		Metadata: map[string]any{
 			"supported_reasoning_efforts": []string{"low", "medium", "high"},
 			"default_reasoning_effort":    "medium",
@@ -334,6 +338,15 @@ func TestModelsEndpointIncludesReasoningAndVisionMetadata(t *testing.T) {
 	if err := dec.Decode(&out); err != nil {
 		t.Fatal(err)
 	}
+	if len(out.Data) != 4 {
+		t.Fatalf("models length = %d, want canonical model plus 3 reasoning aliases", len(out.Data))
+	}
+	wantIDs := []string{"gpt-5-vision", "gpt-5-vision:low", "gpt-5-vision:medium", "gpt-5-vision:high"}
+	for i, want := range wantIDs {
+		if got := out.Data[i].ID; got != want {
+			t.Fatalf("model[%d].id = %q, want %q", i, got, want)
+		}
+	}
 	meta := out.Data[0].Meta
 	if got := meta["default_reasoning_effort"]; got != "medium" {
 		t.Fatalf("default_reasoning_effort = %#v, want medium", got)
@@ -351,6 +364,43 @@ func TestModelsEndpointIncludesReasoningAndVisionMetadata(t *testing.T) {
 	}
 	if got := vision["max_prompt_images"]; got != json.Number("4") {
 		t.Fatalf("vision.max_prompt_images = %#v, want 4", got)
+	}
+	if got := out.Data[3].Meta["supports_vision"]; got != true {
+		t.Fatalf("reasoning alias metadata supports_vision = %#v, want true", got)
+	}
+	for i := 1; i < len(out.Data); i++ {
+		if _, ok := out.Data[i].Meta["supported_reasoning_efforts"]; ok {
+			t.Fatalf("reasoning alias %q exposes supported_reasoning_efforts: %#v", out.Data[i].ID, out.Data[i].Meta)
+		}
+		if _, ok := out.Data[i].Meta["default_reasoning_effort"]; ok {
+			t.Fatalf("reasoning alias %q exposes default_reasoning_effort: %#v", out.Data[i].ID, out.Data[i].Meta)
+		}
+	}
+}
+
+func TestModelsEndpointNormalizesAndDeduplicatesReasoningAliases(t *testing.T) {
+	models := []copilotgw.Model{
+		{
+			ID:                        "gpt-future",
+			Metadata:                  map[string]any{"name": "Future"},
+			SupportedReasoningEfforts: []string{" LOW ", "low", "Adaptive", ""},
+			DefaultReasoningEffort:    "BALANCED",
+		},
+		{ID: "plain"},
+	}
+
+	got := openAIModels(models, 123)
+	wantIDs := []string{"gpt-future", "plain", "gpt-future:low", "gpt-future:adaptive", "gpt-future:balanced"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("models length = %d, want %d: %#v", len(got), len(wantIDs), got)
+	}
+	for i, want := range wantIDs {
+		if got[i].ID != want {
+			t.Fatalf("model[%d].id = %q, want %q", i, got[i].ID, want)
+		}
+		if got[i].Created != 123 || got[i].Object != openai.ObjectModel || got[i].OwnedBy != "github-copilot" {
+			t.Fatalf("model[%d] envelope = %#v", i, got[i])
+		}
 	}
 }
 
@@ -489,12 +539,36 @@ func TestGenerationLoggingUsesGatewayResolvedReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestResponsesSuffixLoggingUsesCanonicalModelAndExplicitEffort(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	gw := &captureResponseGateway{}
+	s := New(config.Config{}, gw, logger)
+	body := strings.NewReader(`{"model":"gpt-5.6-sol:XHIGH","input":"hi"}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	logLines := buf.String()
+	for _, want := range []string{`"msg":"generation started"`, `"endpoint":"responses"`, `"model":"gpt-5.6-sol"`, `"reasoning_effort":"xhigh"`, `"msg":"request completed"`} {
+		if !strings.Contains(logLines, want) {
+			t.Fatalf("log lines missing %s: %s", want, logLines)
+		}
+	}
+	if strings.Contains(logLines, "gpt-5.6-sol:XHIGH") {
+		t.Fatalf("response logs should not include suffixed model selector: %s", logLines)
+	}
+}
+
 func TestChatContinuationLoggingDoesNotResolveReasoningEffort(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	gw := &resolvingChatGateway{resolvedEffort: "medium"}
 	s := New(config.Config{DefaultReasoningEffort: "minimal"}, gw, logger)
-	body := strings.NewReader(`{"model":"gpt-5","reasoning_effort":"high","messages":[{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
+	body := strings.NewReader(`{"model":"gpt-5:HIGH","reasoning_effort":" high ","messages":[{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
 	w := httptest.NewRecorder()
 
 	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
@@ -508,14 +582,23 @@ func TestChatContinuationLoggingDoesNotResolveReasoningEffort(t *testing.T) {
 	if !gw.continueCalled {
 		t.Fatal("expected ContinueChatToolCalls to be called")
 	}
+	if gw.continueGot.Model != "gpt-5" || gw.continueGot.ReasoningEffort != "high" {
+		t.Fatalf("continuation model/effort = %q/%q, want gpt-5/high", gw.continueGot.Model, gw.continueGot.ReasoningEffort)
+	}
+	if strings.Contains(w.Body.String(), "gpt-5:HIGH") || !strings.Contains(w.Body.String(), `"model":"gpt-5"`) {
+		t.Fatalf("continuation response does not use canonical model: %s", w.Body.String())
+	}
 	logLines := buf.String()
-	for _, want := range []string{`"msg":"generation started"`, `"endpoint":"chat.completions"`, `"continuation":true`, `"reasoning_effort":"high"`} {
+	for _, want := range []string{`"msg":"generation started"`, `"endpoint":"chat.completions"`, `"model":"gpt-5"`, `"continuation":true`, `"reasoning_effort":"high"`} {
 		if !strings.Contains(logLines, want) {
 			t.Fatalf("log lines missing %s: %s", want, logLines)
 		}
 	}
 	if strings.Contains(logLines, "reasoning_effort_resolved") {
 		t.Fatalf("continuation log should not include resolved reasoning effort: %s", logLines)
+	}
+	if strings.Contains(logLines, "gpt-5:HIGH") {
+		t.Fatalf("continuation log should not include suffixed model selector: %s", logLines)
 	}
 	if got := strings.Count(logLines, `"continuation":true`); got != 2 {
 		t.Fatalf("continuation log count = %d, want 2: %s", got, logLines)
@@ -595,6 +678,29 @@ func TestChatAssistantPrefillBecomesHistoryWithContinuationPrompt(t *testing.T) 
 	}
 }
 
+func TestChatModelReasoningEffortSuffixIsCanonicalized(t *testing.T) {
+	gw := &captureChatGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := strings.NewReader(`{
+		"model":"gpt-5.6-sol: XHIGH ",
+		"reasoning_effort":"xhigh",
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gw.got.Model != "gpt-5.6-sol" || gw.got.ReasoningEffort != "xhigh" {
+		t.Fatalf("gateway model/effort = %q/%q, want gpt-5.6-sol/xhigh", gw.got.Model, gw.got.ReasoningEffort)
+	}
+	if strings.Contains(w.Body.String(), "gpt-5.6-sol:") || !strings.Contains(w.Body.String(), `"model":"gpt-5.6-sol"`) {
+		t.Fatalf("response does not use canonical model: %s", w.Body.String())
+	}
+}
+
 func TestChatRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
 	gw := &captureChatGateway{}
 	s := New(config.Config{DefaultReasoningEffort: "medium"}, gw, slog.Default())
@@ -621,7 +727,7 @@ func TestChatStreamWithToolCallAndIncludeUsageUsesOpenAIChunkShape(t *testing.T)
 	gw := &streamChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
-		"model":"gpt-5",
+		"model":"gpt-5:xhigh",
 		"stream":true,
 		"stream_options":{"include_usage":true},
 		"messages":[{"role":"user","content":"look up alpha"}],
@@ -637,7 +743,13 @@ func TestChatStreamWithToolCallAndIncludeUsageUsesOpenAIChunkShape(t *testing.T)
 	if !gw.got.IncludeUsageChunk {
 		t.Fatal("IncludeUsageChunk = false, want true")
 	}
+	if gw.got.Model != "gpt-5" || gw.got.ReasoningEffort != "xhigh" {
+		t.Fatalf("stream gateway model/effort = %q/%q, want gpt-5/xhigh", gw.got.Model, gw.got.ReasoningEffort)
+	}
 	out := w.Body.String()
+	if strings.Contains(out, "gpt-5:xhigh") || !strings.Contains(out, `"model":"gpt-5"`) {
+		t.Fatalf("stream does not use canonical model: %s", out)
+	}
 	for _, want := range []string{
 		`"role":"assistant"`,
 		`"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"alpha\"}"}}]`,
@@ -658,8 +770,9 @@ func TestResponsesRequestPassesNestedReasoningImageInputAndIgnoresMCPTool(t *tes
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
-		"model":"gpt-5",
-		"reasoning":{"effort":"low"},
+		"model":"gpt-5:LOW",
+		"reasoning_effort":" low ",
+		"reasoning":{"effort":"Low"},
 		"tools":[{"type":"mcp","server_label":"test-mcp","server_url":"https://example.invalid/mcp"}],
 		"input":[{"type":"message","role":"user","content":[
 			{"type":"input_text","text":"Describe the attachment."},
@@ -673,8 +786,11 @@ func TestResponsesRequestPassesNestedReasoningImageInputAndIgnoresMCPTool(t *tes
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
 	}
-	if gw.got.ReasoningEffort != "low" {
-		t.Fatalf("ReasoningEffort = %q, want low", gw.got.ReasoningEffort)
+	if gw.got.Model != "gpt-5" || gw.got.ReasoningEffort != "low" {
+		t.Fatalf("gateway model/effort = %q/%q, want gpt-5/low", gw.got.Model, gw.got.ReasoningEffort)
+	}
+	if strings.Contains(w.Body.String(), "gpt-5:LOW") || !strings.Contains(w.Body.String(), `"model":"gpt-5"`) {
+		t.Fatalf("response does not use canonical model: %s", w.Body.String())
 	}
 	if len(gw.got.Tools) != 0 {
 		t.Fatalf("gateway tools = %#v, want none", gw.got.Tools)
@@ -728,7 +844,7 @@ func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *test
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
-		"model":"gpt-5",
+		"model":"gpt-5:high",
 		"previous_response_id":"resp_previous",
 		"store":false,
 		"input":[
@@ -744,6 +860,9 @@ func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *test
 	}
 	if gw.got.PreviousResponseID != "resp_previous" {
 		t.Fatalf("PreviousResponseID = %q, want resp_previous", gw.got.PreviousResponseID)
+	}
+	if gw.got.Model != "gpt-5" || gw.got.ReasoningEffort != "high" {
+		t.Fatalf("continuation model/effort = %q/%q, want gpt-5/high", gw.got.Model, gw.got.ReasoningEffort)
 	}
 	if gw.got.Store || !gw.got.StoreSet {
 		t.Fatalf("Store/StoreSet = %v/%v, want false/true", gw.got.Store, gw.got.StoreSet)
@@ -905,7 +1024,7 @@ func TestResponsesWebSocketStreamsResponseCreateAndAllowsLatestStoreFalseContinu
 	}
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
-	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "store": false, "stream": false, "background": true, "input": "ping"}); err != nil {
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5:high", "store": false, "stream": false, "background": true, "input": "ping"}); err != nil {
 		t.Fatal(err)
 	}
 	first := readUntilResponseCompleted(t, ctx, conn)
@@ -913,7 +1032,7 @@ func TestResponsesWebSocketStreamsResponseCreateAndAllowsLatestStoreFalseContinu
 		t.Fatalf("first response = %#v, want store:false completed pong", first)
 	}
 
-	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "store": false, "previous_response_id": first.ID, "input": "again"}); err != nil {
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5:HIGH", "store": false, "previous_response_id": first.ID, "input": "again"}); err != nil {
 		t.Fatal(err)
 	}
 	second := readUntilResponseCompleted(t, ctx, conn)
@@ -928,6 +1047,11 @@ func TestResponsesWebSocketStreamsResponseCreateAndAllowsLatestStoreFalseContinu
 	if requests[1].PreviousResponseID != first.ID {
 		t.Fatalf("second request previous_response_id = %q, want %s", requests[1].PreviousResponseID, first.ID)
 	}
+	for i, request := range requests {
+		if request.Model != "gpt-5" || request.ReasoningEffort != "high" {
+			t.Fatalf("gateway request[%d] model/effort = %q/%q, want gpt-5/high", i, request.Model, request.ReasoningEffort)
+		}
+	}
 }
 
 func TestResponsesWebSocketSupportsNestedResponsePayloadAndMergesEnvelopeFields(t *testing.T) {
@@ -937,7 +1061,7 @@ func TestResponsesWebSocketSupportsNestedResponsePayloadAndMergesEnvelopeFields(
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_nested", "model": "ignored-by-nested", "instructions": "from envelope", "response": map[string]any{"model": "gpt-5", "input": "hi", "store": false, "stream": true, "background": true}}); err != nil {
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_nested", "model": "ignored-by-nested", "instructions": "from envelope", "response": map[string]any{"model": "gpt-5:xhigh", "reasoning": map[string]any{"effort": " XHIGH "}, "input": "hi", "store": false, "stream": true, "background": true}}); err != nil {
 		t.Fatal(err)
 	}
 	resp := readUntilResponseCompleted(t, ctx, conn)
@@ -945,8 +1069,8 @@ func TestResponsesWebSocketSupportsNestedResponsePayloadAndMergesEnvelopeFields(
 		t.Fatalf("response = %#v, want nested gpt-5 store:false", resp)
 	}
 	requests := gw.requests()
-	if len(requests) != 1 || requests[0].Model != "gpt-5" || requests[0].Input.Text != "hi" || requests[0].Instructions != "from envelope" {
-		t.Fatalf("gateway request = %#v, want merged envelope+nested fields", requests)
+	if len(requests) != 1 || requests[0].Model != "gpt-5" || requests[0].ReasoningEffort != "xhigh" || requests[0].Input.Text != "hi" || requests[0].Instructions != "from envelope" {
+		t.Fatalf("gateway request = %#v, want canonical merged envelope+nested fields", requests)
 	}
 }
 
@@ -957,7 +1081,7 @@ func TestResponsesWebSocketGenerateFalseWarmsSessionAndReturnsCompletedResponse(
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_generate", "generate": false, "response": map[string]any{"model": "gpt-5", "input": "hi", "store": false}}); err != nil {
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_generate", "generate": false, "response": map[string]any{"model": "gpt-5:medium", "input": "hi", "store": false}}); err != nil {
 		t.Fatal(err)
 	}
 	var got []string
@@ -977,9 +1101,24 @@ func TestResponsesWebSocketGenerateFalseWarmsSessionAndReturnsCompletedResponse(
 	if final == nil || final.ID == "" || final.OutputText != "" || len(final.Output) != 0 || final.Store {
 		t.Fatalf("warm response = %#v, want empty store:false response", final)
 	}
+	if final.Model != "gpt-5" {
+		t.Fatalf("warm response model = %q, want canonical gpt-5", final.Model)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "event_id": "evt_use_warm", "model": "gpt-5:MEDIUM", "previous_response_id": final.ID, "input": "again", "store": false}); err != nil {
+		t.Fatal(err)
+	}
+	used := readUntilResponseCompleted(t, ctx, conn)
+	if used == nil || used.Model != "gpt-5" || used.PreviousResponseID == nil || *used.PreviousResponseID != final.ID {
+		t.Fatalf("warm follow-up response = %#v, want canonical continuation of %s", used, final.ID)
+	}
 	requests := gw.requests()
-	if len(requests) != 1 || requests[0].Input.Text != "hi" {
-		t.Fatalf("gateway warm request = %#v, want input hi", requests)
+	if len(requests) != 2 || requests[0].Input.Text != "hi" || requests[1].Input.Text != "again" {
+		t.Fatalf("gateway warm requests = %#v, want warm and follow-up inputs", requests)
+	}
+	for i, request := range requests {
+		if request.Model != "gpt-5" || request.ReasoningEffort != "medium" {
+			t.Fatalf("gateway warm request[%d] model/effort = %q/%q, want gpt-5/medium", i, request.Model, request.ReasoningEffort)
+		}
 	}
 }
 
@@ -1112,6 +1251,46 @@ func TestResponsesWebSocketPreGenerationErrorsUseTopLevelError(t *testing.T) {
 	ev := readWebSocketErrorEvent(t, ctx, conn)
 	if ev.Type != "error" || ev.EventID != "evt_missing" || ev.Status != http.StatusBadRequest || ev.Error.Code != "previous_response_not_found" || ev.Error.Param != "previous_response_id" {
 		t.Fatalf("error event = %#v, want previous_response_not_found", ev)
+	}
+}
+
+func TestResponsesWebSocketRejectsMalformedAndConflictingModelSelectors(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  map[string]any
+		param string
+	}{
+		{
+			name:  "empty suffix",
+			body:  map[string]any{"type": "response.create", "event_id": "evt_empty", "model": "gpt-5:", "input": "hi"},
+			param: "model",
+		},
+		{
+			name:  "nested conflict",
+			body:  map[string]any{"type": "response.create", "event_id": "evt_conflict", "model": "gpt-5:high", "reasoning": map[string]any{"effort": "low"}, "input": "hi"},
+			param: "reasoning.effort",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gw := &websocketStreamGateway{}
+			conn, cleanup := newResponsesWebSocketConn(t, gw)
+			defer cleanup()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := wsjson.Write(ctx, conn, test.body); err != nil {
+				t.Fatal(err)
+			}
+			ev := readWebSocketErrorEvent(t, ctx, conn)
+			if ev.Type != "error" || ev.Status != http.StatusBadRequest || ev.Error.Type != "invalid_request_error" || ev.Error.Param != test.param {
+				t.Fatalf("error event = %#v, want invalid_request_error on %s", ev, test.param)
+			}
+			if requests := gw.requests(); len(requests) != 0 {
+				t.Fatalf("gateway requests = %#v, want none", requests)
+			}
+		})
 	}
 }
 
@@ -1305,7 +1484,7 @@ func TestResponsesGetDeleteHTTPContract(t *testing.T) {
 func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
 	gw := &codexStreamGateway{}
 	s := New(config.Config{}, gw, slog.Default())
-	body := strings.NewReader(`{"model":"gpt-5.5","stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium","summary":"auto"},"text":{"verbosity":"low"},"tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch"}],"instructions":"base","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"desktop context"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	body := strings.NewReader(`{"model":"gpt-5.5:MEDIUM","stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":" medium ","summary":"auto"},"text":{"verbosity":"low"},"tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch"}],"instructions":"base","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"desktop context"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
 	rr := httptest.NewRecorder()
 
 	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
@@ -1313,8 +1492,11 @@ func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if gw.got.ReasoningEffort != "medium" {
-		t.Fatalf("ReasoningEffort = %q, want medium", gw.got.ReasoningEffort)
+	if gw.got.Model != "gpt-5.5" || gw.got.ReasoningEffort != "medium" {
+		t.Fatalf("gateway model/effort = %q/%q, want gpt-5.5/medium", gw.got.Model, gw.got.ReasoningEffort)
+	}
+	if strings.Contains(rr.Body.String(), "gpt-5.5:MEDIUM") || !strings.Contains(rr.Body.String(), `"model":"gpt-5.5"`) {
+		t.Fatalf("response stream does not use canonical model: %s", rr.Body.String())
 	}
 	if len(gw.got.Tools) != 2 || gw.got.Tools[0].Name != "exec_command" || gw.got.Tools[1].Name != "apply_patch" {
 		t.Fatalf("gateway tools = %#v, want exec_command and apply_patch", gw.got.Tools)
@@ -1373,6 +1555,30 @@ func TestHTTPValidationErrorsAreOpenAIShaped(t *testing.T) {
 			path:  "/v1/responses",
 			body:  `{"model":"gpt-5","text":{"format":{"type":"json_object"}},"input":"hi"}`,
 			param: "text.format",
+		},
+		{
+			name:  "chat selector empty base",
+			path:  "/v1/chat/completions",
+			body:  `{"model":":high","messages":[{"role":"user","content":"hi"}]}`,
+			param: "model",
+		},
+		{
+			name:  "responses selector empty suffix",
+			path:  "/v1/responses",
+			body:  `{"model":"gpt-5:","input":"hi"}`,
+			param: "model",
+		},
+		{
+			name:  "chat selector effort conflict",
+			path:  "/v1/chat/completions",
+			body:  `{"model":"gpt-5:high","reasoning_effort":"low","messages":[{"role":"user","content":"hi"}]}`,
+			param: "reasoning_effort",
+		},
+		{
+			name:  "responses nested effort conflict",
+			path:  "/v1/responses",
+			body:  `{"model":"gpt-5:high","reasoning":{"effort":"low"},"input":"hi"}`,
+			param: "reasoning.effort",
 		},
 	}
 	for _, tc := range tests {

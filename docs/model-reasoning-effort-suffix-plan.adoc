@@ -1,0 +1,398 @@
+= Model Reasoning-Effort Suffix Implementation Plan
+:toc: left
+:toclevels: 3
+:sectnums:
+
+== Summary
+
+Add an OpenAI-facing model-selector syntax that lets a request encode reasoning effort in the `model` string:
+
+[source,json]
+----
+{
+  "model": "gpt-5.6-sol:xhigh"
+}
+----
+
+The proxy will interpret this as the canonical Copilot model `gpt-5.6-sol` plus the explicit reasoning effort `xhigh`. Only the canonical model ID will be used for model lookup, capability checks, Copilot SDK session configuration, persistence, and continuation identity.
+
+A naked model name such as `gpt-5.6-sol` will remain unchanged and will not synthesize an explicit request effort. It will continue through the existing default-resolution path: `COPILOT_DEFAULT_REASONING_EFFORT` when configured and applicable, otherwise the model/provider default.
+
+== Goals
+
+* Accept suffixed model selectors on Chat Completions and Responses requests.
+* Cover non-streaming, SSE streaming, Responses WebSocket, and WebSocket `generate:false` warm-session requests.
+* Make a suffix behave like the existing explicit `reasoning_effort` request field.
+* Strip the suffix before exact model validation and before passing the model to the Copilot SDK.
+* Preserve current naked-model and configured-default behavior.
+* Preserve canonical model identity across tool continuations, warm sessions, stored responses, image capability checks, and model-cache lookups.
+* Return deterministic OpenAI-shaped errors for malformed selectors and contradictory effort inputs.
+* Expose discoverable `model:effort` aliases from `GET /v1/models` for every effort advertised by each canonical model.
+
+== Non-goals
+
+* Changing how configured default efforts are rounded to model-supported values.
+* Adding stricter model-capability validation for explicit efforts. The existing explicit `reasoning_effort` path forwards a normalized value without rounding it.
+* Reconfiguring the effort of an already-running Copilot session during a live tool continuation.
+* Persisting both a requested alias and a canonical model ID.
+
+== Existing Behavior and Constraints
+
+=== Request surfaces
+
+The feature must cover all generation entry points:
+
+* Chat Completions HTTP is decoded and prepared in `internal/httpapi/chat.go`.
+* Responses HTTP is prepared by `prepareResponseRequest` in `internal/httpapi/responses.go`.
+* Responses WebSocket also calls `prepareResponseRequest` from `internal/httpapi/responses_ws.go`; normalizing there covers flat and nested `response.create` payloads and warm requests.
+
+The request types already carry separate `Model` and `ReasoningEffort` fields in `internal/openai/types.go`. Responses HTTP and WebSocket decoding already converge through `ResponsesRequestFromFields` in `internal/openai/responses_decode.go`. Suffix handling should therefore be request policy applied after decoding, not duplicated in JSON decoders.
+
+=== Exact model identity
+
+`RealGateway.findModel` performs exact model-ID matching in `internal/copilotgw/images.go`. Passing `gpt-5.6-sol:xhigh` through unchanged would trigger a model-cache miss, a potentially unnecessary forced refresh, and ultimately `model_not_found`.
+
+Canonical model strings are also used by:
+
+* Chat and Responses model validation in `internal/copilotgw/chat.go` and `internal/copilotgw/responses.go`.
+* SDK session create/resume configuration in `internal/copilotgw/sessions.go`.
+* Image capability and limit checks.
+* Pending tool-batch model comparison in `internal/copilotgw/continuations.go`.
+* Responses warm-session matching in `internal/copilotgw/warm_response.go`.
+* Chat session metadata and stored Responses records.
+
+Normalization must happen before any of these operations.
+
+=== Existing effort resolution
+
+`internal/copilotgw/models.go` currently distinguishes two behaviors:
+
+. An explicit request effort is trimmed, lowercased, and forwarded directly.
+. An omitted request effort may use `COPILOT_DEFAULT_REASONING_EFFORT`, reconciled with model metadata when available.
+
+The suffix belongs to the first category. It must not be treated as a configured default and must not be rounded to the nearest advertised effort.
+
+The currently ranked values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`, but explicit request fields are not currently restricted to that set. Reasoning capabilities and model-specific effort lists can evolve.
+
+== Recommended Contract
+
+=== Selector grammar
+
+Parse the final colon in a nonempty model string:
+
+[source,text]
+----
+<canonical-model-id>[:<reasoning-effort>]
+----
+
+Rules:
+
+* No colon means a naked model and no suffix-derived effort.
+* The final colon separates the model ID and effort. This leaves earlier colons available to a future provider-qualified base ID.
+* The base model and suffix must both be nonempty after checking the separator.
+* Do not trim or case-fold the base model ID.
+* Trim surrounding whitespace from the effort and normalize it to lowercase, matching current gateway behavior.
+* Reject an empty/whitespace-only suffix as an `invalid_request_error` on `model`.
+* Do not hard-code the six currently ranked values as a parser allowlist. Any nonempty suffix receives the same semantics as the existing explicit `reasoning_effort` field; model/provider validation remains authoritative.
+* Because colon is now reserved as the suffix separator at the OpenAI boundary, a literal upstream model ID ending in `:<value>` must be addressed through a future escaping/versioning mechanism if such IDs are introduced.
+
+Examples:
+
+[cols="1,1,1",options="header"]
+|===
+|Input `model`
+|Canonical model
+|Suffix effort
+
+|`gpt-5.6-sol`
+|`gpt-5.6-sol`
+|absent
+
+|`gpt-5.6-sol:xhigh`
+|`gpt-5.6-sol`
+|`xhigh`
+
+|`vendor:model:HIGH`
+|`vendor:model`
+|`high`
+
+|`gpt-5.6-sol:`
+|error
+|error
+|===
+
+=== Effort source precedence and conflicts
+
+Treat all request-provided effort forms as peer spellings of one explicit value:
+
+* model suffix;
+* top-level `reasoning_effort`;
+* Responses `reasoning.effort`.
+
+Normalize each nonempty value for comparison. If multiple forms are present:
+
+* accept them when they normalize to the same value;
+* reject the request when they differ;
+* do not silently let one spelling override another.
+
+This extends the existing Responses conflict policy instead of introducing a second precedence rule. A suffix-only request populates the same internal explicit-effort value used by top-level `reasoning_effort`.
+
+For a naked model with no request effort, leave the explicit effort empty so the existing configured/model-default path remains in control.
+
+=== Canonical identity and observable output
+
+Use the canonical base model everywhere after request normalization:
+
+* gateway requests;
+* logs' `model` attribute;
+* Chat completion and stream `model` fields;
+* Responses objects and stream events;
+* persisted session/response records;
+* tool-batch and warm-session comparisons.
+
+Log the suffix-derived value through the existing `reasoning_effort` field. This keeps one stable model identity and avoids adding a requested-model/display-model field throughout the gateway and persistence layers.
+
+`GET /v1/models` lists each canonical upstream model ID and a virtual `<model>:<effort>` alias for every normalized value in `supported_reasoning_efforts`. If `default_reasoning_effort` is advertised but absent from that list, its alias is included as well. Alias entries retain canonical capability metadata except `supported_reasoning_efforts` and `default_reasoning_effort`, which apply only to canonical entries. This makes aliases terminal fixed-effort choices instead of suggesting recursive selectors. Generation responses and logs continue to expose only the canonical model ID.
+
+== Proposed Design
+
+=== Shared parsing and merge helpers
+
+Add pure helpers in `internal/openai`, near request validation, because the suffix is OpenAI-facing compatibility syntax rather than a Copilot model ID.
+
+A suggested shape is:
+
+[source,go]
+----
+type ModelSelector struct {
+    Model           string
+    ReasoningEffort string
+    HasEffort       bool
+}
+
+func ParseModelSelector(raw string) (ModelSelector, error)
+
+func MergeReasoningEffort(
+    suffix ModelSelector,
+    explicit string,
+    explicitParam string,
+) (string, error)
+----
+
+The exact API may differ, but the helper must:
+
+* have no gateway/model-catalog dependency;
+* return a canonical model and optional normalized effort;
+* produce `openai.InvalidRequest` errors with stable parameter names;
+* compare matching effort values after trim/lowercase normalization;
+* leave naked models and omitted effort untouched.
+
+Keep parsing separate from request-type mutation so table tests can exhaustively cover the contract.
+
+=== Chat Completions boundary
+
+In `internal/httpapi/chat.go`:
+
+. Decode `ChatCompletionRequest` as today.
+. Parse `req.Model` immediately after decoding and before `ValidateChatRequest`.
+. Merge any suffix effort with `req.ReasoningEffort`.
+. Replace `req.Model` with the canonical model and set `req.ReasoningEffort` to the merged explicit value.
+. Continue through existing validation, instruction folding, continuation detection, effort resolution, logging, and gateway construction.
+
+Doing this before the tool-continuation branch ensures both live and cold-fallback continuations compare and hydrate with the canonical model. A session originally created with the suffix already has that effort in its SDK configuration; subsequent live tool results continue that session under the existing continuation semantics.
+
+=== Responses HTTP and WebSocket boundary
+
+At the beginning of `prepareResponseRequest` in `internal/httpapi/responses.go`:
+
+. Parse and canonicalize `req.Model`.
+. Merge a suffix effort into top-level `req.ReasoningEffort`.
+. Validate the request, including comparison with nested `reasoning.effort`.
+. Resolve the final explicit effort with `ResponsesReasoningEffort`.
+. Continue through the existing tool normalization, input parsing, continuation detection, default resolution, logging fields, and gateway request creation.
+
+Refactor `validateResponsesReasoning` in `internal/openai/validation.go` so top-level/nested equality is checked after the same trim/lowercase normalization. This allows equivalent forms such as `model: "gpt-5:XHIGH"` plus `reasoning.effort: "xhigh"` while still rejecting true conflicts.
+
+Because both Responses transports use `prepareResponseRequest`, this single boundary covers:
+
+* HTTP non-streaming;
+* HTTP SSE streaming;
+* WebSocket flat `response.create`;
+* WebSocket nested `response.create.response`;
+* WebSocket `generate:false` warm creation and later warm use.
+
+=== Gateway contract
+
+Keep `internal/copilotgw` request structures unchanged. Their contract remains:
+
+* `Model` is always a canonical Copilot model ID;
+* `ReasoningEffort` is the normalized explicit request value or empty;
+* `DefaultReasoningEffort` is still separate;
+* `ResolvedReasoningEffort` is used for preflight/logging optimization as today.
+
+Do not add suffix parsing only to `findModel`: that would fix lookup while still leaking the alias into session configuration, hydration, continuation comparisons, responses, and persistence. Direct gateway callers should continue supplying canonical internal requests.
+
+=== Continuation behavior
+
+Canonicalizing before the continuation branches ensures an initial `gpt-5.6-sol:xhigh` request and a repeated suffixed selector compare as model `gpt-5.6-sol`.
+
+The implementation should preserve the existing rule that a live pending tool turn continues the already-configured SDK session. Changing the requested effort during that live continuation is not a supported reconfiguration operation. Documentation should tell clients to keep the model selector stable through a tool loop. Cold fallback paths will use the parsed explicit effort when they create a replacement session, as existing explicit `reasoning_effort` values do.
+
+A later hardening change may persist the resolved effort on pending batches and reject attempted continuation changes, but that is not required to add suffix syntax and should not be mixed into this change without dedicated compatibility review.
+
+== Implementation Steps
+
+=== Phase 1: Parser and normalized conflict handling
+
+. Add the model-selector parser and effort merge/normalization helpers under `internal/openai`.
+. Add table-driven unit tests in `internal/openai/validation_test.go` or a focused `model_selector_test.go`.
+. Update Responses top-level/nested conflict comparison to use the common normalized comparison.
+. Keep explicit suffix values model-dependent; do not introduce a new global enum validation rule.
+
+=== Phase 2: HTTP request integration
+
+. Normalize Chat requests immediately after decoding in `internal/httpapi/chat.go`.
+. Normalize Responses requests at the start of `prepareResponseRequest` in `internal/httpapi/responses.go`.
+. Ensure calls to `resolveGenerationReasoningEffort` use the canonical model and merged explicit effort.
+. Ensure generation logs report the canonical model and suffix-derived `reasoning_effort`.
+. Avoid changes to JSON decoders in `internal/openai/types.go` and `internal/openai/responses_decode.go` beyond any test fixtures needed to prove transport parity.
+
+=== Phase 3: Regression coverage across transports and stateful flows
+
+. Extend `internal/httpapi/server_test.go` capture-gateway tests for Chat and Responses.
+. Add Responses WebSocket tests for flat and nested request shapes.
+. Cover streaming and non-streaming response model fields.
+. Cover Chat and Responses tool-continuation preparation with a repeated suffix.
+. Cover warm Responses creation/use with a suffixed selector.
+. Verify malformed and conflicting forms return OpenAI-shaped errors without invoking the gateway.
+. Add or adjust `internal/copilotgw` tests only where needed to assert that downstream requests remain canonical; do not teach the gateway to parse aliases.
+
+=== Phase 4: Documentation and integration validation
+
+. Update the README compatibility matrix's Models and Reasoning effort rows.
+. Add suffix syntax and conflict examples to the Reasoning effort section.
+. State that naked models retain default-resolution behavior.
+. State that `/v1/models` lists canonical IDs plus terminal effort aliases that retain non-choice capability metadata.
+. State that response `model` fields and logs use the canonical model.
+. Add a Deno AI SDK integration case that selects `model + ":" + effort` and omits `providerOptions.openai.reasoningEffort`, proving the compatibility use case for clients without an effort field.
+. Update `tests/ai-sdk-deno/README.md` if the live-test behavior or environment-variable guidance changes.
+
+== Test Plan
+
+=== Parser unit tests
+
+Use a table covering:
+
+* naked model with no effort;
+* `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`;
+* mixed-case and surrounding effort whitespace;
+* a base ID containing an earlier colon;
+* empty base;
+* empty/whitespace-only suffix;
+* suffix only;
+* matching suffix and top-level effort after normalization;
+* conflicting suffix and top-level effort;
+* matching/conflicting suffix and Responses nested effort;
+* arbitrary nonempty future/model-specific effort values.
+
+=== HTTP and WebSocket tests
+
+Assert that:
+
+* Chat non-streaming and streaming pass `gpt-5.6-sol` plus `xhigh` to the gateway.
+* Chat wire responses/chunks expose the canonical model.
+* Chat tool continuations normalize before gateway and batch model comparison.
+* Responses HTTP non-streaming and SSE pass the canonical model plus explicit effort.
+* Responses WebSocket flat and nested payloads behave identically.
+* WebSocket `generate:false` warm creation and later generation preserve canonical model/effort matching.
+* naked models still pass an empty explicit effort and the configured default separately.
+* conflicting effort spellings return HTTP 400 or a WebSocket `invalid_request_error` frame with a stable parameter.
+* malformed selectors fail before model-cache lookup or generation.
+* logging tests observe canonical `model`, explicit `reasoning_effort`, and any separately resolved value.
+
+=== Gateway and persistence regression tests
+
+Confirm existing tests still prove that:
+
+* exact model lookup receives the base ID;
+* explicit efforts bypass configured-default rounding;
+* omitted efforts still use the current closest-supported default logic;
+* warm sessions compare canonical model and normalized effort;
+* pending batches and stored response records contain canonical model IDs;
+* image capability checks resolve against the base model.
+
+=== Commands
+
+[source,shell]
+----
+go test ./internal/openai -run 'Test.*Model.*Effort|TestResponses.*Reasoning'
+go test ./internal/httpapi -run 'Test(Chat|Responses).*Reasoning|TestResponsesWebSocket'
+go test ./internal/copilotgw -run 'Test(EffectiveReasoningEffort|WarmResponse|Continuation)'
+go test ./internal/openai ./internal/httpapi ./internal/copilotgw
+go test -race ./internal/httpapi ./internal/copilotgw
+go test ./...
+go vet ./...
+----
+
+When a live Copilot environment is available, also run the Deno AI SDK integration suite and manually exercise one request on each transport.
+
+== Acceptance Criteria
+
+. `model: "gpt-5.6-sol:xhigh"` reaches the Copilot SDK as model `gpt-5.6-sol` with explicit reasoning effort `xhigh`.
+. The behavior is identical for Chat Completions, Responses HTTP, and Responses WebSocket.
+. Streaming and non-streaming paths both work.
+. A naked `gpt-5.6-sol` with no request effort leaves the explicit effort empty and retains existing default behavior.
+. A suffix has explicit-request semantics and is not rounded like a configured default.
+. Matching suffix, top-level effort, and nested Responses effort forms are accepted after normalization.
+. Contradictory effort forms are rejected deterministically rather than silently overridden.
+. Empty base or suffix forms are rejected as OpenAI-shaped invalid requests.
+. Exact model validation, model metadata lookup, SDK configuration, continuation identity, response persistence, and image checks receive only the canonical model ID.
+. Responses and logs expose the canonical model and the selected reasoning effort.
+. `/v1/models` retains canonical entries and their reasoning metadata while adding normalized, deduplicated aliases for every advertised effort; aliases omit supported/default effort metadata.
+. Existing default-resolution, reasoning-output, continuation, warm-session, and transport tests remain green.
+. The README documents syntax, precedence/conflicts, canonical echo behavior, model-list behavior, and continuation expectations.
+
+== Risks and Mitigations
+
+[cols="1,2",options="header"]
+|===
+|Risk
+|Mitigation
+
+|A future upstream model ID contains a colon.
+|Parse only the final colon, document that the suffix grammar reserves it, and keep parsing isolated so escaping/versioning can be added later.
+
+|A future effort value is not in today's ranked set.
+|Accept any nonempty suffix, matching current explicit-field behavior; leave model/provider support validation authoritative.
+
+|A typo in the suffix reaches the provider.
+|Return local errors for malformed empty forms and conflicts; document that nonempty values are model-dependent, as explicit fields already are.
+
+|Canonical response echo surprises a client expecting the alias.
+|Document the canonical echo contract and test it consistently across Chat, Responses, SSE, WebSocket, and stored-response retrieval.
+
+|Alias expansion creates a larger model list and may contain duplicate effort spellings from upstream metadata.
+|Keep canonical entries first, normalize and deduplicate effort aliases, and omit choice-oriented reasoning metadata from aliases while preserving other canonical capabilities.
+
+|A client changes effort during a live tool continuation.
+|Document selector stability through a tool loop and preserve the already-configured session. Consider later batch-level effort validation as a hardening feature.
+
+|Normalization diverges between HTTP and WebSocket.
+|Reuse `prepareResponseRequest` and test both flat and nested WebSocket payloads.
+|===
+
+== Suggested Change Set
+
+Expected files for the initial implementation:
+
+* `internal/openai/validation.go` or a new `internal/openai/model_selector.go`
+* `internal/openai/validation_test.go` or a new `internal/openai/model_selector_test.go`
+* `internal/httpapi/chat.go`
+* `internal/httpapi/responses.go`
+* `internal/httpapi/server.go`
+* `internal/httpapi/server_test.go`
+* `README.md`
+* `tests/ai-sdk-deno/ai_sdk_integration_test.ts`
+* optionally `tests/ai-sdk-deno/README.md`
+
+No persistence schema, gateway request-type, or model-cache change is necessary. The `/v1/models` handler expands canonical gateway models into OpenAI-facing alias entries without changing the gateway catalog.

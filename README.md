@@ -55,8 +55,8 @@ auth.
 
 | Feature                         | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Models                          | `model` is required for every generation request. Unknown models are rejected as `model_not_found` after a forced model-cache refresh. Model metadata may include token limits such as `max_context_window_tokens`, `max_prompt_tokens`, and `max_output_tokens`, plus `supports_vision` and `vision` limits.                                                                                                                                                                                                                                                                                                                  |
-| Reasoning effort                | Send top-level `reasoning_effort` on Chat Completions or Responses requests. Responses `reasoning.effort` is also accepted in permissive mode for Codex CLI compatibility. The value is forwarded to Copilot when supplied; omitted request values can use `COPILOT_DEFAULT_REASONING_EFFORT`, adjusted to the closest model-supported effort when metadata is available. If the model does not support reasoning efforts, the default is omitted. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. Other Responses `reasoning` controls are ignored or rejected as unsafe. |
+| Models                          | `model` is required for every generation request. A final `:<reasoning-effort>` suffix is accepted as OpenAI-facing selector syntax; model lookup, SDK sessions, persistence, logs, and response `model` fields use only the canonical base ID. Unknown canonical models are rejected as `model_not_found` after a forced model-cache refresh. `GET /v1/models` lists each canonical ID plus virtual `model:effort` aliases for every advertised supported reasoning effort (and an advertised default when it is not already listed). Aliases retain canonical capability metadata except `supported_reasoning_efforts` and `default_reasoning_effort`, which remain canonical-model choice metadata. Model metadata may include token limits such as `max_context_window_tokens`, `max_prompt_tokens`, and `max_output_tokens`, plus `supports_vision` and `vision` limits. |
+| Reasoning effort                | Send top-level `reasoning_effort` on Chat Completions or Responses requests, append it to the model as `model:effort`, or use Responses `reasoning.effort` in permissive mode for Codex CLI compatibility. These are peer spellings: surrounding whitespace and case are normalized, matching values are accepted, and contradictory values are rejected. Explicit values are forwarded to Copilot without configured-default rounding. A naked model with no request effort can use `COPILOT_DEFAULT_REASONING_EFFORT`, adjusted to the closest model-supported effort when metadata is available; models without reasoning-effort support omit the default. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. Other Responses `reasoning` controls are ignored or rejected as unsafe. |
 | Reasoning output                | Model reasoning is surfaced on both surfaces. Chat Completions streams incremental `delta.reasoning` (+ `delta.reasoning_content`) chunks ahead of content/tool-call deltas and attaches `reasoning`, `reasoning_content`, and structured `reasoning_details` (Anthropic signed text plus any OpenAI-style encrypted blob) to the final assistant message; the streamed terminal carries a `reasoning_details` chunk for continuity. Responses emit ordered `reasoning` output items with `summary` text, bracketed by the full OpenAI summary lifecycle (`response.reasoning_summary_part.added`/`.done` around `response.reasoning_summary_text.delta`/`.done`) before the message item, plus `encrypted_content` when present (encrypted-only reasoning is reconciled into an announced item). Interleaved thinking is preserved automatically across the multi-request tool loop — each turn produces a fresh reasoning block. Inbound assistant `reasoning`/`reasoning_content`/`reasoning_details` are tolerated and replayed when rebuilding a cold session; opaque/encrypted reasoning is session-bound and stripped by the SDK on resume, so portable stateless `store:false` encrypted-reasoning round-trips are unsupported. The `COPILOT_REASONING_EMISSION` knob narrows or disables emission. |
 | Chat history                    | Leading `system`/`developer` messages become replacement system instructions. Prior non-final messages are converted to Copilot SDK `events.jsonl`; only the final user turn is sent. A request may instead end with an assistant prefill (the trailing assistant content becomes prior context plus a `Continue.` continuation prompt) or a tool continuation. Mid-conversation `system`/`developer` messages are rejected. SDK infinite-session auto-compaction is disabled.                                                                                                                                                                                                                                                                                                                           |
 | Prompt isolation                | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions use a single-space replacement, then fall back to `You are a chat completion model.` if needed. This avoids SDK resume failures caused by persisted empty `system.message` events.                                                                                                                                                                                                                                                                                                                                             |
@@ -108,8 +108,9 @@ limitations and intentional differences are:
   structured output is rejected.
 - **`include` is narrow.** Only `include: ["reasoning.encrypted_content"]` is
   accepted. Other include values are rejected.
-- **Reasoning object controls are partial.** Top-level `reasoning_effort` and
-  Responses `reasoning.effort` are supported. `reasoning.summary` is accepted
+- **Reasoning object controls are partial.** A `model:effort` selector,
+  top-level `reasoning_effort`, and Responses `reasoning.effort` are supported.
+  `reasoning.summary` is accepted
   for compatibility, but the proxy does not implement the full set of OpenAI
   reasoning controls or provider-specific summary behaviors.
 - **Warm `generate:false` cannot include tool-output continuations.**
@@ -204,13 +205,31 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 
 ### Reasoning effort
 
-Reasoning effort is a top-level request field. Values are model-dependent;
-inspect `GET /v1/models` for `supported_reasoning_efforts` and
-`default_reasoning_effort` metadata when the Copilot SDK provides it. For
-clients that cannot send a request effort, set
-`COPILOT_DEFAULT_REASONING_EFFORT`; explicit request values still take
-precedence. For Responses requests, use `reasoning_effort` instead of a nested
-`reasoning` object.
+Reasoning effort can be supplied as a top-level `reasoning_effort` field or as
+a final suffix on the model selector, such as `gpt-5.5:high`. Responses
+`reasoning.effort` is also accepted in permissive mode. These forms are peer
+spellings of one explicit value: effort values are trimmed and lowercased,
+matching forms are accepted, and contradictory forms return an
+`invalid_request_error`. Nonempty values are model-dependent and are not
+restricted to a proxy-level enum.
+
+The suffix is stripped before model lookup and SDK use. Responses, streams,
+stored records, and logs therefore expose the canonical model (`gpt-5.5`), not
+the requested selector (`gpt-5.5:high`). `GET /v1/models` lists canonical IDs
+and discoverable `model:effort` aliases for each advertised
+`supported_reasoning_efforts` value (plus an advertised
+`default_reasoning_effort` when needed). Alias entries retain other canonical
+capability metadata but omit `supported_reasoning_efforts` and
+`default_reasoning_effort`, making each alias a terminal fixed-effort choice.
+The final colon is reserved for this selector syntax and earlier colons remain
+part of the base ID.
+
+A naked model with no request effort remains unchanged. Set
+`COPILOT_DEFAULT_REASONING_EFFORT` for such requests; configured defaults retain
+the existing closest-supported-effort behavior, while explicit suffix or field
+values are forwarded without that rounding. Keep the selector stable throughout
+a live tool-call loop because an already-running Copilot session is not
+reconfigured during a continuation.
 
 Chat Completions:
 
@@ -224,17 +243,22 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-Responses API:
+Responses API using the model selector (useful for clients without an effort
+field):
 
 ```sh
 curl -s http://127.0.0.1:8080/v1/responses \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gpt-5.5",
-    "reasoning_effort": "medium",
+    "model": "gpt-5.5:medium",
     "input": "Give me a concise migration plan."
   }'
 ```
+
+Equivalent forms may be combined when they agree, for example
+`"model":"gpt-5.5:HIGH"` with `"reasoning_effort":"high"`. A conflicting
+combination such as `"model":"gpt-5.5:high"` with
+`"reasoning_effort":"low"` is rejected instead of choosing one value.
 
 ### Reasoning output
 

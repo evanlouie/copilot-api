@@ -120,10 +120,59 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, openai.Upstream(err.Error()))
 		return
 	}
-	out := openai.ModelList{Object: openai.ObjectList}
-	now := openai.UnixNow()
-	for _, m := range models {
-		out.Data = append(out.Data, openai.Model{ID: m.ID, Object: openai.ObjectModel, Created: now, OwnedBy: "github-copilot", Meta: m.Metadata})
-	}
+	out := openai.ModelList{Object: openai.ObjectList, Data: openAIModels(models, openai.UnixNow())}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func openAIModels(models []copilotgw.Model, created int64) []openai.Model {
+	out := make([]openai.Model, 0, len(models))
+	seenIDs := make(map[string]struct{}, len(models))
+	appendModel := func(id string, metadata map[string]any) {
+		if _, exists := seenIDs[id]; exists {
+			return
+		}
+		seenIDs[id] = struct{}{}
+		out = append(out, openai.Model{ID: id, Object: openai.ObjectModel, Created: created, OwnedBy: "github-copilot", Meta: metadata})
+	}
+
+	// Preserve the existing canonical catalog as the list prefix so positional
+	// consumers do not start selecting aliases after this expansion.
+	for _, model := range models {
+		appendModel(model.ID, model.Metadata)
+	}
+	for _, model := range models {
+		if model.ID == "" {
+			continue
+		}
+		seenEfforts := make(map[string]struct{}, len(model.SupportedReasoningEfforts)+1)
+		efforts := append(append([]string(nil), model.SupportedReasoningEfforts...), model.DefaultReasoningEffort)
+		for _, rawEffort := range efforts {
+			effort := openai.NormalizeReasoningEffort(rawEffort)
+			if effort == "" {
+				continue
+			}
+			if _, exists := seenEfforts[effort]; exists {
+				continue
+			}
+			seenEfforts[effort] = struct{}{}
+			appendModel(model.ID+":"+effort, modelAliasMetadata(model.Metadata))
+		}
+	}
+	return out
+}
+
+func modelAliasMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	aliasMetadata := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		aliasMetadata[key] = value
+	}
+	// These fields describe effort choices for a canonical model. Keeping them
+	// on a fixed-effort alias would suggest recursively suffixed selectors such
+	// as model:xhigh:medium and would misstate the alias's default.
+	delete(aliasMetadata, "supported_reasoning_efforts")
+	delete(aliasMetadata, "default_reasoning_effort")
+	return aliasMetadata
 }

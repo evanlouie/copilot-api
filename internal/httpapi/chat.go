@@ -17,6 +17,18 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, err)
 		return
 	}
+	selector, err := openai.ParseModelSelector(req.Model)
+	if err != nil {
+		openai.WriteError(w, err)
+		return
+	}
+	reasoningEffort, err := openai.MergeReasoningEffort(selector, req.ReasoningEffort, "reasoning_effort")
+	if err != nil {
+		openai.WriteError(w, err)
+		return
+	}
+	req.Model = selector.Model
+	req.ReasoningEffort = reasoningEffort
 	if err := openai.ValidateChatRequest(&req, s.cfg.StrictCompat); err != nil {
 		openai.WriteError(w, err)
 		return
