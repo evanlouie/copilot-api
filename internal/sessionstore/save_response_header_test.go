@@ -35,7 +35,7 @@ func mustExist(t *testing.T, path, why string) {
 // dropping the new one lets retention delete a session a live response needs.
 func TestSaveResponseMovesTheRetentionLinkWhenTheSessionChanges(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestSaveResponseRefusesToOverwriteAnUnreadableRecord(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := New(t.TempDir(), t.TempDir(), t.TempDir())
+			store := New(t.TempDir(), t.TempDir())
 			if err := store.Ensure(); err != nil {
 				t.Fatal(err)
 			}
@@ -129,7 +129,7 @@ func TestSaveResponseRefusesToOverwriteAnUnreadableRecord(t *testing.T) {
 // classification as decoding the whole record did.
 func TestSaveResponseHeaderAgreesWithTheFullRecord(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestSaveResponseHeaderAgreesWithTheFullRecord(t *testing.T) {
 // rediscovered.
 func TestSaveResponseHeaderResolvesDuplicateKeysFirstWins(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestSaveResponseHeaderResolvesDuplicateKeysFirstWins(t *testing.T) {
 // with the record's size. A 16 MiB record is read in a bounded number of bytes.
 func TestSaveResponseHeaderStopsBeforeThePayload(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -268,8 +268,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // is populated only while a pin is held.
 func TestSaveResponseTombstoneSurvivesAProcessRestart(t *testing.T) {
 	t.Parallel()
-	dataDir, stateDir, cacheDir := t.TempDir(), t.TempDir(), t.TempDir()
-	store := New(dataDir, stateDir, cacheDir)
+	dataDir, stateDir := t.TempDir(), t.TempDir()
+	store := New(dataDir, stateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestSaveResponseTombstoneSurvivesAProcessRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restarted := New(dataDir, stateDir, cacheDir)
+	restarted := New(dataDir, stateDir)
 	if err := restarted.Ensure(); err != nil {
 		t.Fatal(err)
 	}

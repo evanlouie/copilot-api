@@ -16,7 +16,7 @@ func TestWindowsLockRecoversAfterOwnerExit(t *testing.T) {
 		}
 		os.Exit(0)
 	}
-	path := New(t.TempDir(), t.TempDir(), t.TempDir()).LockPath()
+	path := New(t.TempDir(), t.TempDir()).LockPath()
 	command := exec.Command(os.Args[0], "-test.run=TestWindowsLockRecoversAfterOwnerExit")
 	command.Env = append(os.Environ(), "COPILOT_API_LOCK_CRASH_HELPER="+path)
 	if output, err := command.CombinedOutput(); err != nil {

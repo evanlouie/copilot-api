@@ -26,7 +26,7 @@ func prune(args []string) (returnErr error) {
 	if err := cfg.ValidateDirs(); err != nil {
 		return err
 	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
 	store.SetRetentionPolicy(configuredRetentionPolicy(cfg))
 	if *dryRun {
 		report, err := store.Prune(true)

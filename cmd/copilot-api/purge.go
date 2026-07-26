@@ -33,7 +33,7 @@ func purge(args []string) (returnErr error) {
 	if err := cfg.ValidateDirs(); err != nil {
 		return err
 	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
 	// Inventory is genuinely read-only: do not create the state directory or a
 	// lock file for --dry-run.
 	paths, err := store.Purge(true)

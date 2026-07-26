@@ -21,7 +21,6 @@ import (
 type Store struct {
 	DataDir        string
 	StateDir       string
-	CacheDir       string
 	mu             sync.Mutex
 	retention      RetentionPolicy
 	deletedIDs     map[string]struct{}
@@ -43,8 +42,8 @@ const (
 	retentionLinkDir = ".links"
 )
 
-func New(dataDir, stateDir, cacheDir string) *Store {
-	return &Store{DataDir: dataDir, StateDir: stateDir, CacheDir: cacheDir, deletedIDs: map[string]struct{}{}, pins: map[string]int{}, orphanSessions: map[string]struct{}{}, deferredPrunes: map[string]pruneBackoff{}}
+func New(dataDir, stateDir string) *Store {
+	return &Store{DataDir: dataDir, StateDir: stateDir, deletedIDs: map[string]struct{}{}, pins: map[string]int{}, orphanSessions: map[string]struct{}{}, deferredPrunes: map[string]pruneBackoff{}}
 }
 
 // TakeMaintenanceError returns and clears the latest asynchronous retention or
@@ -72,7 +71,7 @@ func (s *Store) Ensure() error {
 	if err != nil {
 		return err
 	}
-	legacyNames := [][]string{{"sessions"}, {"responses", "server.lock"}, nil}
+	legacyNames := [][]string{{"sessions"}, {"responses", "server.lock"}}
 	for i, root := range roots {
 		if err := ensureOwnedRoot(root, legacyNames[i]); err != nil {
 			return err
@@ -152,7 +151,7 @@ func (s *Store) ensureRetentionLinksLocked() error {
 }
 
 func (s *Store) ValidateRoots() ([]string, error) {
-	return validatedPurgeRoots([]string{s.DataDir, s.StateDir, s.CacheDir})
+	return validatedPurgeRoots([]string{s.DataDir, s.StateDir})
 }
 
 func ensureOwnedRoot(root string, allowedLegacyNames []string) error {

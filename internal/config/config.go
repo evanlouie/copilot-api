@@ -84,7 +84,6 @@ type Config struct {
 	SSEKeepAliveInterval   time.Duration
 	DataDir                string
 	StateDir               string
-	CacheDir               string
 	ConfigDir              string
 	ReasoningEmission      string
 	LogContent             bool
@@ -169,7 +168,6 @@ func Load() (Config, error) {
 
 	cfg.DataDir = getenv("COPILOT_API_DATA_DIR", filepath.Join(xdgDataHome(), AppName))
 	cfg.StateDir = getenv("COPILOT_API_STATE_DIR", filepath.Join(xdgStateHome(), AppName))
-	cfg.CacheDir = getenv("COPILOT_API_CACHE_DIR", filepath.Join(xdgCacheHome(), AppName))
 	cfg.ConfigDir = getenv("COPILOT_API_CONFIG_DIR", filepath.Join(xdgConfigHome(), AppName))
 	for _, item := range []struct {
 		name string
@@ -177,7 +175,6 @@ func Load() (Config, error) {
 	}{
 		{"COPILOT_API_DATA_DIR", &cfg.DataDir},
 		{"COPILOT_API_STATE_DIR", &cfg.StateDir},
-		{"COPILOT_API_CACHE_DIR", &cfg.CacheDir},
 		{"COPILOT_API_CONFIG_DIR", &cfg.ConfigDir},
 	} {
 		canonical, err := canonicalDirectory(*item.dir)
@@ -194,7 +191,7 @@ func canonicalDirectory(dir string) (string, error) {
 }
 
 func (c Config) ValidateDirs() error {
-	return validateAppDirs([]string{c.DataDir, c.StateDir, c.CacheDir, c.ConfigDir})
+	return validateAppDirs([]string{c.DataDir, c.StateDir, c.ConfigDir})
 }
 
 func (c Config) EnsureConfigDir() error {
@@ -327,16 +324,6 @@ func xdgStateHome() string {
 		return filepath.Join(home, ".local", "state")
 	}
 	return filepath.Join(os.TempDir(), "xdg-state")
-}
-
-func xdgCacheHome() string {
-	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
-		return v
-	}
-	if d, err := os.UserCacheDir(); err == nil && d != "" {
-		return d
-	}
-	return filepath.Join(os.TempDir(), "xdg-cache")
 }
 
 func xdgConfigHome() string {

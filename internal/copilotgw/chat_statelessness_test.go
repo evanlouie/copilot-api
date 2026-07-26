@@ -28,7 +28,7 @@ import (
 func TestChatTurnPersistsNoResponseRecord(t *testing.T) {
 	t.Parallel()
 	dataDir, stateDir := t.TempDir(), t.TempDir()
-	store := sessionstore.New(dataDir, stateDir, t.TempDir())
+	store := sessionstore.New(dataDir, stateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

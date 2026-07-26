@@ -21,13 +21,12 @@ func TestLiveCopilotTextCompletion(t *testing.T) {
 	cfg := config.Config{
 		DataDir:        root + "/data",
 		StateDir:       root + "/state",
-		CacheDir:       root + "/cache",
 		ConfigDir:      root + "/config",
 		ToolCallTTL:    time.Minute,
 		ModelsCacheTTL: time.Minute,
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -62,13 +61,12 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 	cfg := config.Config{
 		DataDir:        root + "/data",
 		StateDir:       root + "/state",
-		CacheDir:       root + "/cache",
 		ConfigDir:      root + "/config",
 		ToolCallTTL:    time.Minute,
 		ModelsCacheTTL: time.Minute,
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -147,13 +145,12 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 	cfg := config.Config{
 		DataDir:        root + "/data",
 		StateDir:       root + "/state",
-		CacheDir:       root + "/cache",
 		ConfigDir:      root + "/config",
 		ToolCallTTL:    time.Minute,
 		ModelsCacheTTL: time.Minute,
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

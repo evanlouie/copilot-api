@@ -29,14 +29,13 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -o /o
 # 0755 and the uid-65532 process cannot chmod it, so startup dies with
 # "operation not permitted".
 #
-# .cache holds three separate things and is therefore mounted as a whole:
-#   copilot-api/  the managed cache root (prune/purge territory)
+# .cache holds two separate things and is therefore mounted as a whole:
 #   copilot-sdk/  where the Go SDK unpacks the embedded CLI binary
 #   copilot/      where that CLI's Node single-executable loader then extracts
 #                 its own bundled package and native addons, created at runtime
+# Neither is a managed root: prune and purge never touch .cache.
 RUN mkdir -p /home/nonroot/.local/share/copilot-api \
              /home/nonroot/.local/state/copilot-api \
-             /home/nonroot/.cache/copilot-api \
              /home/nonroot/.cache/copilot-sdk \
              /home/nonroot/.config/copilot-api
 
@@ -58,9 +57,9 @@ COPY --from=build --chown=65532:65532 /home/nonroot /home/nonroot
 # HOME is not set in the distroless image config; Docker infers it from
 # /etc/passwd, but not every runtime does. Set it so the XDG lookups in
 # internal/config resolve under /home/nonroot rather than falling back to
-# /tmp/xdg-*. XDG_CACHE_HOME is honoured by internal/config's cache root, by the
-# SDK's os.UserCacheDir() lookup, and by the CLI's own Node loader, so it pins
-# all three cache consumers under /home/nonroot/.cache.
+# /tmp/xdg-*. XDG_CACHE_HOME is honoured by the SDK's os.UserCacheDir() lookup
+# and by the CLI's own Node loader, so it pins both cache consumers under
+# /home/nonroot/.cache.
 # COPILOT_API_ADDR defaults to 127.0.0.1:8080, which makes a published port
 # unreachable; bind all interfaces instead. cmd/copilot-api requires
 # COPILOT_API_KEY for any non-loopback bind, so the container refuses to start

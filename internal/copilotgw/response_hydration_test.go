@@ -21,7 +21,7 @@ import (
 func newHydrationGateway(t *testing.T) *RealGateway {
 	t.Helper()
 	dataDir := t.TempDir()
-	store := sessionstore.New(dataDir, t.TempDir(), t.TempDir())
+	store := sessionstore.New(dataDir, t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

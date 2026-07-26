@@ -192,7 +192,7 @@ func TestResponseRecordGoldenDecodesToRecord(t *testing.T) {
 // store actually writes and reads, not just what json.Marshal does in isolation.
 func TestResponseRecordGoldenSurvivesStore(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

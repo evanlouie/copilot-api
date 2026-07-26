@@ -488,7 +488,7 @@ func TestCloneModelsDeepClonesNestedMetadata(t *testing.T) {
 
 func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	gateway := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	closed := make(chan struct{})
 	close(closed)
@@ -525,7 +525,7 @@ func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
 
 func TestNewRealNormalizesNilLogger(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{}, store, nil)
 	if gw.log == nil {
 		t.Fatal("NewReal left a nil logger; the constructor must install a discard logger")

@@ -103,7 +103,7 @@ func serve(args []string) error {
 			logger.Error("failed to release lifecycle lock", "error", err)
 		}
 	}()
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
 	store.SetRetentionPolicy(configuredRetentionPolicy(cfg))
 	if err := store.Ensure(); err != nil {
 		return err
@@ -185,7 +185,7 @@ func serve(args []string) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", cfg.Addr, "data_dir", cfg.DataDir, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir)
+		logger.Info("listening", "addr", cfg.Addr, "data_dir", cfg.DataDir, "state_dir", cfg.StateDir)
 		errCh <- srv.ListenAndServe()
 	}()
 

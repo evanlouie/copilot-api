@@ -241,12 +241,11 @@ func newSDKTestGateway(t *testing.T, runtime *fakeSDKRuntime, models ...Model) *
 	cfg := config.Config{
 		DataDir:        filepath.Join(root, "data"),
 		StateDir:       filepath.Join(root, "state"),
-		CacheDir:       filepath.Join(root, "cache"),
 		ConfigDir:      filepath.Join(root, "config"),
 		ToolCallTTL:    time.Minute,
 		ModelsCacheTTL: time.Hour,
 	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

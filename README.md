@@ -169,16 +169,15 @@ limitations and intentional differences are:
 | `COPILOT_REQUEST_TIMEOUT`          | `0`                                                  | Optional generation timeout; `0` disables proxy-imposed generation timeouts. Client disconnects and configured timeouts abort/disconnect the upstream SDK session.                                                                                                                            |
 | `COPILOT_MAX_REQUEST_BODY_BYTES`   | `33554432`                                           | Maximum size of a single inbound request, applied uniformly to HTTP bodies and Responses WebSocket frames (32 MiB). Oversized HTTP bodies return HTTP 413; oversized WebSocket frames close the connection with status `1009` (message too big). `0` disables the cap on both transports. |
 | `COPILOT_MAX_TURN_OUTPUT_BYTES`    | `33554432`                                           | Aggregate content and reasoning bytes retained for one model turn. |
-| `COPILOT_RETENTION_MAX_AGE`        | `720h`                                               | Maximum age for retained response/session/cache entries; `0` disables the age quota. |
+| `COPILOT_RETENTION_MAX_AGE`        | `720h`                                               | Maximum age for retained response/session entries; `0` disables the age quota. |
 | `COPILOT_RETENTION_MAX_RESPONSES`  | `10000`                                              | Maximum retained response records; `0` disables the count quota. |
-| `COPILOT_RETENTION_MAX_BYTES`      | `2147483648`                                         | Maximum retained bytes across managed response/session/cache entries; `0` disables the byte quota. |
+| `COPILOT_RETENTION_MAX_BYTES`      | `2147483648`                                         | Maximum retained bytes across managed response/session entries; `0` disables the byte quota. |
 | `COPILOT_WEBSOCKET_IDLE_TIMEOUT`   | `2m`                                                 | Idle timeout for Responses WebSocket connections. A connection closes only after the client has been silent this long while no response is generating; `0` disables it.                                                                                                                       |
 | `COPILOT_WEBSOCKET_MAX_LIFETIME`   | `0`                                                  | Optional hard cap on total Responses WebSocket connection lifetime; `0` (default) disables it.                                                                                                                                                                                               |
 | `COPILOT_WEBSOCKET_PING_INTERVAL`  | `30s`                                                | Server-side ping keepalive interval for Responses WebSocket connections; `0` disables pings.                                                                                                                                                                                                 |
 | `COPILOT_SSE_KEEP_ALIVE_INTERVAL`  | `15s`                                                | Longest an SSE stream may go without a byte on the wire before a `: keep-alive` comment frame is emitted. Keeps a silently-reasoning turn alive through intermediaries that time out idle connections (AWS ALB defaults to 60s, Cloudflare to 100s); `0` disables it.                          |
 | `COPILOT_API_DATA_DIR`             | `$XDG_DATA_HOME/copilot-api`                         | Retained SDK session files and synthetic Chat histories.                                                                                                                                                                                                                                      |
 | `COPILOT_API_STATE_DIR`            | `$XDG_STATE_HOME/copilot-api`                        | Lock file, response records, and pending metadata.                                                                                                                                                                                                                                            |
-| `COPILOT_API_CACHE_DIR`            | `$XDG_CACHE_HOME/copilot-api`                        | Model cache and transient cache files.                                                                                                                                                                                                                                                        |
 | `COPILOT_API_CONFIG_DIR`           | `$XDG_CONFIG_HOME/copilot-api`                       | Isolated Copilot SDK config dir.                                                                                                                                                                                                                                                              |
 | `COPILOT_REASONING_EMISSION`       | `both`                                               | Which reasoning fields the OpenAI-compatible surfaces emit: `both` (default; `reasoning` + `reasoning_content`), `reasoning`, `reasoning_content`, or `off`. `reasoning_details` and Responses reasoning items are emitted whenever the policy is not `off`. Narrow this for clients that render reasoning twice. |
 | `COPILOT_LOG_CONTENT`              | `false`                                              | Opt-in request/response body logging. When `true`, completed request logs include up to 64 KiB each of `request_body` and `response_body`, plus truncation flags when capped, and debug logs include redacted Responses tool catalog counts/names. This can include prompts, responses, tool arguments, tool outputs, and image data; auth headers are not logged. |
@@ -495,7 +494,7 @@ docker image inspect copilot-api --format '{{index .Config.Labels "com.github.co
 | ------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `COPILOT_API_ADDR`  | `0.0.0.0:8080`           | The process default is `127.0.0.1:8080`, which makes a published port silently unreachable. **`COPILOT_API_KEY` is therefore mandatory**: the non-loopback guard refuses to start without it. Override to `127.0.0.1:8080` to restore the unauthenticated loopback posture. |
 | `HOME`              | `/home/nonroot`          | Distroless sets no `HOME`. Without it the XDG lookups fall back to `/tmp/xdg-*` and every mounted volume is ignored.                                                        |
-| `XDG_CACHE_HOME`    | `/home/nonroot/.cache`   | Pins all three cache consumers (see below) under one mountable directory.                                                                                                  |
+| `XDG_CACHE_HOME`    | `/home/nonroot/.cache`   | Pins both CLI cache consumers (see below) under one mountable directory.                                                                                                   |
 
 ### Volumes
 
@@ -510,15 +509,13 @@ process then fails startup with
 | `/home/nonroot/.local/share/copilot-api` | Managed data root                                   |
 | `/home/nonroot/.local/state/copilot-api` | Managed state root                                  |
 | `/home/nonroot/.config/copilot-api`      | Isolated Copilot SDK config dir                     |
-| `/home/nonroot/.cache`                   | Managed cache root **plus** the CLI caches below    |
+| `/home/nonroot/.cache`                   | The CLI caches below (no managed root)              |
 
 ### CLI cache caveat
 
-The whole `.cache` directory is mounted, not just `.cache/copilot-api`, because
-three separate consumers write under it and `read_only: true` leaves none of
-them a fallback:
+The whole `.cache` directory is mounted because two separate consumers write
+under it and `read_only: true` leaves neither a fallback:
 
-- `.cache/copilot-api` — the managed cache root.
 - `.cache/copilot-sdk` — where the Go SDK installs the extracted CLI
   (`os.UserCacheDir()/copilot-sdk`; roughly 150 MB). The mount must be writable
   **and exec-capable**, or the SDK silently returns an empty path and falls back
@@ -526,9 +523,9 @@ them a fallback:
 - `.cache/copilot` — where that CLI's own loader then extracts its bundled
   package and native addons.
 
-Only `.cache/copilot-api` is a managed root, so **`prune` and `purge` never
-touch `.cache/copilot-sdk` or `.cache/copilot`**. Delete the `copilot-cache`
-volume to reclaim their disk use; both are repopulated on the next start.
+Neither is a managed root, so **`prune` and `purge` never touch `.cache`**.
+Delete the `copilot-cache` volume to reclaim its disk use; both directories are
+repopulated on the next start.
 
 The CLI extracts into `XDG_CACHE_HOME` rather than `TMPDIR`, so the compose
 file's default 64 MiB `noexec` `/tmp` tmpfs is sufficient and does not need to

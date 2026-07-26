@@ -89,7 +89,6 @@ jobs:
             home/nonroot/.local/share/copilot-api/ \
             home/nonroot/.local/state/copilot-api/ \
             home/nonroot/.config/copilot-api/ \
-            home/nonroot/.cache/copilot-api/ \
             home/nonroot/.cache/copilot-sdk/; do
             if ! grep -Eq "65532/65532 .* $dir\$" layout.txt; then
               echo "::error::$dir is missing or not owned by 65532 in the image"

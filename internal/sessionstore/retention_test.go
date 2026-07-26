@@ -51,7 +51,7 @@ func TestPruneKeepsSessionReferencedByLiveResponse(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := New(t.TempDir(), t.TempDir(), t.TempDir())
+			store := New(t.TempDir(), t.TempDir())
 			if err := store.Ensure(); err != nil {
 				t.Fatal(err)
 			}
@@ -89,7 +89,7 @@ func TestPruneKeepsSessionReferencedByLiveResponse(t *testing.T) {
 // sessions are all treated as referenced.
 func TestPruneKeepsEverySessionWhenIndexUnreadable(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestPruneKeepsEverySessionWhenIndexUnreadable(t *testing.T) {
 // can be unavailable: it is absent and the rebuild itself fails.
 func TestPruneKeepsSessionsWhenIndexCannotBeBuilt(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestPruneKeepsSessionsWhenIndexCannotBeBuilt(t *testing.T) {
 // no longer exists, making that conversation permanently unresumable.
 func TestDeleteResponseKeepsSessionWhenIndexRemoved(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestDeleteResponseKeepsSessionWhenIndexRemoved(t *testing.T) {
 // succeeds, isolating the unreadable-listing case.
 func TestDeleteResponseKeepsSessionWhenLinkDirUnreadable(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -253,8 +253,8 @@ func TestPruneWithoutEnsureMatchesEnsuredStore(t *testing.T) {
 	t.Parallel()
 	run := func(t *testing.T, ensure bool) []string {
 		t.Helper()
-		dataDir, stateDir, cacheDir := t.TempDir(), t.TempDir(), t.TempDir()
-		seed := New(dataDir, stateDir, cacheDir)
+		dataDir, stateDir := t.TempDir(), t.TempDir()
+		seed := New(dataDir, stateDir)
 		if err := seed.Ensure(); err != nil {
 			t.Fatal(err)
 		}
@@ -269,7 +269,7 @@ func TestPruneWithoutEnsureMatchesEnsuredStore(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		store := New(dataDir, stateDir, cacheDir)
+		store := New(dataDir, stateDir)
 		if ensure {
 			if err := store.Ensure(); err != nil {
 				t.Fatal(err)
@@ -316,7 +316,7 @@ func TestPruneWithoutEnsureMatchesEnsuredStore(t *testing.T) {
 // session, that session becomes collectable in the same pass.
 func TestMaxAgePruneCascadesToSessionOrphanedByResponse(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

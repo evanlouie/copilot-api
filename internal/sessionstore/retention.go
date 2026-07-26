@@ -537,27 +537,6 @@ func (s *Store) scanRetention() (retentionScan, error) {
 		scan.entries = append(scan.entries, item)
 	}
 
-	cacheEntries, err := os.ReadDir(s.CacheDir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return scan, fmt.Errorf("read %s: %w", s.CacheDir, err)
-	}
-	for _, entry := range cacheEntries {
-		path := filepath.Join(s.CacheDir, entry.Name())
-		item, found, err := retainedPathInfo(path, entry)
-		if err != nil {
-			skipped = append(skipped, err)
-			continue
-		}
-		if !found {
-			continue
-		}
-		if entry.Name() == ownershipMarker {
-			scan.fixedBytes += item.bytes
-			continue
-		}
-		scan.entries = append(scan.entries, item)
-	}
-
 	for _, root := range []string{s.DataDir, s.StateDir} {
 		for _, name := range []string{ownershipMarker, "server.lock"} {
 			path := filepath.Join(root, name)

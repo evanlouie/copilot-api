@@ -165,7 +165,7 @@ func TestReasoningAccumulatorResetPreventsTurnLeak(t *testing.T) {
 // SaveResponse -> GetResponse.
 func TestResponsesPersistReasoningItemRoundTrip(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{}, store, nil)
 
 	turn := &TurnResult{

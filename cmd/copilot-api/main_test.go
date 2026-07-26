@@ -37,7 +37,7 @@ func TestIsLoopbackListenAddr(t *testing.T) {
 
 func TestRetentionLoopPrunesIdleExpiredState(t *testing.T) {
 	root := t.TempDir()
-	store := sessionstore.New(filepath.Join(root, "data"), filepath.Join(root, "state"), filepath.Join(root, "cache"))
+	store := sessionstore.New(filepath.Join(root, "data"), filepath.Join(root, "state"))
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -87,9 +87,8 @@ func TestServeAcquiresLifecycleLockBeforeCreatingStorageRoots(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
 	stateDir := filepath.Join(root, "state")
-	cacheDir := filepath.Join(root, "cache")
 	configDir := filepath.Join(root, "config")
-	for key, value := range map[string]string{"COPILOT_API_DATA_DIR": dataDir, "COPILOT_API_STATE_DIR": stateDir, "COPILOT_API_CACHE_DIR": cacheDir, "COPILOT_API_CONFIG_DIR": configDir} {
+	for key, value := range map[string]string{"COPILOT_API_DATA_DIR": dataDir, "COPILOT_API_STATE_DIR": stateDir, "COPILOT_API_CONFIG_DIR": configDir} {
 		t.Setenv(key, value)
 	}
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
@@ -103,7 +102,7 @@ func TestServeAcquiresLifecycleLockBeforeCreatingStorageRoots(t *testing.T) {
 	if err := serve(nil); err == nil {
 		t.Fatal("serve unexpectedly acquired held lifecycle lock")
 	}
-	for _, path := range []string{dataDir, stateDir, cacheDir} {
+	for _, path := range []string{dataDir, stateDir} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("storage root %s was mutated before lifecycle lock: %v", path, err)
 		}
@@ -114,7 +113,6 @@ func TestPruneDryRunOnCleanInstallation(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("COPILOT_API_DATA_DIR", filepath.Join(root, "data"))
 	t.Setenv("COPILOT_API_STATE_DIR", filepath.Join(root, "state"))
-	t.Setenv("COPILOT_API_CACHE_DIR", filepath.Join(root, "cache"))
 	t.Setenv("COPILOT_API_CONFIG_DIR", filepath.Join(root, "config"))
 	if err := prune([]string{"--dry-run"}); err != nil {
 		t.Fatal(err)
@@ -125,13 +123,11 @@ func TestPruneDryRunAndRun(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
 	stateDir := filepath.Join(root, "state")
-	cacheDir := filepath.Join(root, "cache")
 	t.Setenv("COPILOT_API_DATA_DIR", dataDir)
 	t.Setenv("COPILOT_API_STATE_DIR", stateDir)
-	t.Setenv("COPILOT_API_CACHE_DIR", cacheDir)
 	t.Setenv("COPILOT_API_CONFIG_DIR", filepath.Join(root, "config"))
 	t.Setenv("COPILOT_RETENTION_MAX_RESPONSES", "1")
-	store := sessionstore.New(dataDir, stateDir, cacheDir)
+	store := sessionstore.New(dataDir, stateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -162,11 +158,10 @@ func TestPruneDoesNotCreateMissingStateRoot(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
 	stateDir := filepath.Join(root, "state")
-	cacheDir := filepath.Join(root, "cache")
-	for key, value := range map[string]string{"COPILOT_API_DATA_DIR": dataDir, "COPILOT_API_STATE_DIR": stateDir, "COPILOT_API_CACHE_DIR": cacheDir, "COPILOT_API_CONFIG_DIR": filepath.Join(root, "config")} {
+	for key, value := range map[string]string{"COPILOT_API_DATA_DIR": dataDir, "COPILOT_API_STATE_DIR": stateDir, "COPILOT_API_CONFIG_DIR": filepath.Join(root, "config")} {
 		t.Setenv(key, value)
 	}
-	store := sessionstore.New(dataDir, stateDir, cacheDir)
+	store := sessionstore.New(dataDir, stateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -185,11 +180,10 @@ func TestPurgeDoesNotCreateMissingStateRoot(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
 	stateDir := filepath.Join(root, "state")
-	cacheDir := filepath.Join(root, "cache")
-	for key, value := range map[string]string{"COPILOT_API_DATA_DIR": dataDir, "COPILOT_API_STATE_DIR": stateDir, "COPILOT_API_CACHE_DIR": cacheDir, "COPILOT_API_CONFIG_DIR": filepath.Join(root, "config")} {
+	for key, value := range map[string]string{"COPILOT_API_DATA_DIR": dataDir, "COPILOT_API_STATE_DIR": stateDir, "COPILOT_API_CONFIG_DIR": filepath.Join(root, "config")} {
 		t.Setenv(key, value)
 	}
-	store := sessionstore.New(dataDir, stateDir, cacheDir)
+	store := sessionstore.New(dataDir, stateDir)
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +193,7 @@ func TestPurgeDoesNotCreateMissingStateRoot(t *testing.T) {
 	if err := purge([]string{"--yes"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{dataDir, stateDir, cacheDir} {
+	for _, path := range []string{dataDir, stateDir} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("purge left or created %s: %v", path, err)
 		}
@@ -211,9 +205,8 @@ func TestPurgeDryRunAndConfirmed(t *testing.T) {
 	dataDir := filepath.Join(root, "data")
 	t.Setenv("COPILOT_API_DATA_DIR", dataDir)
 	t.Setenv("COPILOT_API_STATE_DIR", filepath.Join(root, "state"))
-	t.Setenv("COPILOT_API_CACHE_DIR", filepath.Join(root, "cache"))
 	t.Setenv("COPILOT_API_CONFIG_DIR", filepath.Join(root, "config"))
-	store := sessionstore.New(dataDir, filepath.Join(root, "state"), filepath.Join(root, "cache"))
+	store := sessionstore.New(dataDir, filepath.Join(root, "state"))
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

@@ -21,7 +21,7 @@ import (
 // pins still held.
 func TestStopDisconnectsWarmSessions(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	var releases atomic.Int32
 	warm := &WarmResponseSession{
@@ -52,7 +52,7 @@ func TestStopDisconnectsWarmSessions(t *testing.T) {
 // be cleaned up.
 func TestTrackWarmSessionAfterStopIsRejected(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	if err := gw.Stop(); err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestTrackWarmSessionAfterStopIsRejected(t *testing.T) {
 // already accounts for, so Stop must not disconnect it a second time.
 func TestWarmSessionUseDeregistersFromGatewayShutdown(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	var releases atomic.Int32
 	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", pinReleases: []func(){func() { releases.Add(1) }}}
@@ -105,7 +105,7 @@ func TestWarmSessionUseDeregistersFromGatewayShutdown(t *testing.T) {
 // flag exists to make safe: pins must be released exactly once.
 func TestWarmSessionDisconnectIsIdempotentUnderConcurrentStop(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	var releases atomic.Int32
 	warm := &WarmResponseSession{responseID: "resp_warm", pinReleases: []func(){func() { releases.Add(1) }}}

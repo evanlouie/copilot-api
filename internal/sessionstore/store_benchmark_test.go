@@ -38,7 +38,7 @@ func benchmarkResponseRecord(id, sessionID string, outputBytes int, items int) R
 
 func benchmarkStore(b *testing.B) *Store {
 	b.Helper()
-	store := New(b.TempDir(), b.TempDir(), b.TempDir())
+	store := New(b.TempDir(), b.TempDir())
 	if err := store.Ensure(); err != nil {
 		b.Fatal(err)
 	}

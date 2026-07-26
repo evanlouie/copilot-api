@@ -30,15 +30,13 @@ services:
       - copilot-api-data:/home/nonroot/.local/share/copilot-api
       - copilot-api-state:/home/nonroot/.local/state/copilot-api
       - copilot-api-config:/home/nonroot/.config/copilot-api
-      # The whole cache directory, not just .cache/copilot-api, because three
-      # different consumers write under it and with read_only: true none of them
-      # can fall back to the rootfs:
-      #   .cache/copilot-api  the managed cache root
+      # The whole cache directory, because two different consumers write under
+      # it and with read_only: true neither can fall back to the rootfs:
       #   .cache/copilot-sdk  where the Go SDK unpacks the embedded CLI (~150 MB)
       #   .cache/copilot      where that CLI extracts its own bundled package
-      # Only .cache/copilot-api is a managed root, so `prune` and `purge` never
-      # touch the other two. Delete this volume to reclaim the CLI's disk use;
-      # it is repopulated on next start.
+      # Neither is a managed root, so `prune` and `purge` never touch them.
+      # Delete this volume to reclaim the CLI's disk use; it is repopulated on
+      # next start.
       - copilot-cache:/home/nonroot/.cache
 
 volumes:

@@ -171,7 +171,7 @@ func TestResponseFallbackWithoutPreviousResponseUsesTranscriptInput(t *testing.T
 
 func TestStreamingResponseContinuationDefaultsMissingResponseID(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestStreamingResponseContinuationDefaultsMissingResponseID(t *testing.T) {
 
 func TestResponseFallbackWithPreviousResponseUsesExtendedToolLabels(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestResponseFallbackWithPreviousResponseUsesExtendedToolLabels(t *testing.T
 
 func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalog(t *testing.T) {
 	t.Parallel()
-	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	store := sessionstore.New(t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
 	}

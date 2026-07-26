@@ -140,7 +140,6 @@ func setLoadEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"COPILOT_API_ADDR",
-		"COPILOT_API_CACHE_DIR",
 		"COPILOT_API_CONFIG_DIR",
 		"COPILOT_API_DATA_DIR",
 		"COPILOT_API_KEY",
