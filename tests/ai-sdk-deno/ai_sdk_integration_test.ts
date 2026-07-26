@@ -15,6 +15,17 @@ const ENABLED = env("COPILOT_API_AI_SDK_DENO_TESTS") === "1";
 const DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_REASONING_EFFORT = "low";
+// Reasoning is only worth asserting on a prompt that actually elicits it, and
+// upstream treats an explicit instruction to think as the trigger. Measured
+// against claude-sonnet-5 at effort=low: this prompt produced a reasoning item
+// on 7 of 7 runs, while "reply with one concise sentence about why
+// 19 * 37 = 703" - what this test used to send - produced none on 3 of 3, and a
+// multi-step word problem without the instruction produced none on 2 of 2.
+//
+// Eliciting reasoning is only to keep the round-trip assertion meaningful; a
+// run where the model declines still passes, because that is the model's choice
+// and not a proxy defect.
+const REASONING_PROMPT = "What is 17 * 24? Think it through.";
 // A 128x128 RGB PNG with colored quadrants and black diagonals. Avoid using a
 // 1x1 fixture here: Copilot's upstream image processor rejects images that are
 // valid PNGs but too small to process as vision input.
@@ -109,6 +120,186 @@ function openAIWithWebSocketFetch(config: TestConfig): {
     }),
     close: () => wsFetch.close(),
   };
+}
+
+type RecordedTurn = {
+  request: Record<string, unknown>;
+  response: Record<string, unknown>;
+};
+
+/**
+ * Wraps the AI SDK's fetch so a test can see the exact bytes the proxy sent
+ * back for the very turn the SDK just parsed.
+ *
+ * This exists so reasoning can be asserted as a *round trip* rather than as a
+ * model behaviour. Whether a model reasons for a given prompt is the model's
+ * choice; conveying whatever it did produce is this proxy's contract. Comparing
+ * two independent calls would be inherently flaky, so the comparison has to be
+ * against the same response.
+ *
+ * Only usable for non-streaming turns: it buffers the body to read it.
+ */
+function openAIWithRecordingFetch(config: TestConfig): {
+  openai: ReturnType<typeof createOpenAI>;
+  recorded: () => RecordedTurn;
+} {
+  let last: RecordedTurn | undefined;
+  const recordingFetch: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    const text = await response.text();
+    last = {
+      request: asRecord(typeof init?.body === "string" ? init.body : undefined),
+      response: asRecord(text),
+    };
+    return new Response(text, {
+      headers: response.headers,
+      status: response.status,
+      statusText: response.statusText,
+    });
+  };
+  return {
+    openai: createOpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.v1BaseURL,
+      fetch: recordingFetch,
+      name: "copilot-api-recorded",
+    }),
+    recorded: () => {
+      if (last == null) {
+        throw new Error("no turn was recorded; the SDK issued no request");
+      }
+      return last;
+    },
+  };
+}
+
+function asRecord(text: string | undefined): Record<string, unknown> {
+  if (text == null) return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed != null && typeof parsed === "object"
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+type BackendReasoning = {
+  items: number;
+  present: boolean;
+  text: string;
+  tokens: number;
+};
+
+type ReasoningTextPart = { text?: unknown };
+
+/** What the proxy actually put on the wire for this turn. */
+function backendReasoningOf(
+  response: Record<string, unknown>,
+): BackendReasoning {
+  const output = Array.isArray(response.output) ? response.output : [];
+  const reasoning = output.filter((item) =>
+    item != null && typeof item === "object" &&
+    (item as { type?: unknown }).type === "reasoning"
+  ) as Array<{ content?: unknown; summary?: unknown }>;
+  const text = reasoning
+    .flatMap((item) => [
+      ...(Array.isArray(item.summary) ? item.summary : []),
+      ...(Array.isArray(item.content) ? item.content : []),
+    ])
+    .map((part: ReasoningTextPart) =>
+      typeof part?.text === "string" ? part.text : ""
+    )
+    .join("");
+  const usage = response.usage as
+    | { output_tokens_details?: { reasoning_tokens?: number } }
+    | undefined;
+  const tokens = usage?.output_tokens_details?.reasoning_tokens ?? 0;
+  return {
+    items: reasoning.length,
+    present: reasoning.length > 0 || tokens > 0,
+    text,
+    tokens,
+  };
+}
+
+type SdkReasoning = { parts: number; text?: string; tokens: number };
+
+/** What the AI SDK made of it. */
+function sdkReasoningOf(result: {
+  reasoning?: unknown;
+  reasoningText?: unknown;
+  usage?: unknown;
+}): SdkReasoning {
+  // The AI SDK nests reasoning tokens under outputTokenDetails. Reading
+  // usage.reasoningTokens instead silently yields undefined on every model.
+  const usage = result.usage as
+    | { outputTokenDetails?: { reasoningTokens?: number } }
+    | undefined;
+  return {
+    parts: Array.isArray(result.reasoning) ? result.reasoning.length : 0,
+    text: typeof result.reasoningText === "string"
+      ? result.reasoningText
+      : undefined,
+    tokens: usage?.outputTokenDetails?.reasoningTokens ?? 0,
+  };
+}
+
+/**
+ * Asserts the proxy conveyed whatever reasoning upstream produced.
+ *
+ * Ground truth is the response the proxy itself wrote for this same turn, so
+ * what is verified is that the proxy's output is faithfully consumable by a real
+ * OpenAI client - a shape contract. It cannot see data the proxy lost before
+ * writing that response, because that response is all a client ever gets.
+ *
+ * The three signals differ in strength, so they are checked separately:
+ *
+ *   - Reasoning text on the wire MUST reach the client. This is the sharp one:
+ *     text written under a key the SDK's parser does not read fails here, the
+ *     same class of defect as an error frame missing sequence_number.
+ *   - A textless reasoning item must at least survive as a reasoning part.
+ *     Upstream legitimately withholds reasoning text, so an empty item is not by
+ *     itself evidence of a bug.
+ *   - Token counts are pass-through arithmetic and the weakest claim: the SDK
+ *     reads reasoning_tokens from the very usage object checked here, so this
+ *     catches only the proxy dropping the field outright.
+ *
+ * When upstream produced nothing there is nothing to convey and the assertion is
+ * skipped rather than failed: a model declining to think about an easy prompt is
+ * the model's choice, not a proxy defect.
+ */
+function assertReasoningRoundTrips(
+  label: string,
+  backend: BackendReasoning,
+  sdk: SdkReasoning,
+): void {
+  if (!backend.present) {
+    console.warn(
+      `${label}: upstream emitted no reasoning for this prompt (0 reasoning items, 0 reasoning tokens), so there was nothing for the proxy to convey; surface assertion skipped.`,
+    );
+    return;
+  }
+  if (backend.text.length > 0) {
+    assert(
+      sdk.text != null && sdk.text.length > 0,
+      `${label}: the response carried ${backend.text.length} characters of reasoning text but the AI SDK surfaced none (reasoningText=${
+        JSON.stringify(sdk.text)
+      }, parts=${sdk.parts}) - the proxy wrote it in a shape the SDK's parser does not read`,
+    );
+  } else if (backend.items > 0) {
+    assert(
+      sdk.parts > 0,
+      `${label}: the response carried ${backend.items} reasoning output item(s) but the AI SDK surfaced no reasoning part (parts=${sdk.parts}) - the item did not survive parsing`,
+    );
+  }
+  if (backend.tokens > 0) {
+    assert(
+      sdk.tokens > 0,
+      `${label}: upstream reported ${backend.tokens} reasoning tokens but the AI SDK saw ${sdk.tokens} - the proxy lost them from usage`,
+    );
+  }
 }
 
 function parseTimeout(raw: string | undefined): number {
@@ -746,11 +937,11 @@ integrationTest(
       return;
     }
 
+    const recorder = openAIWithRecordingFetch(config);
     const result = await generateText({
       abortSignal: AbortSignal.timeout(config.timeoutMs),
-      model: config.openai.responses(model),
-      prompt:
-        "Use the requested reasoning effort and reply with one concise sentence about why 19 * 37 = 703.",
+      model: recorder.openai.responses(model),
+      prompt: REASONING_PROMPT,
       providerOptions: {
         openai: {
           forceReasoning: true,
@@ -765,28 +956,30 @@ integrationTest(
       result.finishReason != null,
       "reasoning effort generateText did not report a finish reason",
     );
-    // Reasoning models should expose reasoning output through one of:
-    // (a) AI SDK reasoning parts, (b) reasoningText, or (c) usage.reasoningTokens.
-    // Failing all three indicates the proxy dropped the upstream reasoning signal.
-    const reasoningText = (result as { reasoningText?: string }).reasoningText;
-    const reasoningParts =
-      (result as { reasoning?: Array<unknown> }).reasoning ?? [];
-    const reasoningTokens =
-      (result.usage as { reasoningTokens?: number } | undefined)
-        ?.reasoningTokens ?? 0;
-    assert(
-      (reasoningText != null && reasoningText.length > 0) ||
-        reasoningParts.length > 0 ||
-        reasoningTokens > 0,
-      `reasoning effort generateText surfaced no reasoning signal (reasoningText=${
-        JSON.stringify(
-          reasoningText,
-        )
-      }, reasoningParts=${reasoningParts.length}, reasoningTokens=${reasoningTokens}, usage=${
-        JSON.stringify(
-          result.usage,
-        )
+
+    const turn = recorder.recorded();
+    // The proxy's own contract: the requested effort reached it, and it
+    // answered with a completed response for the model that was asked for.
+    const sentEffort = (turn.request.reasoning as { effort?: unknown })?.effort;
+    assertEquals(
+      sentEffort,
+      effort,
+      `provider options did not put the effort on the wire (request.reasoning=${
+        JSON.stringify(turn.request.reasoning)
       })`,
+    );
+    assertEquals(
+      turn.response.status,
+      "completed",
+      `response status = ${
+        JSON.stringify(turn.response.status)
+      }, want completed`,
+    );
+
+    assertReasoningRoundTrips(
+      "reasoning effort generateText",
+      backendReasoningOf(turn.response),
+      sdkReasoningOf(result),
     );
   },
 );
@@ -804,11 +997,11 @@ integrationTest(
       return;
     }
 
+    const recorder = openAIWithRecordingFetch(config);
     const result = await generateText({
       abortSignal: AbortSignal.timeout(config.timeoutMs),
-      model: config.openai.responses(`${model}:${effort}`),
-      prompt:
-        "Use the model selector's reasoning effort and reply with one concise sentence about why 17 * 41 = 697.",
+      model: recorder.openai.responses(`${model}:${effort}`),
+      prompt: REASONING_PROMPT,
       providerOptions: {
         openai: {
           forceReasoning: true,
@@ -822,21 +1015,32 @@ integrationTest(
       result.finishReason != null,
       "model suffix reasoning generateText did not report a finish reason",
     );
-    const reasoningText = (result as { reasoningText?: string }).reasoningText;
-    const reasoningParts =
-      (result as { reasoning?: Array<unknown> }).reasoning ?? [];
-    const reasoningTokens =
-      (result.usage as { reasoningTokens?: number } | undefined)
-        ?.reasoningTokens ?? 0;
-    assert(
-      (reasoningText != null && reasoningText.length > 0) ||
-        reasoningParts.length > 0 ||
-        reasoningTokens > 0,
-      `model suffix reasoning generated no reasoning signal (reasoningText=${
-        JSON.stringify(reasoningText)
-      }, reasoningParts=${reasoningParts.length}, reasoningTokens=${reasoningTokens}, usage=${
-        JSON.stringify(result.usage)
+
+    const turn = recorder.recorded();
+    // The selector, not provider options, is what carries the effort here, so
+    // the request must show the suffixed id and no reasoning block at all.
+    assertEquals(
+      turn.request.model,
+      `${model}:${effort}`,
+      "the model selector suffix did not reach the proxy",
+    );
+    assertEquals(
+      turn.request.reasoning,
+      undefined,
+      "provider options set a reasoning block, so this no longer tests the suffix path",
+    );
+    assertEquals(
+      turn.response.status,
+      "completed",
+      `a ${model}:${effort} selector was not accepted (response=${
+        JSON.stringify(turn.response.status)
       })`,
+    );
+
+    assertReasoningRoundTrips(
+      "model suffix reasoning generateText",
+      backendReasoningOf(turn.response),
+      sdkReasoningOf(result),
     );
   },
 );
