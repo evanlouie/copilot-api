@@ -318,7 +318,13 @@ func (r *turnRunner) loop(g *RealGateway) {
 	}
 	defer r.closeStreams()
 	defer r.releasePins()
-	var text string
+	// A turn can contain more than one assistant message (the SDK identifies them
+	// with AssistantMessageData.MessageID), and every message's deltas are
+	// forwarded to the client. The terminal text therefore has to accumulate the
+	// messages instead of holding only the last one, or the result would disagree
+	// with what the client was already shown. Its lifetime matches the reasoning
+	// accumulator's: cleared at the turn start and at the tool-call boundary.
+	var text strings.Builder
 	var reason reasoningAccumulator
 	var usage *openai.Usage
 	var contentBytes int64
@@ -358,7 +364,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			switch d := event.Data.(type) {
 			case *copilot.AssistantTurnStartData:
 				reason.reset()
-				text = ""
+				text.Reset()
 				usage = nil
 				contentBytes = 0
 				reasoningStreamBytes = 0
@@ -421,7 +427,9 @@ func (r *turnRunner) loop(g *RealGateway) {
 					reasoningText = *d.ReasoningText
 				}
 				reasoningBytes := len(reasoningText) + optionalStringByteLen(d.ReasoningOpaque) + optionalStringByteLen(d.EncryptedContent)
-				if int64(len(d.Content)+reasoningBytes)+toolRequestBytes > r.maxOutputBytes {
+				// text already holds this turn's earlier messages, so the guard has to
+				// measure the whole retained turn rather than this message alone.
+				if int64(text.Len()+len(d.Content)+reasoningBytes)+toolRequestBytes > r.maxOutputBytes {
 					r.emitError(openai.Upstream("copilot output exceeded size limit"))
 					r.abort()
 					return
@@ -438,7 +446,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 				}
 				r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
 				if len(d.ToolRequests) > 0 {
-					text = d.Content
+					text.WriteString(d.Content)
 					batch, calls, err := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
 					if err != nil {
 						r.emitError(openai.Upstream(err.Error()))
@@ -446,7 +454,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 						return
 					}
 					r.setBatch(batch)
-					res := r.result(text, reason.resolve(), usage, "tool_calls")
+					res := r.result(text.String(), reason.resolve(), usage, "tool_calls")
 					reason.applyTo(res)
 					res.ResponseToolCalls = calls
 					res.ToolCalls = chatToolCallsFromCaptured(calls)
@@ -458,15 +466,16 @@ func (r *turnRunner) loop(g *RealGateway) {
 					// continuation, so each tool turn must start a fresh reasoning
 					// block. Without this reset the next turn would inherit (or
 					// concatenate) this turn's reasoning when its own consolidated
-					// block is absent.
-					text = ""
+					// block is absent. The same applies to the assistant text: the
+					// continuation turn must not inherit the emitted turn's messages.
+					text.Reset()
 					usage = nil
 					contentBytes = 0
 					reasoningStreamBytes = 0
 					reason.markToolBoundary()
 					stats.reset()
 				} else {
-					text = d.Content
+					text.WriteString(d.Content)
 				}
 			case *copilot.AssistantStreamingDeltaData:
 				stats.observeStreamProgress(d.TotalResponseSizeBytes)
@@ -481,7 +490,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 				_ = r.session.Disconnect()
 				return
 			case *copilot.SessionIdleData:
-				res := r.result(text, reason.resolve(), usage, "stop")
+				res := r.result(text.String(), reason.resolve(), usage, "stop")
 				reason.applyTo(res)
 				r.debug(g, "copilot session idle", append([]any{"finish_reason", res.FinishReason, "final_text_bytes", len(res.Text), "final_text_runes", len([]rune(res.Text)), "final_reasoning_bytes", len(res.Reasoning)}, stats.summaryAttrs()...)...)
 				r.emitResult(res)

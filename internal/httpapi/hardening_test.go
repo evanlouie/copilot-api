@@ -334,6 +334,55 @@ func TestResponseStreamEmitsTerminalTextSuffix(t *testing.T) {
 	}
 }
 
+// TestResponseStreamAcceptsMultiMessageTurnTerminalText covers a turn that
+// produced two assistant messages. Both were streamed to the client, so the
+// terminal text has to cover both. The gateway used to report only the last
+// message, which failed the response after the client had already been shown
+// every delta.
+func TestResponseStreamAcceptsMultiMessageTurnTerminalText(t *testing.T) {
+	response := &openai.Response{ID: "resp_multi", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "Alpha Beta", Output: []openai.ResponseOutputItem{{ID: "msg_multi", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "Alpha Beta"}}}}}
+	channel := make(chan copilotgw.ResponseStreamEvent, 3)
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Alpha "}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Beta"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
+	close(channel)
+	writer := &captureResponseEventWriter{}
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	var deltas strings.Builder
+	for _, event := range writer.events {
+		if event.Type == "response.output_text.delta" {
+			deltas.WriteString(event.Delta)
+		}
+	}
+	if deltas.String() != "Alpha Beta" {
+		t.Fatalf("streamed text = %q, want %q", deltas.String(), "Alpha Beta")
+	}
+	if last := writer.events[len(writer.events)-1]; last.Type != "response.completed" {
+		t.Fatalf("last event = %#v, want response.completed", last)
+	}
+}
+
+// TestResponseStreamRejectsTerminalTextMissingStreamedContent pins the contract
+// the gateway has to satisfy: a terminal text that drops content the client was
+// already shown cannot be reconciled, so the response fails. This is the shape a
+// multi-message turn produced before the turn runner accumulated its messages.
+func TestResponseStreamRejectsTerminalTextMissingStreamedContent(t *testing.T) {
+	response := &openai.Response{ID: "resp_dropped", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "Beta", Output: []openai.ResponseOutputItem{{ID: "msg_dropped", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "Beta"}}}}}
+	channel := make(chan copilotgw.ResponseStreamEvent, 3)
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Alpha "}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Beta"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
+	close(channel)
+	writer := &captureResponseEventWriter{}
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "terminal text does not match streamed content") {
+		t.Fatalf("result = %#v, want a terminal text mismatch failure", result)
+	}
+}
+
 func TestResponseOutputSizeIncludesRawArgumentsAndAnnotations(t *testing.T) {
 	response := &openai.Response{Output: []openai.ResponseOutputItem{
 		{Type: "tool_search_call", ArgumentsJSON: []byte(`{"query":"large"}`)},

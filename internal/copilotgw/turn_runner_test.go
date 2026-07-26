@@ -162,6 +162,47 @@ func awaitTurnError(t *testing.T, r *turnRunner, want string) {
 	}
 }
 
+func awaitTurnResult(t *testing.T, r *turnRunner) *TurnResult {
+	t.Helper()
+	select {
+	case update := <-r.updates:
+		if update.Err != nil {
+			t.Fatalf("update = %#v, want a turn result", update)
+		}
+		turn, ok := update.Value.(*TurnResult)
+		if !ok {
+			t.Fatalf("update value = %T, want *TurnResult", update.Value)
+		}
+		return turn
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not emit a turn result")
+	}
+	return nil
+}
+
+// awaitStreamedText collects the text the client actually saw, up to the
+// terminal event of the response stream.
+func awaitStreamedText(t *testing.T, stream <-chan ResponseStreamEvent) string {
+	t.Helper()
+	var streamed strings.Builder
+	for {
+		select {
+		case ev, ok := <-stream:
+			if !ok {
+				return streamed.String()
+			}
+			switch ev.Kind {
+			case "delta":
+				streamed.WriteString(ev.Delta)
+			case "response", "error":
+				return streamed.String()
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("response stream did not deliver a terminal event")
+		}
+	}
+}
+
 // TestOnResultErrorTerminatesLoop covers the persistence-failure path: a
 // SaveResponse error aborts the SDK session, so no further events can arrive and
 // the loop must exit instead of parking on its event channel forever. Parking
@@ -338,6 +379,80 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 	}
 	batch.Cancel(context.Canceled)
 	close(events.ch)
+}
+
+// TestTurnAccumulatesTextAcrossAssistantMessages covers a turn that produces
+// more than one assistant message (the SDK gives each its own MessageID). Every
+// message's deltas are forwarded to the client, so the turn result has to carry
+// all of them: a result holding only the last message contradicts the stream the
+// client already received, and the Responses encoder rejects a terminal text
+// that does not extend the streamed content.
+//
+// The turn is closed with a tool-call message carrying no content because that
+// is the only terminal event a loop test can drive: the session-idle path
+// disconnects the SDK session, and a runner built for tests has no live
+// JSON-RPC client behind its session handle.
+func TestTurnAccumulatesTextAcrossAssistantMessages(t *testing.T) {
+	broker := toolproxy.NewBroker(time.Minute)
+	defer broker.CancelAll(context.Canceled)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan copilot.SessionEvent, 8)
+	runner, unpinned := newLoopTestRunner(events, time.Minute)
+	runner.rt = rt
+	stream := make(chan ResponseStreamEvent, 8)
+	runner.enableResponseStream(stream, "resp_1", "gpt-test", "", nil, true, false, nil)
+
+	go runner.loop(&RealGateway{})
+	events <- copilot.SessionEvent{Data: &copilot.AssistantTurnStartData{TurnID: "1"}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageStartData{MessageID: "msg_a"}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageDeltaData{MessageID: "msg_a", DeltaContent: "Alpha "}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{MessageID: "msg_a", Content: "Alpha "}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageStartData{MessageID: "msg_b"}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageDeltaData{MessageID: "msg_b", DeltaContent: "Beta"}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{MessageID: "msg_b", Content: "Beta"}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{MessageID: "msg_c", ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}}
+
+	turn := awaitTurnResult(t, runner)
+	if turn.Text != "Alpha Beta" {
+		t.Fatalf("TurnResult.Text = %q, want %q", turn.Text, "Alpha Beta")
+	}
+	if streamed := awaitStreamedText(t, stream); streamed != turn.Text {
+		t.Fatalf("streamed text = %q, terminal text = %q; the terminal text must cover everything the client was shown", streamed, turn.Text)
+	}
+	runner.abort()
+	awaitLoopExit(t, runner, unpinned)
+}
+
+// TestToolCallBoundaryResetsAccumulatedText pins the other end of the
+// accumulator's lifetime. The loop is reused across a client-owned tool-call
+// continuation, so the text emitted with a tool-call result must not leak into
+// the next turn. The continuation here arrives without an AssistantTurnStart
+// event, which makes the tool boundary the only reset keeping the turns apart.
+func TestToolCallBoundaryResetsAccumulatedText(t *testing.T) {
+	broker := toolproxy.NewBroker(time.Minute)
+	defer broker.CancelAll(context.Canceled)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan copilot.SessionEvent, 2)
+	runner, unpinned := newLoopTestRunner(events, time.Minute)
+	runner.rt = rt
+
+	go runner.loop(&RealGateway{})
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{MessageID: "msg_a", Content: "First", ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}}
+	if first := awaitTurnResult(t, runner); first.Text != "First" {
+		t.Fatalf("tool-call turn text = %q, want %q", first.Text, "First")
+	}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{MessageID: "msg_b", Content: "Second", ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_2", Name: "lookup", Arguments: map[string]any{"q": "beta"}}}}}
+	if second := awaitTurnResult(t, runner); second.Text != "Second" {
+		t.Fatalf("continuation turn text = %q, want %q: the previous turn's text leaked across the tool boundary", second.Text, "Second")
+	}
+	runner.abort()
+	awaitLoopExit(t, runner, unpinned)
 }
 
 func TestTurnDebugStatsObserve(t *testing.T) {
