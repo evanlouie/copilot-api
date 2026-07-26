@@ -113,6 +113,160 @@ func TestTurnRunnerRejectsOversizedToolRequestPayload(t *testing.T) {
 	}
 }
 
+// newLoopTestRunner builds a runner whose loop can run without a live copilot
+// client: abortOnce is pre-consumed so abort skips the session RPCs, while
+// signalAbort still releases the loop. The returned channel is closed when the
+// loop releases the runner's sessionstore retention pins.
+func newLoopTestRunner(events <-chan copilot.SessionEvent, idleTimeout time.Duration) (*turnRunner, <-chan struct{}) {
+	r := &turnRunner{
+		ctx:            context.Background(),
+		model:          "gpt-test",
+		kind:           "response",
+		session:        &copilot.Session{SessionID: "sdk_test"},
+		events:         events,
+		maxOutputBytes: config.DefaultMaxTurnOutputBytes,
+		idleTimeout:    idleTimeout,
+		updates:        make(chan toolproxy.TurnFinalResult, 4),
+		closed:         make(chan struct{}),
+		aborted:        make(chan struct{}),
+	}
+	r.abortOnce.Do(func() {})
+	unpinned := make(chan struct{})
+	r.addPin(func() { close(unpinned) })
+	return r, unpinned
+}
+
+func awaitLoopExit(t *testing.T, r *turnRunner, unpinned <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-r.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner loop did not terminate")
+	}
+	select {
+	case <-unpinned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner loop exited without releasing its retention pins")
+	}
+}
+
+func awaitTurnError(t *testing.T, r *turnRunner, want string) {
+	t.Helper()
+	select {
+	case update := <-r.updates:
+		if update.Err == nil || !strings.Contains(update.Err.Error(), want) {
+			t.Fatalf("update = %#v, want error containing %q", update, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("runner did not emit an error containing %q", want)
+	}
+}
+
+// TestOnResultErrorTerminatesLoop covers the persistence-failure path: a
+// SaveResponse error aborts the SDK session, so no further events can arrive and
+// the loop must exit instead of parking on its event channel forever. Parking
+// would strand the goroutine, the active-registry entry, the client's stream and
+// the sessionstore pins that block retention.
+func TestOnResultErrorTerminatesLoop(t *testing.T) {
+	broker := toolproxy.NewBroker(time.Minute)
+	defer broker.CancelAll(context.Canceled)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan copilot.SessionEvent, 1)
+	runner, unpinned := newLoopTestRunner(events, time.Minute)
+	runner.rt = rt
+	stream := make(chan ResponseStreamEvent, 4)
+	runner.enableResponseStream(stream, "resp_1", "gpt-test", "", nil, true, false, nil)
+	runner.setOnResult(func(*TurnResult) error { return openai.Internal("failed to persist response") })
+
+	go runner.loop(&RealGateway{})
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}}
+
+	awaitTurnError(t, runner, "failed to persist response")
+	awaitLoopExit(t, runner, unpinned)
+}
+
+// TestAbortTerminatesLoop pins the self-inflicted abort contract: session.Abort
+// plus Disconnect stops event delivery, so abort has to be an exit gate for the
+// loop. RealGateway.Stop relies on this to drain runners inside its deadline.
+func TestAbortTerminatesLoop(t *testing.T) {
+	runner, unpinned := newLoopTestRunner(make(chan copilot.SessionEvent), time.Minute)
+
+	go runner.loop(&RealGateway{})
+	runner.abort()
+
+	awaitTurnError(t, runner, "aborted")
+	awaitLoopExit(t, runner, unpinned)
+}
+
+// TestTurnRunnerIdleTimeoutFailsTurn covers a wedged or silently dead SDK
+// session: nothing else bounds the wait, so the idle ceiling must fail the turn
+// with a real error rather than let the client hang.
+func TestTurnRunnerIdleTimeoutFailsTurn(t *testing.T) {
+	runner, unpinned := newLoopTestRunner(make(chan copilot.SessionEvent), 20*time.Millisecond)
+
+	go runner.loop(&RealGateway{})
+
+	awaitTurnError(t, runner, "delivered no events")
+	awaitLoopExit(t, runner, unpinned)
+}
+
+func TestTurnRunnerIdleTimeoutStaysAboveToolCallTTL(t *testing.T) {
+	if got := (&RealGateway{}).idleTimeoutForTurns(); got != turnRunnerIdleTimeout {
+		t.Fatalf("default idle timeout = %s, want %s", got, turnRunnerIdleTimeout)
+	}
+	g := &RealGateway{cfg: config.Config{ToolCallTTL: turnRunnerIdleTimeout + time.Hour}}
+	if got := g.idleTimeoutForTurns(); got <= g.cfg.ToolCallTTL {
+		t.Fatalf("idle timeout = %s, want more than the tool-call TTL %s", got, g.cfg.ToolCallTTL)
+	}
+}
+
+// TestRequestCancelTerminatesAttachedLoop covers the originating request going
+// away while the runner still belongs to it.
+func TestRequestCancelTerminatesAttachedLoop(t *testing.T) {
+	runner, unpinned := newLoopTestRunner(make(chan copilot.SessionEvent), time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.ctx = ctx
+
+	go runner.loop(&RealGateway{})
+	cancel()
+
+	awaitTurnError(t, runner, context.Canceled.Error())
+	awaitLoopExit(t, runner, unpinned)
+}
+
+// TestRequestCancelDoesNotTerminateDetachedLoop protects the deliberate
+// behavior asserted by TestTurnRunnerDetachPreventsRequestCancelAbort: a turn
+// parked on client-owned tool calls detaches from its originating request, and
+// the follow-up request re-attaches under a new generation. The cancellation of
+// the long-gone first request must not end the runner. Closing the event stream
+// is then the only remaining exit gate, which also covers the "ended before
+// idle" branch.
+func TestRequestCancelDoesNotTerminateDetachedLoop(t *testing.T) {
+	events := make(chan copilot.SessionEvent)
+	runner, unpinned := newLoopTestRunner(events, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.ctx = ctx
+	runner.detachFromRequestContext()
+
+	go runner.loop(&RealGateway{})
+	cancel()
+	// A later request adopts the runner; its own watchContext owns cancellation.
+	runner.attachToRequestContext()
+
+	select {
+	case <-runner.closed:
+		t.Fatal("cancelling the originating request ended a re-attached runner")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(events)
+	awaitTurnError(t, runner, "event stream ended before idle")
+	awaitLoopExit(t, runner, unpinned)
+}
+
 func TestToolRequestPayloadSizeIncludesArguments(t *testing.T) {
 	requests := []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"payload": strings.Repeat("x", 1024)}}}
 	size, err := toolRequestPayloadSize(requests)

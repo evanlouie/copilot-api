@@ -18,6 +18,47 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 )
 
+const (
+	// turnRunnerIdleTimeout bounds the gap between copilot session events before
+	// the runner loop abandons the turn. It is an unconditional ceiling on runner
+	// lifetime because there is no config knob that can serve as one:
+	// config.RequestTimeout defaults to 0 (disabled) and only ever covers a single
+	// HTTP request, while a runner deliberately outlives its originating request
+	// whenever a turn parks on client-owned tool calls. Without an independent
+	// bound, a wedged or silently dead SDK session holds a goroutine, an
+	// activeRunnerRegistry entry, the client's stream channel and its sessionstore
+	// retention pins forever.
+	//
+	// 15 minutes is far above the gap between events on a healthy turn (the SDK
+	// streams deltas continuously, and even a long reasoning stall is seconds),
+	// and above the default tool-call TTL so a turn parked on client-owned tool
+	// calls is reclaimed by its batch TTL rather than by this ceiling.
+	turnRunnerIdleTimeout = 15 * time.Minute
+	// turnRunnerIdleToolCallSlack keeps the ceiling strictly above the configured
+	// tool-call TTL when an operator raises COPILOT_TOOL_CALL_TTL past
+	// turnRunnerIdleTimeout. A parked turn legitimately sees no events until the
+	// client returns tool outputs or the batch expires, so the ceiling must never
+	// fire before the batch TTL that owns that wait.
+	turnRunnerIdleToolCallSlack = time.Minute
+	// originatingRequestGeneration is the request generation that owns
+	// turnRunner.ctx: the runner is constructed for that request before any
+	// attach/detach can happen.
+	originatingRequestGeneration uint64 = 0
+)
+
+// idleTimeoutForTurns resolves the ceiling the runner loop applies between
+// copilot session events.
+func (g *RealGateway) idleTimeoutForTurns() time.Duration {
+	timeout := turnRunnerIdleTimeout
+	if g == nil {
+		return timeout
+	}
+	if floor := g.cfg.ToolCallTTL + turnRunnerIdleToolCallSlack; floor > timeout {
+		timeout = floor
+	}
+	return timeout
+}
+
 type turnRunner struct {
 	id             string
 	model          string
@@ -28,17 +69,25 @@ type turnRunner struct {
 	retained       string
 	kind           string
 	maxOutputBytes int64
+	idleTimeout    time.Duration
 
 	responseID string
 	created    int64
 	batch      *toolproxy.Batch
 	updates    chan toolproxy.TurnFinalResult
 	closed     chan struct{}
+	// aborted is closed by abort so the loop observes a self-inflicted abort.
+	// session.Abort plus Disconnect stops event delivery for good, so waiting on
+	// the event channel alone would park the loop - and every cleanup it owns -
+	// forever. A nil channel simply never fires, which keeps runners built
+	// directly in tests usable.
+	aborted chan struct{}
 
 	chatStream        chan<- StreamEvent
 	chatDone          <-chan struct{}
 	mu                sync.Mutex
 	abortOnce         sync.Once
+	abortSignalOnce   sync.Once
 	requestDetached   bool
 	requestGeneration uint64
 	responseStream    chan<- ResponseStreamEvent
@@ -80,7 +129,7 @@ func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, sessi
 	if maxOutputBytes <= 0 {
 		maxOutputBytes = config.DefaultMaxTurnOutputBytes
 	}
-	r := &turnRunner{id: id, model: model, ctx: ctx, session: session, rt: rt, events: events.events(), retained: retained, kind: kind, maxOutputBytes: maxOutputBytes, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), created: openai.UnixNow(), store: g.store}
+	r := &turnRunner{id: id, model: model, ctx: ctx, session: session, rt: rt, events: events.events(), retained: retained, kind: kind, maxOutputBytes: maxOutputBytes, idleTimeout: g.idleTimeoutForTurns(), responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), aborted: make(chan struct{}), created: openai.UnixNow(), store: g.store}
 	// The loop is this sink's only reader, so the sink needs its liveness signal
 	// to stop waiting on a runner that has finished (or never started).
 	events.attach(r.closed)
@@ -148,6 +197,9 @@ func (r *turnRunner) detachFromRequestContext() {
 }
 
 func (r *turnRunner) abort() {
+	// Release the loop before touching the SDK: Abort and Disconnect are blocking
+	// RPCs, and the loop must not depend on them returning to reach its cleanup.
+	r.signalAbort()
 	r.abortOnce.Do(func() {
 		r.rt.CancelCurrent(context.Canceled)
 		if batch := r.currentBatch(); batch != nil {
@@ -156,6 +208,16 @@ func (r *turnRunner) abort() {
 		_ = r.session.Abort(context.Background())
 		_ = r.session.Disconnect()
 	})
+}
+
+// signalAbort closes the loop's termination signal exactly once. Nothing else
+// tells the loop that an aborted turn is over: session.Abort followed by
+// Disconnect stops event delivery, so the event channel would simply go quiet.
+func (r *turnRunner) signalAbort() {
+	if r.aborted == nil {
+		return
+	}
+	r.abortSignalOnce.Do(func() { close(r.aborted) })
 }
 
 func (r *turnRunner) setBatch(batch *toolproxy.Batch) {
@@ -243,6 +305,12 @@ func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, respons
 	r.responseMeta = &responseStreamMeta{responseID: responseID, model: model, instructions: instructions, previous: previous, store: store, suppressReasoning: suppressReasoning, done: done}
 }
 
+// loop owns the runner's lifetime. It is the sole owner of every cleanup the
+// rest of the gateway waits on - the closed signal (RealGateway.Stop and the
+// event sink), the active-registry entry, the client stream channels and the
+// sessionstore retention pins - so it must terminate on every path. Each wait
+// it performs is therefore bounded: by the event stream, by a self-inflicted
+// abort, by the originating request's cancellation, or by the idle ceiling.
 func (r *turnRunner) loop(g *RealGateway) {
 	defer close(r.closed)
 	if g != nil && g.active != nil {
@@ -257,141 +325,197 @@ func (r *turnRunner) loop(g *RealGateway) {
 	var reasoningStreamBytes int64
 	stats := newTurnDebugStats()
 	debugEnabled := g != nil && g.log != nil && g.log.Enabled(r.ctx, slog.LevelDebug)
-	for event := range r.events {
-		switch d := event.Data.(type) {
-		case *copilot.AssistantTurnStartData:
-			reason.reset()
-			text = ""
-			usage = nil
-			contentBytes = 0
-			reasoningStreamBytes = 0
-			stats.reset()
-			r.debug(g, "copilot turn started")
-		case *copilot.AssistantMessageStartData:
-			r.debug(g, "copilot assistant message started", "message_id", d.MessageID, "phase", optionalString(d.Phase), "ms_since_turn_start", stats.msSinceTurnStart())
-		case *copilot.AssistantReasoningDeltaData:
-			if contentBytes+reasoningStreamBytes+int64(len(d.DeltaContent)) > r.maxOutputBytes || contentBytes+reason.retainedSizeAfterDelta(d.DeltaContent) > r.maxOutputBytes {
-				r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
-				r.abort()
+	idleTimeout := r.idleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = turnRunnerIdleTimeout
+	}
+	idle := time.NewTimer(idleTimeout)
+	defer idle.Stop()
+	// requestDone is the originating request's cancellation, which is only ours to
+	// act on while this runner still belongs to that request. r.ctx is generation
+	// zero by construction: attachToRequestContext only ever moves the generation
+	// forward, and a turn that parks on client-owned tool calls detaches so the
+	// follow-up request can re-attach with its own context and watchContext.
+	// Capturing the generation here instead would be wrong, because a re-attached
+	// runner would then treat the long-gone original context as its own.
+	var requestDone <-chan struct{}
+	if r.ctx != nil {
+		requestDone = r.ctx.Done()
+	}
+	for {
+		select {
+		case event, ok := <-r.events:
+			if !ok {
+				r.debug(g, "copilot session event stream ended before idle")
+				r.emitError(openai.Upstream("copilot session event stream ended before idle"))
 				return
 			}
-			// Streaming reasoning is dropped by the SDK->wire reduction unless we
-			// thread it through here. Accumulate a plaintext fallback and forward
-			// the delta so encoders can interleave it ahead of content.
-			reason.addDelta(d.DeltaContent, d.ReasoningID)
-			reasoningStreamBytes += int64(len(d.DeltaContent))
-			if d.DeltaContent != "" {
-				if debugEnabled {
-					deltaStats := stats.observeReasoningDelta(d.DeltaContent)
-					r.debugDelta(g, "copilot reasoning delta", d.DeltaContent, deltaStats, "reasoning_id", d.ReasoningID)
-				}
-				r.emitReasoningDelta(d.DeltaContent, d.ReasoningID)
-			}
-		case *copilot.AssistantMessageDeltaData:
-			if d.DeltaContent != "" {
-				if contentBytes+int64(len(d.DeltaContent))+reasoningStreamBytes > r.maxOutputBytes || contentBytes+int64(len(d.DeltaContent))+reason.retainedSize() > r.maxOutputBytes {
-					r.emitError(openai.Upstream("copilot output exceeded size limit"))
-					r.abort()
-					return
-				}
-				contentBytes += int64(len(d.DeltaContent))
-				if debugEnabled {
-					deltaStats := stats.observeContentDelta(d.DeltaContent)
-					r.debugDelta(g, "copilot content delta", d.DeltaContent, deltaStats, "message_id", d.MessageID)
-				}
-				r.emitDelta(d.DeltaContent)
-			}
-		case *copilot.AssistantReasoningData:
-			if contentBytes+reason.retainedSizeAfterConsolidated(d.Content) > r.maxOutputBytes {
-				r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
-				r.abort()
-				return
-			}
-			// Consolidated reasoning block; in tool-call turns this can arrive
-			// after the message. If we already emitted that tool-call turn, do not
-			// let its late final block seed the next continuation turn.
-			reason.addConsolidated(d.Content, d.ReasoningID)
-			r.debug(g, "copilot final reasoning block", "reasoning_id", d.ReasoningID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "ms_since_turn_start", stats.msSinceTurnStart())
-		case *copilot.AssistantMessageData:
-			toolRequestBytes, err := toolRequestPayloadSize(d.ToolRequests)
-			if err != nil {
-				r.emitError(openai.Upstream("failed to measure copilot tool-call output"))
-				r.abort()
-				return
-			}
-			reasoningText := reason.resolve()
-			if d.ReasoningText != nil && *d.ReasoningText != "" {
-				reasoningText = *d.ReasoningText
-			}
-			reasoningBytes := len(reasoningText) + optionalStringByteLen(d.ReasoningOpaque) + optionalStringByteLen(d.EncryptedContent)
-			if int64(len(d.Content)+reasoningBytes)+toolRequestBytes > r.maxOutputBytes {
-				r.emitError(openai.Upstream("copilot output exceeded size limit"))
-				r.abort()
-				return
-			}
-			if d.ReasoningText != nil && *d.ReasoningText != "" {
-				reason.consolidated = *d.ReasoningText
-				reason.deltas = strings.Builder{}
-			}
-			if d.ReasoningOpaque != nil {
-				reason.opaque = *d.ReasoningOpaque
-			}
-			if d.EncryptedContent != nil {
-				reason.encrypted = *d.EncryptedContent
-			}
-			r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
-			if len(d.ToolRequests) > 0 {
-				text = d.Content
-				batch, calls, err := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
-				if err != nil {
-					r.emitError(openai.Upstream(err.Error()))
-					r.abort()
-					return
-				}
-				r.setBatch(batch)
-				res := r.result(text, reason.resolve(), usage, "tool_calls")
-				reason.applyTo(res)
-				res.ResponseToolCalls = calls
-				res.ToolCalls = chatToolCallsFromCaptured(calls)
-				res.PendingBatchID = batch.ID
-				r.emitResult(res)
-				// The runner loop is reused across the client-owned tool-call
-				// continuation, so each tool turn must start a fresh reasoning
-				// block. Without this reset the next turn would inherit (or
-				// concatenate) this turn's reasoning when its own consolidated
-				// block is absent.
+			// Only a delivered event proves the session is still alive, so the
+			// ceiling measures the gap between events rather than turn duration.
+			// Go 1.23+ timers leave no stale value behind Stop, so no drain here.
+			idle.Stop()
+			idle.Reset(idleTimeout)
+			switch d := event.Data.(type) {
+			case *copilot.AssistantTurnStartData:
+				reason.reset()
 				text = ""
 				usage = nil
 				contentBytes = 0
 				reasoningStreamBytes = 0
-				reason.markToolBoundary()
 				stats.reset()
-			} else {
-				text = d.Content
+				r.debug(g, "copilot turn started")
+			case *copilot.AssistantMessageStartData:
+				r.debug(g, "copilot assistant message started", "message_id", d.MessageID, "phase", optionalString(d.Phase), "ms_since_turn_start", stats.msSinceTurnStart())
+			case *copilot.AssistantReasoningDeltaData:
+				if contentBytes+reasoningStreamBytes+int64(len(d.DeltaContent)) > r.maxOutputBytes || contentBytes+reason.retainedSizeAfterDelta(d.DeltaContent) > r.maxOutputBytes {
+					r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
+					r.abort()
+					return
+				}
+				// Streaming reasoning is dropped by the SDK->wire reduction unless we
+				// thread it through here. Accumulate a plaintext fallback and forward
+				// the delta so encoders can interleave it ahead of content.
+				reason.addDelta(d.DeltaContent, d.ReasoningID)
+				reasoningStreamBytes += int64(len(d.DeltaContent))
+				if d.DeltaContent != "" {
+					if debugEnabled {
+						deltaStats := stats.observeReasoningDelta(d.DeltaContent)
+						r.debugDelta(g, "copilot reasoning delta", d.DeltaContent, deltaStats, "reasoning_id", d.ReasoningID)
+					}
+					r.emitReasoningDelta(d.DeltaContent, d.ReasoningID)
+				}
+			case *copilot.AssistantMessageDeltaData:
+				if d.DeltaContent != "" {
+					if contentBytes+int64(len(d.DeltaContent))+reasoningStreamBytes > r.maxOutputBytes || contentBytes+int64(len(d.DeltaContent))+reason.retainedSize() > r.maxOutputBytes {
+						r.emitError(openai.Upstream("copilot output exceeded size limit"))
+						r.abort()
+						return
+					}
+					contentBytes += int64(len(d.DeltaContent))
+					if debugEnabled {
+						deltaStats := stats.observeContentDelta(d.DeltaContent)
+						r.debugDelta(g, "copilot content delta", d.DeltaContent, deltaStats, "message_id", d.MessageID)
+					}
+					r.emitDelta(d.DeltaContent)
+				}
+			case *copilot.AssistantReasoningData:
+				if contentBytes+reason.retainedSizeAfterConsolidated(d.Content) > r.maxOutputBytes {
+					r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
+					r.abort()
+					return
+				}
+				// Consolidated reasoning block; in tool-call turns this can arrive
+				// after the message. If we already emitted that tool-call turn, do not
+				// let its late final block seed the next continuation turn.
+				reason.addConsolidated(d.Content, d.ReasoningID)
+				r.debug(g, "copilot final reasoning block", "reasoning_id", d.ReasoningID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "ms_since_turn_start", stats.msSinceTurnStart())
+			case *copilot.AssistantMessageData:
+				toolRequestBytes, err := toolRequestPayloadSize(d.ToolRequests)
+				if err != nil {
+					r.emitError(openai.Upstream("failed to measure copilot tool-call output"))
+					r.abort()
+					return
+				}
+				reasoningText := reason.resolve()
+				if d.ReasoningText != nil && *d.ReasoningText != "" {
+					reasoningText = *d.ReasoningText
+				}
+				reasoningBytes := len(reasoningText) + optionalStringByteLen(d.ReasoningOpaque) + optionalStringByteLen(d.EncryptedContent)
+				if int64(len(d.Content)+reasoningBytes)+toolRequestBytes > r.maxOutputBytes {
+					r.emitError(openai.Upstream("copilot output exceeded size limit"))
+					r.abort()
+					return
+				}
+				if d.ReasoningText != nil && *d.ReasoningText != "" {
+					reason.consolidated = *d.ReasoningText
+					reason.deltas = strings.Builder{}
+				}
+				if d.ReasoningOpaque != nil {
+					reason.opaque = *d.ReasoningOpaque
+				}
+				if d.EncryptedContent != nil {
+					reason.encrypted = *d.EncryptedContent
+				}
+				r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
+				if len(d.ToolRequests) > 0 {
+					text = d.Content
+					batch, calls, err := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
+					if err != nil {
+						r.emitError(openai.Upstream(err.Error()))
+						r.abort()
+						return
+					}
+					r.setBatch(batch)
+					res := r.result(text, reason.resolve(), usage, "tool_calls")
+					reason.applyTo(res)
+					res.ResponseToolCalls = calls
+					res.ToolCalls = chatToolCallsFromCaptured(calls)
+					res.PendingBatchID = batch.ID
+					if r.emitResult(res) {
+						return
+					}
+					// The runner loop is reused across the client-owned tool-call
+					// continuation, so each tool turn must start a fresh reasoning
+					// block. Without this reset the next turn would inherit (or
+					// concatenate) this turn's reasoning when its own consolidated
+					// block is absent.
+					text = ""
+					usage = nil
+					contentBytes = 0
+					reasoningStreamBytes = 0
+					reason.markToolBoundary()
+					stats.reset()
+				} else {
+					text = d.Content
+				}
+			case *copilot.AssistantStreamingDeltaData:
+				stats.observeStreamProgress(d.TotalResponseSizeBytes)
+				r.debug(g, "copilot stream progress", "total_response_size_bytes", d.TotalResponseSizeBytes, "stream_progress_count", stats.streamProgressCount, "ms_since_turn_start", stats.msSinceTurnStart())
+			case *copilot.AssistantUsageData:
+				usage = usageFromSDK(d)
+				r.debug(g, "copilot usage received", "input_tokens", optionalInt(d.InputTokens), "output_tokens", optionalInt(d.OutputTokens), "reasoning_tokens", optionalInt(d.ReasoningTokens), "ms_since_turn_start", stats.msSinceTurnStart())
+			case *copilot.SessionErrorData:
+				err := openai.Upstream(d.Message)
+				r.debug(g, "copilot session error", "error", d.Message, "ms_since_turn_start", stats.msSinceTurnStart())
+				r.emitError(err)
+				_ = r.session.Disconnect()
+				return
+			case *copilot.SessionIdleData:
+				res := r.result(text, reason.resolve(), usage, "stop")
+				reason.applyTo(res)
+				r.debug(g, "copilot session idle", append([]any{"finish_reason", res.FinishReason, "final_text_bytes", len(res.Text), "final_text_runes", len([]rune(res.Text)), "final_reasoning_bytes", len(res.Reasoning)}, stats.summaryAttrs()...)...)
+				r.emitResult(res)
+				_ = r.session.Disconnect()
+				return
 			}
-		case *copilot.AssistantStreamingDeltaData:
-			stats.observeStreamProgress(d.TotalResponseSizeBytes)
-			r.debug(g, "copilot stream progress", "total_response_size_bytes", d.TotalResponseSizeBytes, "stream_progress_count", stats.streamProgressCount, "ms_since_turn_start", stats.msSinceTurnStart())
-		case *copilot.AssistantUsageData:
-			usage = usageFromSDK(d)
-			r.debug(g, "copilot usage received", "input_tokens", optionalInt(d.InputTokens), "output_tokens", optionalInt(d.OutputTokens), "reasoning_tokens", optionalInt(d.ReasoningTokens), "ms_since_turn_start", stats.msSinceTurnStart())
-		case *copilot.SessionErrorData:
-			err := openai.Upstream(d.Message)
-			r.debug(g, "copilot session error", "error", d.Message, "ms_since_turn_start", stats.msSinceTurnStart())
-			r.emitError(err)
-			_ = r.session.Disconnect()
+		case <-requestDone:
+			if !r.shouldAbortForRequestGeneration(originatingRequestGeneration) {
+				// The turn either parked on client-owned tool calls (detached) or a
+				// later request re-attached to this runner. Either way the originating
+				// request's cancellation is not ours to act on, and because attaching
+				// only ever moves the generation forward it can never become ours
+				// again: stop selecting on an already-closed channel.
+				requestDone = nil
+				continue
+			}
+			r.debug(g, "copilot turn cancelled by the originating request", "ms_since_turn_start", stats.msSinceTurnStart())
+			r.abort()
+			r.emitError(requestContextError(r.ctx))
 			return
-		case *copilot.SessionIdleData:
-			res := r.result(text, reason.resolve(), usage, "stop")
-			reason.applyTo(res)
-			r.debug(g, "copilot session idle", append([]any{"finish_reason", res.FinishReason, "final_text_bytes", len(res.Text), "final_text_runes", len([]rune(res.Text)), "final_reasoning_bytes", len(res.Reasoning)}, stats.summaryAttrs()...)...)
-			r.emitResult(res)
-			_ = r.session.Disconnect()
+		case <-r.aborted:
+			// Abort stops event delivery, so this is the only signal that the turn
+			// is over. It covers gateway shutdown, tool-call batch expiry, and
+			// aborts this loop inflicted on itself.
+			r.debug(g, "copilot turn aborted before completion", "ms_since_turn_start", stats.msSinceTurnStart())
+			r.emitError(openai.Upstream("copilot turn aborted before completion"))
+			return
+		case <-idle.C:
+			r.debug(g, "copilot session idle timeout", "idle_timeout", idleTimeout.String(), "ms_since_turn_start", stats.msSinceTurnStart())
+			r.abort()
+			r.emitError(openai.Upstream(fmt.Sprintf("copilot session delivered no events for %s; turn abandoned", idleTimeout)))
 			return
 		}
 	}
-	r.debug(g, "copilot session event stream ended before idle")
-	r.emitError(openai.Upstream("copilot session event stream ended before idle"))
 }
 
 type turnDebugStats struct {
@@ -710,7 +834,11 @@ func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {
 	}
 }
 
-func (r *turnRunner) emitResult(res *TurnResult) {
+// emitResult publishes a turn result and reports whether the runner loop must
+// stop. The persistence callback can fail (a SaveResponse or disk error), and
+// that failure aborts the SDK session: no further events will ever arrive, so
+// the loop has to exit rather than wait for them.
+func (r *turnRunner) emitResult(res *TurnResult) (stop bool) {
 	r.mu.Lock()
 	// Persistence behavior belongs to exactly one model turn. Taking and
 	// clearing it prevents a streamed tool-call turn's callback from being
@@ -722,7 +850,7 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 		if err := onResult(res); err != nil {
 			r.emitError(err)
 			r.abort()
-			return
+			return true
 		}
 	}
 	r.mu.Lock()
@@ -774,6 +902,7 @@ func (r *turnRunner) emitResult(res *TurnResult) {
 			close(responseStream)
 		}
 	}
+	return false
 }
 
 func (r *turnRunner) emitError(err error) {
