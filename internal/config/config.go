@@ -51,6 +51,18 @@ const (
 	// within one interval instead of at the end of the turn.
 	DefaultSSEKeepAliveInterval = 15 * time.Second
 	DefaultReasoningEmission    = "both"
+	DefaultStrictEnforcement    = StrictEnforcementBestEffort
+)
+
+// Strict enforcement policy values decide what happens when a tool asks for
+// `strict: true` and this proxy cannot compile the schema that would enforce
+// it. "best-effort" is the default because the schemas that reach that path are
+// ones real OpenAI accepts and the clients that set strict send by default;
+// "fail-closed" is for operators who would rather lose the request than serve a
+// guarantee that is not being applied.
+const (
+	StrictEnforcementBestEffort = "best-effort"
+	StrictEnforcementFailClosed = "fail-closed"
 )
 
 // Reasoning emission policy values control which de-facto-standard reasoning
@@ -86,6 +98,7 @@ type Config struct {
 	StateDir               string
 	ConfigDir              string
 	ReasoningEmission      string
+	StrictEnforcement      string
 	LogContent             bool
 	LogLevel               slog.Level
 }
@@ -147,6 +160,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ReasoningEmission, err = parseReasoningEmissionEnv("COPILOT_REASONING_EMISSION", DefaultReasoningEmission); err != nil {
+		return Config{}, err
+	}
+	if cfg.StrictEnforcement, err = parseStrictEnforcementEnv("COPILOT_STRICT_ENFORCEMENT", DefaultStrictEnforcement); err != nil {
 		return Config{}, err
 	}
 	if cfg.LogContent, err = parseBoolEnv("COPILOT_LOG_CONTENT", false); err != nil {
@@ -291,6 +307,19 @@ func parseReasoningEmissionEnv(key, def string) (string, error) {
 		return v, nil
 	default:
 		return "", fmt.Errorf("%s must be one of both, reasoning, reasoning_content, or off", key)
+	}
+}
+
+func parseStrictEnforcementEnv(key, def string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return def, nil
+	}
+	switch v {
+	case StrictEnforcementBestEffort, StrictEnforcementFailClosed:
+		return v, nil
+	default:
+		return "", fmt.Errorf("%s must be one of best-effort or fail-closed", key)
 	}
 }
 

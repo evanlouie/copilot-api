@@ -240,7 +240,9 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	if err != nil {
 		return nil, requestToolsError(err)
 	}
-	g.logUnenforceableStrict(rt, "responses.warm")
+	if err := g.reportUnenforceableStrict(rt, "responses.warm"); err != nil {
+		return nil, err
+	}
 	events := newSessionEventSink(g.log)
 	var session copilotSession
 	var sessionID string

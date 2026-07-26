@@ -46,12 +46,13 @@ func TestStrictToolRequestIsAccepted(t *testing.T) {
 // A strict tool whose schema this proxy cannot compile is accepted and reported
 // rather than rejected.
 //
-// The schemas that reach this path are ones real OpenAI accepts: Draft-07's
-// boolean exclusiveMinimum, which jsonschema-go does not model, and any
-// external $ref, which fails because Resolve is called with no loader - this
-// proxy's own limitation, not something the client did. Since the clients that
-// set strict: true by default send exactly these, a 400 would break working
-// integrations over a guarantee that is best-effort here in the first place.
+// The schemas that reach this path are ones real OpenAI accepts, and the
+// external $ref is this proxy's own limitation on purpose: Resolve is called
+// with no loader because fetching a schema a request names is an SSRF
+// primitive. Since the clients that set strict: true by default send these, a
+// 400 would break working integrations over a guarantee that is best-effort
+// here in the first place - unless the operator asks for one, which
+// TestFailClosedStrictEnforcementRefusesTheRequest covers.
 func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -60,7 +61,6 @@ func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
 	}{
 		{"unresolvable local ref", `{"type":"object","properties":{"city":{"$ref":"#/nope/missing"}}}`},
 		{"external ref", `{"$ref":"https://example.invalid/schema.json"}`},
-		{"draft-07 exclusiveMinimum", `{"type":"object","properties":{"n":{"minimum":1,"exclusiveMinimum":true}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -86,6 +86,133 @@ func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
 				t.Fatalf("validate = %v, want no enforcement for an uncompilable schema", err)
 			}
 		})
+	}
+}
+
+// The external $ref stays unresolved on purpose, so pin that the reason is a
+// compile failure and not a fetch. Handing a loader to Resolve would turn any
+// client that can name a URL into an SSRF primitive against this process's
+// network position, which is not a trade a best-effort guarantee justifies.
+func TestExternalRefIsReportedWithoutBeingFetched(t *testing.T) {
+	t.Parallel()
+	// A host that cannot resolve: if this were ever fetched the test would stall
+	// or fail on the network rather than pass instantly.
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", `{"$ref":"https://example.invalid/schema.json"}`, boolPtr(true))}, openai.ToolScope{})
+	if err != nil {
+		t.Fatalf("an external $ref must not fail the request: %v", err)
+	}
+	if len(rt.UnenforceableStrict) != 1 {
+		t.Fatalf("UnenforceableStrict = %#v, want the unfetched $ref reported", rt.UnenforceableStrict)
+	}
+	if reason := rt.UnenforceableStrict[0].Reason; !strings.Contains(reason, "no loader") {
+		t.Fatalf("reason = %q, want it to say the schema was never loaded", reason)
+	}
+}
+
+// Draft-04 spells an exclusive bound as a boolean flag beside `minimum`, which
+// the Draft 2020-12 model cannot hold, so these tools used to be accepted
+// unenforced purely because of a gap in this proxy's compiler. They are
+// rewritten into the numeric 2020-12 form and enforced for real.
+//
+// Enforcement, not just compilation, is what the assertions pin: a rewrite that
+// dropped the bound would compile happily and quietly enforce nothing, which is
+// the exact failure this is meant to close.
+func TestLegacyExclusiveBoundsAreCompiledAndEnforced(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		schema   string
+		accepted string
+		refused  string
+	}{
+		{
+			name:     "exclusiveMinimum true excludes the bound",
+			schema:   `{"type":"object","properties":{"n":{"type":"number","minimum":1,"exclusiveMinimum":true}}}`,
+			accepted: `{"n":1.5}`,
+			refused:  `{"n":1}`,
+		},
+		{
+			name:     "exclusiveMaximum true excludes the bound",
+			schema:   `{"type":"object","properties":{"n":{"type":"number","maximum":10,"exclusiveMaximum":true}}}`,
+			accepted: `{"n":9}`,
+			refused:  `{"n":10}`,
+		},
+		{
+			// A false flag is Draft-04 for "inclusive", so the bound itself has to
+			// survive the rewrite rather than being dropped along with the flag.
+			name:     "exclusiveMinimum false keeps the inclusive bound",
+			schema:   `{"type":"object","properties":{"n":{"type":"number","minimum":1,"exclusiveMinimum":false}}}`,
+			accepted: `{"n":1}`,
+			refused:  `{"n":0.5}`,
+		},
+		{
+			// The flag can sit anywhere a schema can, so the rewrite has to reach
+			// through $defs and the composition keywords, not just top-level
+			// properties.
+			name:     "nested through $defs and allOf",
+			schema:   `{"type":"object","$defs":{"N":{"type":"number","minimum":1,"exclusiveMinimum":true}},"properties":{"n":{"allOf":[{"$ref":"#/$defs/N"}]}}}`,
+			accepted: `{"n":2}`,
+			refused:  `{"n":1}`,
+		},
+		{
+			// A schema list is a position the walk has to treat as schemas rather
+			// than as data. Draft-07's tuple form of `items` would be the obvious
+			// case, but jsonschema-go enforces nothing for it either way, so
+			// prefixItems is what can actually be asserted.
+			name:     "nested in a prefixItems list",
+			schema:   `{"type":"object","properties":{"pair":{"type":"array","prefixItems":[{"type":"number","minimum":1,"exclusiveMinimum":true}]}}}`,
+			accepted: `{"pair":[2]}`,
+			refused:  `{"pair":[1]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", tc.schema, boolPtr(true))}, openai.ToolScope{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rt.UnenforceableStrict) != 0 {
+				t.Fatalf("UnenforceableStrict = %#v, want a legacy exclusive bound to be enforceable", rt.UnenforceableStrict)
+			}
+			if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(tc.accepted)); err != nil {
+				t.Fatalf("validate(%s) = %v, want conforming arguments to pass", tc.accepted, err)
+			}
+			if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(tc.refused)); err == nil {
+				t.Fatalf("validate(%s) = nil, want the rewritten bound to still constrain", tc.refused)
+			}
+		})
+	}
+}
+
+// The rewrite walks keywords, not every map it can reach, because a schema can
+// legitimately contain an object with an `exclusiveMinimum` member that is data
+// rather than a keyword. Rewriting one of those would change what the client
+// declared.
+func TestLegacyExclusiveBoundRewriteLeavesDataAlone(t *testing.T) {
+	t.Parallel()
+	// A property literally named exclusiveMinimum, plus a default whose value
+	// carries the same member name.
+	const schema = `{"type":"object","properties":{"exclusiveMinimum":{"type":"boolean"},"opts":{"type":"object","default":{"exclusiveMinimum":true,"minimum":1}}},"required":["exclusiveMinimum"]}`
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", schema, boolPtr(true))}, openai.ToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.UnenforceableStrict) != 0 {
+		t.Fatalf("UnenforceableStrict = %#v, want empty", rt.UnenforceableStrict)
+	}
+	if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(`{"exclusiveMinimum":true}`)); err != nil {
+		t.Fatalf("validate = %v, want a property named exclusiveMinimum to be read as a property", err)
+	}
+	if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(`{"exclusiveMinimum":"yes"}`)); err == nil {
+		t.Fatal("a property named exclusiveMinimum must still be type-checked")
+	}
+	// The declared parameters are what the SDK is handed, so the rewrite must
+	// never be visible there either.
+	props, _ := rt.client["lookup"].Parameters["properties"].(map[string]any)
+	opts, _ := props["opts"].(map[string]any)
+	dflt, _ := opts["default"].(map[string]any)
+	if _, ok := dflt["minimum"]; !ok {
+		t.Fatalf("default = %#v, want the client's value untouched", dflt)
 	}
 }
 
