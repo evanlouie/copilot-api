@@ -91,6 +91,9 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 	if len(req.Messages) == 0 {
 		return apierr.InvalidRequest("messages is required", "messages")
 	}
+	if err := ValidateReasoningEffort(req.ReasoningEffort, "reasoning_effort"); err != nil {
+		return err
+	}
 	// The shape of response_format decides which error the client gets: a
 	// malformed object or an undocumented type is a typo, while json_object and
 	// json_schema are the documented-but-unsupported case the table below owns.
@@ -158,6 +161,9 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 		if req.PreviousResponseID == "" {
 			return apierr.InvalidRequest("input is required", "input")
 		}
+	}
+	if err := ValidateReasoningEffort(req.ReasoningEffort, "reasoning_effort"); err != nil {
+		return err
 	}
 	if err := validateUnsupportedFields(req.Raw, alwaysRejectResponseFields); err != nil {
 		return err
@@ -293,6 +299,11 @@ func validateResponsesReasoning(req *ResponsesRequest) error {
 		var effort string
 		if err := json.Unmarshal(raw, &effort); err != nil || effort == "" {
 			return apierr.InvalidRequest("reasoning.effort must be a string", "reasoning.effort")
+		}
+		// The enum is checked before the conflict: a value outside it is wrong on
+		// its own terms, whatever reasoning_effort says.
+		if err := ValidateReasoningEffort(effort, "reasoning.effort"); err != nil {
+			return err
 		}
 		if req.ReasoningEffort != "" && NormalizeReasoningEffort(req.ReasoningEffort) != NormalizeReasoningEffort(effort) {
 			return apierr.InvalidRequest("reasoning.effort conflicts with reasoning_effort", "reasoning.effort")

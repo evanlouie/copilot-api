@@ -588,3 +588,96 @@ func TestValidateChatRejectsAssistantImageParts(t *testing.T) {
 		t.Fatal("expected assistant image content rejection")
 	}
 }
+
+// reasoning effort is an enum this proxy acts on, so a value outside the enum is
+// the reject case of the validation policy: accepting and ignoring it would run
+// the turn at a different effort than the client asked for, with nothing on the
+// wire to say so. Each surface has to name its own param.
+func TestValidateRejectsUnknownReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+		// param is the permissive-mode param; strictParam is the strict-mode one
+		// when strict rejects an enclosing field first (the whole `reasoning`
+		// object is strict-only on Responses).
+		param       string
+		strictParam string
+	}{
+		{
+			name:  "chat reasoning_effort",
+			path:  "chat",
+			body:  `{"model":"gpt-5","reasoning_effort":"banana","messages":[{"role":"user","content":"hi"}]}`,
+			param: "reasoning_effort",
+		},
+		{
+			name:  "responses reasoning_effort",
+			path:  "responses",
+			body:  `{"model":"gpt-5","reasoning_effort":"banana","input":"hi"}`,
+			param: "reasoning_effort",
+		},
+		{
+			name:        "responses reasoning.effort",
+			path:        "responses",
+			body:        `{"model":"gpt-5","reasoning":{"effort":"banana"},"input":"hi"}`,
+			param:       "reasoning.effort",
+			strictParam: "reasoning",
+		},
+		{
+			name:        "responses reasoning.effort ignoring case and padding",
+			path:        "responses",
+			body:        `{"model":"gpt-5","reasoning":{"effort":" Banana "},"input":"hi"}`,
+			param:       "reasoning.effort",
+			strictParam: "reasoning",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, strict := range []bool{false, true} {
+				wantParam := tt.param
+				if strict && tt.strictParam != "" {
+					wantParam = tt.strictParam
+				}
+				err := validateBodyForSurface(t, tt.path, tt.body, strict)
+				if err == nil {
+					t.Fatalf("strict=%t: expected unknown reasoning effort rejection", strict)
+				}
+				apiErr, ok := err.(*apierr.Error)
+				if !ok || apiErr.Kind != apierr.KindInvalidInput || apiErr.Param != wantParam {
+					t.Fatalf("strict=%t: error = %#v, want invalid_request_error param %q", strict, err, wantParam)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsKnownReasoningEfforts(t *testing.T) {
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", " HIGH "} {
+		t.Run(effort, func(t *testing.T) {
+			chat := `{"model":"gpt-5","reasoning_effort":"` + effort + `","messages":[{"role":"user","content":"hi"}]}`
+			if err := validateBodyForSurface(t, "chat", chat, false); err != nil {
+				t.Fatalf("chat reasoning_effort %q: %v", effort, err)
+			}
+			responses := `{"model":"gpt-5","reasoning":{"effort":"` + effort + `"},"input":"hi"}`
+			if err := validateBodyForSurface(t, "responses", responses, false); err != nil {
+				t.Fatalf("responses reasoning.effort %q: %v", effort, err)
+			}
+		})
+	}
+}
+
+func validateBodyForSurface(t *testing.T, surface, body string, strict bool) error {
+	t.Helper()
+	if surface == "chat" {
+		var req ChatCompletionRequest
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatal(err)
+		}
+		return ValidateChatRequest(&req, strict)
+	}
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	return ValidateResponsesRequest(&req, strict)
+}
