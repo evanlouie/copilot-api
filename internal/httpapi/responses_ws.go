@@ -23,9 +23,12 @@ const webSocketWriteTimeout = 30 * time.Second
 
 type webSocketJSONWriter struct {
 	conn *websocket.Conn
-	// ctx is the connection's work context. Every frame is written under it, so
-	// a write to a black-holed peer stops as soon as the connection is torn down
-	// instead of holding mu for the full write timeout past that point.
+	// ctx is the connection's write context, which is deliberately not the
+	// context that bounds the connection's upstream work. Every frame is
+	// written under it, so a write to a black-holed peer stops as soon as the
+	// connection is definitively gone instead of holding mu for the full write
+	// timeout past that point - but cancelling the work does not sever a frame
+	// mid-write. See responsesWebSocket for why the two must stay distinct.
 	ctx context.Context
 	mu  sync.Mutex
 }
@@ -208,32 +211,45 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		parent, cancelLifetime = context.WithTimeout(parent, s.cfg.WebSocketMaxLifetime)
 		defer cancelLifetime()
 	}
-	// connCtx bounds the work this connection starts: in-flight responses and
-	// the gateway producers behind them, the ping and idle watchdogs, and every
-	// frame written back.
+	// Two contexts, because the connection has two independent lifetimes.
 	//
-	// The read loop below deliberately does NOT read with it. coder/websocket
-	// tears the socket down the moment a read context is cancelled
-	// (context.AfterFunc -> Conn.close, see setupReadTimeout), so reading with
-	// connCtx would make cancelling work race the close frame and downgrade
-	// every graceful teardown to an abnormal closure. conn.Close is what wakes
-	// the read loop; connCtx.Err() is what tells it the teardown was ours.
-	connCtx, cancel := context.WithCancel(parent)
-	writer := &webSocketJSONWriter{conn: conn, ctx: connCtx}
+	// connCtx bounds the *work* this connection starts: in-flight responses and
+	// the gateway producers behind them, and the ping and idle watchdogs.
+	// closeWith cancels it first and synchronously, so upstream Copilot turns
+	// stop burning quota immediately rather than after the close handshake's
+	// worst case (5s writing the close frame plus 5s waiting for the reply, the
+	// latter behind the read mutex this connection's own read loop is holding).
+	//
+	// writeCtx bounds *frame writes*, and is deliberately neither connCtx nor
+	// derived from the request. coder/websocket's writeFrame installs a
+	// context.AfterFunc on the write context that calls Conn.close (see
+	// setupWriteTimeout in conn.go), exactly as setupReadTimeout does for reads.
+	// Writing frames under connCtx therefore means that cancelling work while a
+	// frame is in flight closes the socket outright, and the close frame that
+	// follows is dropped by writeFrame's
+	// `select { case <-c.closed: return net.ErrClosed }` - the client sees EOF
+	// rather than a status. writeCtx is cancelled only once conn.Close has
+	// returned, which keeps the handshake intact while still guaranteeing that
+	// no frame write outlives the connection.
+	//
+	// The read loop below deliberately does NOT read with connCtx either, for
+	// the read-side half of the same hazard. conn.Close is what wakes the read
+	// loop; connCtx.Err() is what tells it the teardown was ours.
+	connCtx, cancelWork := context.WithCancel(parent)
+	writeCtx, cancelWrites := context.WithCancel(context.Background())
+	defer cancelWrites()
+	writer := &webSocketJSONWriter{conn: conn, ctx: writeCtx}
 	state := &responsesWebSocketState{lastSeen: time.Now()}
 	var closeOnce sync.Once
 	closeWith := func(status websocket.StatusCode, reason string) {
 		closeOnce.Do(func() {
-			// Cancel before closing. Cancellation is what actually releases the
-			// gateway producers, in-flight turns and watchdogs, and it cannot
-			// block; the close handshake is best-effort cleanup that spends up to
-			// 10s against an unresponsive peer (5s writing the close frame, 5s
-			// waiting for the reply, the latter behind the read mutex this
-			// connection's own read loop is holding). Nothing downstream of a
-			// closeWith call writes to the connection, so no caller depends on
-			// the frame being on the wire before the context dies.
-			cancel()
+			// Order matters in both directions. Cancelling work first is what
+			// makes shutdown latency independent of an unresponsive peer.
+			// Cancelling writes only after the handshake is what keeps the close
+			// frame from being severed by that same cancellation.
+			cancelWork()
 			_ = conn.Close(status, reason)
+			cancelWrites()
 		})
 	}
 	if !s.registerWebSocket(conn, func() { closeWith(websocket.StatusGoingAway, "server shutting down") }) {
@@ -242,7 +258,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer s.unregisterWebSocket(conn)
 	defer closeWith(websocket.StatusNormalClosure, "")
 	if s.cfg.WebSocketPingInterval > 0 {
-		go keepResponsesWebSocketAlive(connCtx, conn, s.cfg.WebSocketPingInterval, closeWith)
+		go keepResponsesWebSocketAlive(connCtx, writeCtx, conn, s.cfg.WebSocketPingInterval, closeWith)
 	}
 	// Enforce the idle timeout from a watchdog rather than the read deadline.
 	// Cancelling an in-flight websocket read tears down the connection, so a
@@ -360,7 +376,12 @@ func watchResponsesWebSocketIdle(ctx context.Context, state *responsesWebSocketS
 	}
 }
 
-func keepResponsesWebSocketAlive(ctx context.Context, conn *websocket.Conn, interval time.Duration, closeWith func(websocket.StatusCode, string)) {
+// keepResponsesWebSocketAlive takes both of the connection's contexts: ctx ends
+// the loop when the connection's work is cancelled, while writeCtx bounds the
+// ping frame itself. A ping is a control frame like any other, so bounding it
+// with ctx would let cancellation close the socket mid-ping and sever the close
+// frame - the same hazard responsesWebSocket documents for data frames.
+func keepResponsesWebSocketAlive(ctx, writeCtx context.Context, conn *websocket.Conn, interval time.Duration, closeWith func(websocket.StatusCode, string)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -368,7 +389,7 @@ func keepResponsesWebSocketAlive(ctx context.Context, conn *websocket.Conn, inte
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			pingCtx, cancel := context.WithTimeout(ctx, webSocketWriteTimeout)
+			pingCtx, cancel := context.WithTimeout(writeCtx, webSocketWriteTimeout)
 			err := conn.Ping(pingCtx)
 			cancel()
 			if err != nil {

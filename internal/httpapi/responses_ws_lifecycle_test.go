@@ -156,21 +156,23 @@ func TestWebSocketShutdownStillCompletesTheCloseHandshake(t *testing.T) {
 // The writer must not outlive the connection it writes to. A frame written to a
 // peer whose socket is black-holed otherwise holds the writer mutex for the
 // full 30s write timeout even though the connection died seconds earlier, which
-// blocks every other frame on the connection behind it.
-func TestWebSocketWriterStopsWhenTheConnectionContextDies(t *testing.T) {
+// blocks every other frame on the connection behind it. The connection's write
+// context - cancelled once conn.Close has returned, not when the connection's
+// work is cancelled - is what bounds that.
+func TestWebSocketWriterStopsWhenTheConnectionIsGone(t *testing.T) {
 	t.Parallel()
-	connCtx, cancelConn := context.WithCancel(context.Background())
-	writer := &webSocketJSONWriter{ctx: connCtx}
+	writeCtx, cancelWrites := context.WithCancel(context.Background())
+	writer := &webSocketJSONWriter{ctx: writeCtx}
 	ctx, cancel := writer.writeContext()
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok || time.Until(deadline) > webSocketWriteTimeout {
 		t.Fatalf("write deadline = %v (ok=%t), want at most %s out", deadline, ok, webSocketWriteTimeout)
 	}
-	cancelConn()
+	cancelWrites()
 	select {
 	case <-ctx.Done():
 	default:
-		t.Fatal("write context outlived the connection context; a write to a dead peer holds the writer mutex for the full write timeout")
+		t.Fatal("write context outlived the connection; a write to a dead peer holds the writer mutex for the full write timeout")
 	}
 }
