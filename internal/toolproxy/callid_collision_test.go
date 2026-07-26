@@ -28,6 +28,7 @@ import (
 // on Call.SDKID, which is what reunites a later SDK tool invocation with the
 // call already published on the wire.
 func TestCollidingSDKToolCallIDsStayIsolatedPerRequest(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 
 	rtA, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)

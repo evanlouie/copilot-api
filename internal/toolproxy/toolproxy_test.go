@@ -16,6 +16,7 @@ import (
 )
 
 func TestRequestToolsNoneUsesSentinel(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, nil, false)
 	if err != nil {
@@ -27,6 +28,7 @@ func TestRequestToolsNoneUsesSentinel(t *testing.T) {
 }
 
 func TestRequestToolsUnsupportedOnlyUsesSentinel(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "custom"}}, false)
 	if err != nil {
@@ -41,6 +43,7 @@ func TestRequestToolsUnsupportedOnlyUsesSentinel(t *testing.T) {
 }
 
 func TestRequestToolsExposePublicNamesAsCustomFilters(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{
 		{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}},
@@ -71,6 +74,7 @@ func TestRequestToolsExposePublicNamesAsCustomFilters(t *testing.T) {
 }
 
 func TestCaptureRequestsUsesPublicToolName(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}}}, false)
 	if err != nil {
@@ -96,6 +100,7 @@ func TestCaptureRequestsUsesPublicToolName(t *testing.T) {
 }
 
 func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -126,6 +131,7 @@ func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
 }
 
 func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -154,6 +160,7 @@ func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
 }
 
 func TestFindByAnyCallIDsIgnoresStaleHistoryIDs(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -185,6 +192,7 @@ func TestFindByAnyCallIDsIgnoresStaleHistoryIDs(t *testing.T) {
 }
 
 func TestFindByAnyCallIDsReturnsAllMatchedLiveIDs(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -219,6 +227,7 @@ func TestFindByAnyCallIDsReturnsAllMatchedLiveIDs(t *testing.T) {
 }
 
 func TestFindByAnyCallIDsRejectsMultipleLiveBatches(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -243,6 +252,7 @@ func TestFindByAnyCallIDsRejectsMultipleLiveBatches(t *testing.T) {
 }
 
 func TestCompletionAfterDeadlineRunsAllExpiryCleanup(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	call := &Call{OpenAIID: "call_1", outCh: make(chan string, 1), errCh: make(chan error, 1)}
@@ -287,6 +297,7 @@ func TestCompletionAfterDeadlineRunsAllExpiryCleanup(t *testing.T) {
 }
 
 func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(10 * time.Millisecond)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -299,7 +310,7 @@ func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
 	if batch.Model != "gpt-test" {
 		t.Fatalf("batch model = %q", batch.Model)
 	}
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
 		if _, err := broker.FindByCallIDs([]string{calls[0].CallID}); err == ErrNotFound {
 			return
 		}
@@ -309,6 +320,7 @@ func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
 }
 
 func TestBatchContextCancellationUnblocksHandler(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -332,12 +344,13 @@ func TestBatchContextCancellationUnblocksHandler(t *testing.T) {
 		if !strings.Contains(got, "canceled") {
 			t.Fatalf("handler error = %q, want cancellation", got)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("handler did not unblock after context cancellation")
 	}
 }
 
 func TestBatchCompleteUnblocksHandler(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	params := json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}}}`)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup", Parameters: params}}}, false)
@@ -369,7 +382,7 @@ func TestBatchCompleteUnblocksHandler(t *testing.T) {
 		if got != "ok" {
 			t.Fatalf("got %q", got)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("handler did not unblock")
 	}
 }
@@ -379,6 +392,7 @@ func TestBatchCompleteUnblocksHandler(t *testing.T) {
 // both handlers with their respective outputs — the core of parallel tool-call
 // support.
 func TestParallelToolCallsRoundTripThroughBatch(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {

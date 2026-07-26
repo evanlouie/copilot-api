@@ -25,6 +25,7 @@ import (
 // A sub-millisecond TTL plus concurrent handlers places the expiry squarely
 // inside the invocation window; the iterations make hitting it reliable.
 func TestInvocationDuringExpiryDoesNotRaceOnCallMap(t *testing.T) {
+	t.Parallel()
 	const (
 		iterations = 150
 		handlers   = 256
@@ -66,6 +67,7 @@ func TestInvocationDuringExpiryDoesNotRaceOnCallMap(t *testing.T) {
 // Proxy-minted call ids make a natural collision vanishingly unlikely, so the
 // shared id is planted directly on both batches' call maps.
 func TestRemoveKeepsCallIDsOwnedByAnotherBatch(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 
 	stale := newBatch(time.Minute, "", "chat", "gpt-test", nil, nil, context.Background())

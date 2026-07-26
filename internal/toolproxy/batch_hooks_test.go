@@ -38,6 +38,7 @@ func expiryHookCount(b *Batch) int {
 // because each unit of it walks the batch's whole call map at close, it makes
 // closing an N-tool turn quadratic in N.
 func TestRegisterDoesNotAccumulateExpiryWork(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	few := registerLikeTurn(broker, 2)
 	many := registerLikeTurn(broker, 64)

@@ -22,6 +22,7 @@ const numericSchema = `{"type":"object","properties":{"count":{"type":"integer",
 // is the reference because internal/toolcatalog already decodes these documents
 // with UseNumber for exactly this reason; the two paths must agree.
 func TestSchemaMapPreservesClientNumbers(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(numericSchema)
 	params, err := schemaMap("lookup", raw)
 	if err != nil {
@@ -40,6 +41,7 @@ func TestSchemaMapPreservesClientNumbers(t *testing.T) {
 // the parameters actually handed to the SDK, so a future caller cannot bypass
 // schemaMap and reintroduce the corruption.
 func TestRequestToolsPreserveClientNumbers(t *testing.T) {
+	t.Parallel()
 	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{{
 		Type:     "function",
 		Function: openai.FunctionTool{Name: "lookup", Description: "look things up", Parameters: json.RawMessage(numericSchema)},
@@ -65,6 +67,7 @@ func TestRequestToolsPreserveClientNumbers(t *testing.T) {
 // invalid-input error naming the tool and the request field rather than a raw
 // encoding/json message about map[string]interface {}.
 func TestSchemaMapRejectsNonObjectParameters(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{`true`, `[]`, `[{"type":"object"}]`, `"object"`, `42`} {
 		_, err := schemaMap("lookup", json.RawMessage(raw))
 		var apiErr *apierr.Error
@@ -84,6 +87,7 @@ func TestSchemaMapRejectsNonObjectParameters(t *testing.T) {
 }
 
 func TestSchemaMapRejectsMalformedParameters(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{`{`, `{"type":}`, `{} {}`, `{"a":1} trailing`} {
 		_, err := schemaMap("lookup", json.RawMessage(raw))
 		var apiErr *apierr.Error
@@ -96,6 +100,7 @@ func TestSchemaMapRejectsMalformedParameters(t *testing.T) {
 // TestSchemaMapDefaultsEmptyParameters keeps the absent-schema behavior, which
 // several tools rely on, unchanged.
 func TestSchemaMapDefaultsEmptyParameters(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{``, `null`, ` null `} {
 		params, err := schemaMap("lookup", json.RawMessage(raw))
 		if err != nil {

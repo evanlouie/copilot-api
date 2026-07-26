@@ -11,6 +11,7 @@ import (
 )
 
 func TestResponseRequestToolsFlattenExtendedResponsesTools(t *testing.T) {
+	t.Parallel()
 	tools := []toolcatalog.NormalizedTool{
 		{Kind: toolcatalog.ToolKindFunction, Name: "multi_tool_use.parallel", Description: "parallel", Parameters: []byte(`{"type":"object","properties":{}}`)},
 		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Description: "patch"},
@@ -45,6 +46,7 @@ func TestResponseRequestToolsFlattenExtendedResponsesTools(t *testing.T) {
 }
 
 func TestCaptureRequestsRehydratesExtendedResponseToolMetadata(t *testing.T) {
+	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{
 		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"},
@@ -81,6 +83,7 @@ func TestCaptureRequestsRehydratesExtendedResponseToolMetadata(t *testing.T) {
 }
 
 func TestResponseRequestToolsRejectSDKAliasCollisions(t *testing.T) {
+	t.Parallel()
 	_, err := FlattenResponsesTools([]toolcatalog.NormalizedTool{
 		{Kind: toolcatalog.ToolKindFunction, Name: "lookup"},
 		{Kind: toolcatalog.ToolKindCustom, Name: "lookup"},
@@ -91,6 +94,7 @@ func TestResponseRequestToolsRejectSDKAliasCollisions(t *testing.T) {
 }
 
 func TestToolChoiceNoneWithExtendedResponsesToolsUsesSentinel(t *testing.T) {
+	t.Parallel()
 	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, true)
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +111,7 @@ func TestToolChoiceNoneWithExtendedResponsesToolsUsesSentinel(t *testing.T) {
 }
 
 func TestRequestToolsRejectUnconfiguredSDKToolRequestsAndInvocations(t *testing.T) {
+	t.Parallel()
 	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +125,7 @@ func TestRequestToolsRejectUnconfiguredSDKToolRequestsAndInvocations(t *testing.
 }
 
 func TestExtendedToolOutputKindMustMatchPendingCall(t *testing.T) {
+	t.Parallel()
 	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -136,6 +142,7 @@ func TestExtendedToolOutputKindMustMatchPendingCall(t *testing.T) {
 }
 
 func TestCustomToolOutputNameMustMatchPendingCallWhenPresent(t *testing.T) {
+	t.Parallel()
 	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -156,6 +163,7 @@ func TestCustomToolOutputNameMustMatchPendingCallWhenPresent(t *testing.T) {
 }
 
 func TestToolSearchOutputToolsDoNotMutateLiveAvailableTools(t *testing.T) {
+	t.Parallel()
 	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
 	if err != nil {
 		t.Fatal(err)
