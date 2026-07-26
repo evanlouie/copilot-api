@@ -1,536 +1,697 @@
-# Remaining Work Plan
+# Review Follow-Up: Completion Record
 
-Resolution plan for issues identified in the code review that were **not** addressed by the
-24 commits on `evlouie/code-review-fixes` (`002cfc9..f33fbd4`).
+This document began life as a forward-looking resolution plan for the 24
+findings that survived the first round of code-review fixes
+(`002cfc9..f33fbd4`). Those findings have since been executed: **35 commits on
+`evlouie/code-review-fixes` (`e9520e2..0fc27a8`)** closed Workstreams A, B, C, D
+and E in full. Workstream F was re-evaluated and **declined**, which the plan
+itself explicitly invited.
 
-Every item below was re-verified against the tree at `f33fbd4` — file and line references are
-current, not carried over from the original review.
+It is now a **completion record**: each item maps to the commit that resolved
+it, the measured evidence that resolution produced, and — where the plan was
+wrong — the correction the executing work forced. What genuinely remains is
+collected in one place, in [Residual backlog](#residual-backlog).
 
-**Scope reminder:** backwards compatibility with this proxy's own past behaviour is explicitly a
-non-goal. Matching the real OpenAI API and the target functionality is the only compatibility
-constraint that matters.
+**Scope reminder, unchanged:** backwards compatibility with this proxy's own
+past behaviour is explicitly a non-goal. Matching the real OpenAI API and the
+target functionality is the only compatibility constraint that matters.
 
 ---
 
 ## Contents
 
+- [The headline outcome](#the-headline-outcome)
+- [Three corrections to the plan](#three-corrections-to-the-plan)
 - [Prioritisation framework](#prioritisation-framework)
-- [Sequencing](#sequencing)
+- [Sequencing — what shipped](#sequencing--what-shipped)
 - [Workstream A — Correctness & data integrity](#workstream-a--correctness--data-integrity)
 - [Workstream B — Hot-path performance](#workstream-b--hot-path-performance)
 - [Workstream C — Transport & protocol polish](#workstream-c--transport--protocol-polish)
 - [Workstream D — Test & release engineering](#workstream-d--test--release-engineering)
 - [Workstream E — Surface reduction](#workstream-e--surface-reduction)
-- [Workstream F — Deferred structural work](#workstream-f--deferred-structural-work)
+- [Workstream F — the decision](#workstream-f--the-decision)
+- [Residual backlog](#residual-backlog)
 - [Definition of done](#definition-of-done)
+
+---
+
+## The headline outcome
+
+The plan opened by claiming nothing remaining was in the P0 "wedges or kills the
+process" class. That claim was wrong, and the work that disproved it is the
+single most valuable thing this cycle produced.
+
+> [!CAUTION]
+> **D2 found a real P0 livelock, fixed in `41a06db`.** A Responses WebSocket
+> client that vanished _without_ a close handshake — a dropped network, a killed
+> client, anything yielding a RST rather than a close frame — left the
+> connection's handler goroutine spinning at full speed **for the life of the
+> process**.
+>
+> `wsjson.Read` failed, but with none of the errors the loop treated as
+> terminal: `coder/websocket` had already closed the connection, so the error
+> was `net.ErrClosed` rather than a `CloseError`, and `connCtx` was still live
+> because nothing had torn the connection down. `net/http` does not cancel a
+> hijacked request's context either. The loop wrote an error frame (which also
+> failed instantly) and read again, forever.
+>
+> The handler never returned, so it never reached `state.close`/`state.wait`:
+> the connection's **warm SDK session stayed connected and its `sessionstore`
+> retention pins stayed held**, on top of burning a core per dead client. A
+> single `-count=1` run of `internal/httpapi` left **three** of these behind,
+> all at the same site, still present after 55 s of retries.
+
+This is the ordinary case, not an exotic one. Clients die without saying goodbye
+all the time.
+
+> [!IMPORTANT]
+> This vindicates the plan's own claim that D4/D2 were the highest-leverage
+> items in the document. Adding `go.uber.org/goleak` to one package found, in
+> **one test run**, a process-lifetime bug that had survived a full manual code
+> review and the entire prior fix cycle. Leak detection is not a hygiene chore;
+> it is the only tool here that observes what the code does after the assertions
+> pass.
+
+---
+
+## Three corrections to the plan
+
+Three items were prescribed wrongly. The executing work caught each, and each is
+recorded here as a correction rather than quietly dropped, because in every case
+the plan's version was plausible and would have been implemented as written.
+
+### B2 — the premise was false
+
+> [!WARNING]
+> The plan claimed `len([]rune(s))` allocates `4×len(s)` bytes that are
+> immediately discarded — "~800 KB per 200 KB response". **It does not.** The Go
+> compiler rewrites `len([]rune(s))` into a rune count, and the two spellings
+> measure identically:
+>
+> ```
+> BenchmarkRuneSliceLen-10        138471 ns/op   1685.00 MB/s   0 B/op   0 allocs/op
+> BenchmarkRuneCountInString-10   138252 ns/op   1687.67 MB/s   0 B/op   0 allocs/op
+> ```
+>
+> There was no hidden 800 KB. The real cost, which `8451210` removed, was an
+> unconditional **O(n) rune scan** of every final assistant message, reasoning
+> block and turn text, plus **854 B / 5 allocs of `[]any` attribute slices per
+> turn event, at `info` level** — because Go evaluates arguments before the
+> call, so the level check inside `r.debug` bought nothing. Gating the three
+> sites behind the `debugEnabled` flag the loop already computes: **139061 ns/op
+> → 0.32 ns/op, 854 B → 0 B, 5 allocs → 0 allocs** with debug off.
+> `utf8.RuneCountInString` was kept as the clearer spelling, not as the fix.
+
+### C2 — the prescribed fix was unsafe
+
+> [!WARNING]
+> The plan said: _"Swap the order: `cancel()` first, then `conn.Close(...)`."_
+> With `coder/websocket` v1.8.15 that severs the TCP connection and races the
+> close frame, because the library installs a `context.AfterFunc` on the read
+> context that calls `Conn.close`.[^wsclose]
+>
+> **Measured:** the naive swap turned `TestServerShutdownClosesActiveWebSockets`
+> from a graceful `StatusGoingAway` close into an **abnormal closure 4 times out
+> of 10**.
+>
+> `0747461` split the two roles instead. `connCtx` is the **work** context and
+> is cancelled first; the read loop reads with the connection's **parent**
+> context and is woken by `conn.Close`, with `connCtx.Err()` telling it that a
+> failed read is our own teardown rather than a client fault. The graceful close
+> frame is preserved and a new test pins it. (That teardown surfaces as
+> `net.ErrClosed` — the same error class as the P0 livelock above, which is not
+> a coincidence.)
+
+### C6 — the prescribed error shape was wrong
+
+> [!WARNING]
+> The plan implied `"type": "rate_limit_error"`. **That is Anthropic's
+> vocabulary and appears nowhere in OpenAI's.** OpenAI puts the exhausted
+> _dimension_ in `type` — `"requests"` or `"tokens"` — and
+> `"rate_limit_exceeded"` in `code`.[^ratelimit] The Copilot SDK throttles
+> requests rather than a token budget, so `8f824a0` emits `type: "requests"`,
+> and `internal/httpapi/errors.go` carries a comment saying why so it cannot
+> drift back.
 
 ---
 
 ## Prioritisation framework
 
-Items are ranked by a single question: **what does the user lose if this is never fixed?**
+Retained because the [Residual backlog](#residual-backlog) is sized with it.
+Items were ranked by a single question: **what does the user lose if this is
+never fixed?**
 
-| Class | Meaning | Response |
-| --- | --- | --- |
-| **Silent wrong data** | The client receives or stores something incorrect with no error | Fix first, always |
-| **Cross-request contamination** | One request can affect another | Fix first, always |
-| **Resource growth** | Unbounded goroutines, memory, or disk under normal use | Fix in the same cycle |
-| **Wasted work** | Correct, but pays a cost proportional to load | Batch into one perf pass |
-| **Ergonomics** | Correct and cheap, but confusing or awkward | Opportunistic |
-
-> [!NOTE]
-> Nothing remaining is in the P0 "wedges or kills the process" class — those were all resolved
-> (`f8a810b`, `aec20e6`, `c79793d`, `4a2a32a`). The highest remaining severity is **silent wrong
-> data**, concentrated in [A1](#a1--reasoning-emission-policy-is-written-into-durable-records) and
-> [A2](#a2--model-controlled-tool-call-ids-are-a-process-global-key).
+| Class                           | Meaning                                                         | Response                 |
+| ------------------------------- | --------------------------------------------------------------- | ------------------------ |
+| **Silent wrong data**           | The client receives or stores something incorrect with no error | Fix first, always        |
+| **Cross-request contamination** | One request can affect another                                  | Fix first, always        |
+| **Resource growth**             | Unbounded goroutines, memory, or disk under normal use          | Fix in the same cycle    |
+| **Wasted work**                 | Correct, but pays a cost proportional to load                   | Batch into one perf pass |
+| **Ergonomics**                  | Correct and cheap, but confusing or awkward                     | Opportunistic            |
 
 ### Effort sizing
 
-Sizes describe **scope and blast radius**, not duration — they are deliberately not calendar
-estimates, since the right pace depends on who picks the work up.
+Sizes describe **scope and blast radius**, not duration — they are deliberately
+not calendar estimates, since the right pace depends on who picks the work up.
 
-| Size | Meaning |
-| --- | --- |
-| **XS** | One-line or one-expression change. No new test needed beyond an assertion |
-| **S** | Single function or file. Localised, one focused regression test |
-| **M** | Several files within one package, or a change that crosses one package boundary. Needs a small test group and a deliberate look at neighbouring invariants |
-| **L** | Crosses multiple packages, or changes a shared type/interface. Needs new test infrastructure and a staged rollout across commits |
-
-A phase's size is the size of its largest item, not the sum — phases are batches of independent
-work, so they parallelise.
+| Size   | Meaning                                                                                                                                                    |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **XS** | One-line or one-expression change. No new test needed beyond an assertion                                                                                  |
+| **S**  | Single function or file. Localised, one focused regression test                                                                                            |
+| **M**  | Several files within one package, or a change that crosses one package boundary. Needs a small test group and a deliberate look at neighbouring invariants |
+| **L**  | Crosses multiple packages, or changes a shared type/interface. Needs new test infrastructure and a staged rollout across commits                           |
 
 ---
 
-## Sequencing
+## Sequencing — what shipped
 
-Phases are ordered by dependency, not just priority. Phase 1 and Phase 2 are independent and can
-run in parallel by different people; Phase 4 has a hard prerequisite on Phase 3.
+Phases 1–5 all shipped. Phase 6's hard prerequisite (the D4 SDK seam) shipped
+too, which is what made a real decision on Phase 6 possible rather than a
+deferral.
 
 ```mermaid
 flowchart TD
-    P1["Phase 1 - Data integrity - A1 to A5 - M"]
-    P2["Phase 2 - Performance pass - B1 to B5 - M"]
-    P3["Phase 3 - Test infrastructure - D1 to D4 - L"]
-    P4["Phase 4 - Transport polish - C1 to C10 - M"]
-    P5["Phase 5 - Surface reduction - E1 to E4 - S"]
-    P6["Phase 6 - Chat adapter - F1 - L - optional"]
-    SEAM["D4 SDK test seam unblocks safe
-    refactor of copilotgw entry points"]
+    P1["Phase 1 - Data integrity
+    A1 to A5 - M
+    SHIPPED - 6 commits"]
+    P2["Phase 2 - Performance pass
+    B1 to B5 - M
+    SHIPPED - 6 commits"]
+    P3["Phase 3 - Test infrastructure
+    D1 to D4 - L
+    SHIPPED - 10 commits"]
+    P4["Phase 4 - Transport polish
+    C1 to C10 - M
+    SHIPPED - 8 commits"]
+    P5["Phase 5 - Surface reduction
+    E1 to E4 - S
+    SHIPPED - 4 commits"]
+    SEAM["D4 SDK test seam - e5ad960
+    copilotgw 60.1 to 71.5 percent
+    prerequisite SATISFIED"]
+    P0["P0 livelock found by goleak
+    fixed in 41a06db"]
+    P6["Phase 6 - Chat adapter
+    F1 - L
+    DECLINED with evidence"]
 
     P1 --> P4
     P2 --> P5
     P3 --> P4
-    P4 --> P6
+    P3 --> P0
     P3 --> SEAM
+    P4 --> P6
     SEAM --> P6
 ```
 
-| Phase | Theme | Effort | Risk | Can ship independently |
-| --- | --- | --- | --- | --- |
-| 1 | Data integrity | M | Medium | Yes |
-| 2 | Performance | M | Low | Yes |
-| 3 | Test infrastructure | L | Low | Yes |
-| 4 | Transport polish | M | Low | Yes |
-| 5 | Surface reduction | S | Low | Yes |
-| 6 | Chat adapter | L | **High** | No — needs 3 and 4 |
+| Phase | Theme               | Effort | Commits | Outcome                                                        |
+| ----- | ------------------- | ------ | ------- | -------------------------------------------------------------- |
+| 1     | Data integrity      | M      | 6       | Shipped                                                        |
+| 2     | Performance         | M      | 6       | Shipped, every fix measured                                    |
+| 3     | Test infrastructure | L      | 10      | Shipped; found the P0 livelock                                 |
+| 4     | Transport polish    | M      | 8       | Shipped; C2 and C6 corrected                                   |
+| 5     | Surface reduction   | S      | 4       | Shipped; 2 env vars deleted, 2 behaviours added                |
+| 6     | Chat adapter        | L      | 0       | **Declined** — see [Workstream F](#workstream-f--the-decision) |
 
 ---
 
 ## Workstream A — Correctness & data integrity
 
-### A1 — Reasoning-emission policy is written into durable records
+| ID     | Commit(s)            | Outcome                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A1** | `99f760a`            | Suppression is now purely an edge concern. `responseParams.suppressReasoning` and `ResponseRequest.SuppressReasoning` are deleted; the gateway always builds the complete response. `internal/httpapi` resolves the policy once per request and applies `filterResponseReasoning` at the single stream funnel, and `GET /v1/responses/{id}` filters the stored record **on read**.         |
+| **A2** | `7842784`            | `ensureCall` always mints `"call_" + uuid.NewString()`. The model's id is kept on `Call.SDKID` and indexed in a new **per-batch** `Batch.bySDKID`, so colliding model ids can no longer reach across requests in either direction.                                                                                                                                                         |
+| **A3** | `0eb98d1`, `bec6806` | `warmSessionRegistry` sits alongside `active`/`pending` with the same close-then-drain contract; `use` and `Disconnect` both deregister. Register-after-close is **rejected**, not absorbed, so a shutdown is visible on the wire rather than hidden behind a `WarmResponseResult` whose session is dead. The warm-input question was then decided explicitly rather than documented away. |
+| **A4** | `6c2d1c3`            | Counters became plain `int64` with no `omitempty` on both `Usage` and `ResponseUsage`; the Responses details objects became non-pointer values. Optionality moved up one level and stays there. `usageFromSDK` returns `nil` unless the SDK reported at least one token count, and otherwise fills all three.                                                                              |
+| **A5** | `4e5076f`, `680ed71` | A trailing `:suffix` is a reasoning effort **only** when it names a canonical effort; anything else stays on the model id. The canonical enum moved to `internal/openai/reasoning_effort.go` as the single ordered set and `copilotgw` dropped its duplicate rank table and normalizer. Explicit `reasoning_effort` and `reasoning.effort` are now validated against it.                   |
 
-**Where:** `internal/httpapi/responses.go:188` → `internal/copilotgw/types.go:186` →
-`internal/copilotgw/turn_runner.go:1155` → persisted at `internal/copilotgw/responses.go:137`
+**A1's regression was real, and the plan's diagnosis of it was right.** The test
+failed against the parent commit with the stored record having lost its
+reasoning item entirely — `f6dcb69` had made a single filtered object flow to
+both the wire and the store, exactly as the plan's `[!WARNING]` predicted.
 
-`SuppressReasoning` is derived from the `COPILOT_REASONING_EMISSION` **presentation** knob, then
-threaded into the gateway and consulted inside `responseFromTurn`:
+**A2's consequence was demonstrated, not asserted.** Against the pre-fix tree,
+both concurrent requests published `tool_call_id: "call_1"`; with that first
+assertion relaxed so the consequence was visible, request A's `tool_call_id`
+resolved to **request B's batch**.
 
-```go
-if !p.suppressReasoning {
-    if item, ok := reasoningOutputItem(turn); ok {
-        resp.Output = append(resp.Output, item)
-    }
-}
-```
+**A3's second half was a judgement call, made deliberately.** `bec6806` chose to
+consume the persisted input on resume rather than document the loss: losing
+input a client was told was accepted is a correctness bug, not a best-effort
+optimisation, and the data was already on disk. The crux is that "delivered" and
+"buffered" input cannot be inferred apart, so a durable
+`ResponseRecord.InputPending` marker was added (default `false` = already
+delivered, so v0–2 records migrate into v3 unchanged). It is replayed on exactly
+one path: the branch where the previous record's own SDK session resumed
+successfully. Two limits are documented at `pendingInputPrompt` — only text
+survives, and the flag is not cleared once consumed.
 
-`responseForTurn(params, turn)` returns that object and `recordFromResponse` persists **the same
-object**. So running with `COPILOT_REASONING_EMISSION=off` permanently strips reasoning from stored
-records; flipping the knob back does not restore it for existing responses.
+> [!NOTE]
+> A4 and `bec6806` both changed the persisted record format, and the golden
+> tests failed as designed. A4's `goldenResponseRecordJSON` was byte-for-byte
+> unchanged because its record already sets every usage member; a new
+> `goldenSparseUsageRecordJSON` was added to pin the sparse case the
+> fully-populated golden could never catch on its own. That is the golden doing
+> its job in both directions.
 
-> [!WARNING]
-> Commit `f6dcb69` ("build each response once") made this **worse**, not better. Previously two
-> objects were built and only one was persisted; now there is a single filtered object flowing to
-> both the wire and the store. This is a genuine regression introduced by an otherwise-correct
-> refactor, and it is the strongest argument for fixing A1 before any further response-pipeline work.
-
-**Fix:** make suppression purely an edge concern. The gateway should always build the complete
-response including reasoning; `internal/httpapi` already has `filterResponseReasoning`
-(`responses_stream.go:408`) and should be the only place it is applied. Delete
-`suppressReasoning` from `responseParams` and `ResponseRequest`, and apply the filter to
-`GET /v1/responses/{id}` responses too so read-back is consistent.
-
-**Verify:** a test that persists a turn with emission `off`, flips the config to `both`, and asserts
-`GET` returns the reasoning. Effort **S** · Risk **Low**.
-
----
-
-### A2 — Model-controlled tool-call IDs are a process-global key
-
-**Where:** `internal/toolproxy/toolproxy.go:623`
-
-```go
-openaiID := sdkID
-if openaiID == "" {
-    openaiID = "call_" + uuid.NewString()
-}
-```
-
-`sdkID` is `copilot.AssistantMessageToolRequest.ToolCallID` — produced by the **upstream model**, not
-by this proxy. It becomes the key in the process-global `Broker.byCall` map. Backends behind Copilot
-vary; several non-OpenAI models emit low-entropy or sequential IDs (`call_1`, `tool_0`).
-
-Two concurrent requests that both produce `call_1` collide: the second `Register` silently steals the
-mapping, and `FindByCallIDs` can return **another client's batch**. Best case an arity error; worst
-case (same arity) client A's tool result is delivered into client B's conversation.
-
-> [!CAUTION]
-> This is the only remaining **cross-request contamination** path. It is low-probability but the
-> failure mode is a confidentiality violation, not a crash.
-
-**Fix:** always mint a proxy-owned `"call_" + uuid.NewString()`. Keep the SDK id only in
-`Call.SDKID` for the reverse mapping back into the SDK. Commit `c79793d` already unexported
-`Batch.calls`, so the blast radius is contained to this file.
-
-**Verify:** a test registering two batches whose SDK ids collide, asserting each resolves to its own
-batch. Effort **S** · Risk **Low** — but read `CompleteToolOutputsWithSetup` first, since the client
-echoes these ids back and the reverse lookup must still work.
-
----
-
-### A3 — Warm sessions escape gateway shutdown accounting
-
-**Where:** `internal/copilotgw/real.go:84-88`, `internal/copilotgw/warm_response.go`
-
-```go
-active := g.active.closeAndSnapshot()
-pending := g.pending.drain()
-```
-
-`activeRunnerRegistry`'s doc comment claims it tracks "every runner… so gateway shutdown can abort
-and await all SDK activity". A `WarmResponseSession` has no runner — it is owned entirely by
-`internal/httpapi`'s per-connection state. The gateway has **zero visibility** into an SDK session it
-created, so `Stop()` neither aborts nor awaits it.
-
-Related, from the original review and still open: a warm session's buffered input lives only in
-`WarmResponseSession.input`. On the normal resume path only the *current* request's prompt is sent,
-so a warmed input is silently lost across a dropped WebSocket or a restart.
-
-**Fix:** register warm sessions in a gateway-owned registry with the same lifecycle contract as
-runners. Then decide the input question explicitly — either consume `record.InputText` on resume, or
-document that warm input is best-effort and does not survive a disconnect.
-
-Effort **M** · Risk **Medium** (touches the WebSocket connection lifecycle).
-
----
-
-### A4 — Partial `usage` objects violate the required-integer contract
-
-**Where:** `internal/openai/models.go:36`, `:47`; producer `internal/copilotgw/turn_runner.go`
-(`usageFromSDK`)
-
-```go
-PromptTokens     *int64 `json:"prompt_tokens,omitempty"`
-InputTokens      *int64 `json:"input_tokens,omitempty"`
-```
-
-`usageFromSDK` emits a non-nil `*Usage` when *either* input or output tokens are present, so the wire
-can carry `{"usage":{"completion_tokens":12,"total_tokens":12}}` — a usage object missing the
-required `prompt_tokens`. `input_tokens_details` is never populated at all.
-
-Impact: Codex CLI deserialises `response.completed` usage into non-optional integers (a missing key
-is a serde failure that aborts the turn); cost middleware doing `prompt_tokens + completion_tokens`
-gets a null-arithmetic error.[^usage]
-
-**Fix:** make the counters plain `int64` without `omitempty` and emit the object all-or-nothing —
-`NewResponseUsage` already returns `nil` when all three are nil (`models.go`), so apply that gate
-per-object rather than per-field. Always populate both details structs (zeroed) when the parent is
-emitted. Keep `*Usage`/`*ResponseUsage` at the parent so absence stays expressible.
-
-> [!IMPORTANT]
-> This changes the persisted record format. `internal/sessionstore/record_golden_test.go` pins those
-> bytes and **will** fail — that is the golden test doing its job. Update the literals deliberately
-> and call the format change out in the commit message, exactly as `3a4fd40` did.
-
-Effort **S** · Risk **Low**.
-
----
-
-### A5 — `ParseModelSelector` splits on the last colon unconditionally
-
-**Where:** `internal/openai/model_selector.go:21`
-
-```go
-separator := strings.LastIndex(raw, ":")
-```
-
-Any model id containing a colon is silently truncated. `model: "openrouter/mistral-7b:free"` becomes
-model `openrouter/mistral-7b` with effort `free`, and the client gets a confusing "model not found"
-for a name it never sent. The suffix is also never validated against the known effort set, so
-`gpt-5:banana` is forwarded verbatim to the SDK.
-
-**Fix:** only treat the suffix as a reasoning effort when it matches a known effort token; otherwise
-leave the model id intact. Separately validate `reasoning_effort` / `reasoning.effort` against the
-allowed set and return a 400 naming the right `param`.
-
-Effort **S** · Risk **Low**.
+A5's cost is stated on the function: a model-specific effort outside the enum
+can no longer be spelled as a suffix. That is the intended trade — an
+unrecognised token is now a name, not a control. A hypothetical real model named
+`foo:low` would be unreachable, and the resolution order is documented rather
+than left ambiguous.
 
 ---
 
 ## Workstream B — Hot-path performance
 
-> [!TIP]
-> Land B1–B5 as one "performance pass" commit series with benchmarks committed **first**, so the
-> improvement is measured rather than asserted. `internal/httpapi` already has benchmark files to
-> follow as a pattern; `internal/copilotgw` has none, which is why these regressions went unnoticed.
+Benchmarks landed **first**, in `98d1ab0`, so every fix below is reported as a
+measured delta against a committed baseline rather than an assertion.
+`internal/copilotgw`, `internal/sessionstore` and `internal/toolproxy` had no
+benchmark files at all, which is why these regressions went unnoticed.
 
-### B1 — Model catalog deep-cloned on every lookup
+All figures: darwin/arm64 (Apple M1 Max), `-benchmem`, median of 6.
 
-**Where:** `internal/copilotgw/models.go:50,61,79,97,105`; `internal/copilotgw/images.go:439,462`
+| ID     | Commit    | Measured outcome                                                                                                                                                                                                                                                                                 |
+| ------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **B1** | `a14b4cf` | `FindModelCacheHit` **78873 → 1665 ns/op**, 1201 → 25 allocs (135170 → 2688 B/op). `ModelLookupsPerRequest` 235063 → 5119 ns/op, **405 KB → 8 KB** per image-carrying request. `ListModels` is ~4% slower (it now takes `cache.mu` twice) and allocates exactly as before.                       |
+| **B2** | `8451210` | **139061 ns/op → 0.32 ns/op**, 854 B → 0 B, 5 → 0 allocs with debug off. See [the correction](#b2--the-premise-was-false).                                                                                                                                                                       |
+| **B3** | `14f760b` | Large-record save (4 MiB) **37.0 → 17.5 ms**, 2913 → 563 allocs, **23.6 MB → 11.3 MB** per save. Small-record save unchanged in time (it is fsync-bound) and allocates 42% fewer bytes but 62 more objects — a streamed token decode makes more small allocations when there is nothing to skip. |
+| **B4** | `b41389c` | Closing a 128-tool turn **691474 → 485085 ns/op** (~30% cheaper), 1583 → 1317 allocs, **705362 → 405062 B/op**. `BenchmarkBrokerRegisterRepeat` 870 → 766 ns/op, 2 → 1 allocs.                                                                                                                   |
+| **B5** | `594a07b` | Correctness, not speed. `{"enum":[9007199254740993]}` was silently re-encoding as `…992` and `{"maximum":1e21}` as `1e+21`. Now decoded with `UseNumber`, matching `toolcatalog.CanonicalRawJSON`, which had always done this.                                                                   |
 
-`findModel` calls `refreshModels`, which on a **cache hit** runs `cloneModels(cache.models)` while
-holding `cache.mu`, then linear-scans for one id. `cloneModels` deep-copies every model including a
-recursive clone of each nested `Metadata` map.
+B1's whole risk is keeping the id index consistent with `cache.models`, so that
+was made structural: `setModelsLocked` assigns both fields in one critical
+section and is the only writer of either.
+`TestModelIndexStaysConsistentAcrossRefreshPaths` drives every path that can
+replace the catalog and fails loudly when the rebuild is weakened.
 
-`findModel` runs at least twice per request (`ValidateModel`, `requestReasoningEffort`) and once more
-*per message containing images*. With a ~40–60 model catalog that is thousands of allocations per
-request to answer "does model X exist", serialised behind the cache mutex.
+B3 rejected both alternatives the plan suggested, with reasons:
+`Store.deletedIDs` is not a tombstone set (it is only populated while a pin is
+held, so it cannot answer for a record deleted before this process started), and
+deriving `previousSession` from the `.links` index means a `ReadDir` plus a
+`Stat` per session on every save — trading a bounded cost for one that grows
+with the store. Reading four header fields answers both exactly. Two deliberate
+divergences are documented at the call site (a record with a corrupt tail is now
+healed rather than stranded; duplicate object names resolve first-wins).
 
-**Fix:** add `lookupModel(id) (Model, bool)` that takes the lock, finds the single entry, and clones
-only that one. Build a `map[string]int` index at refresh time to drop the linear scan. Keep
-`cloneModels` for `ListModels`, which genuinely needs the whole set.
+B5 also fixed a leaked internal error: `schemaMap(true)` used to hand the client
+`"json: cannot unmarshal bool into Go value of type map[string]interface {}"`,
+unclassified. It now returns `apierr.InvalidRequest` naming the offending tool
+and the `tools` request field.
 
-Effort **S** · Risk **Low** · Expected: ~2 allocations per lookup instead of ~n×metadata.
-
-### B2 — `len([]rune(...))` evaluated unconditionally as debug-log arguments
-
-**Where:** 4 sites in `internal/copilotgw/*.go`
-
-Go evaluates arguments before the call, so the level check inside `debug` buys nothing. `[]rune(s)`
-allocates `4×len(s)` bytes that are immediately discarded — ~800 KB per 200 KB response, three times
-per turn, **at `info` level**.
-
-**Fix:** replace with `utf8.RuneCountInString` (zero-alloc) and gate the expensive call sites behind
-the `debugEnabled` flag the loop already computes.
-
-Effort **S** · Risk **None**.
-
-### B3 — `SaveResponse` read-modify-writes the full record
-
-**Where:** `internal/sessionstore/store.go:358`
-
-Every save first `ReadFile`s and unmarshals the previous record to test one boolean and read
-`previousSession`, then marshals and writes the new one — under `s.mu`, with two fsyncs. With a
-32 MiB turn cap that is a 32 MiB read plus parse on the request hot path per turn.
-
-**Fix:** the tombstone check does not need the body. Keep an in-memory tombstone set (`deletedIDs`
-already exists) or write tombstones as a zero-byte marker testable with one `stat`. For
-`previousSession`, note the retention link index added in `20ecf77` can answer this from a directory
-listing.
-
-Effort **M** · Risk **Medium** — interacts with the tombstone and retention-link invariants from
-`20ecf77`/`7bf1749`. Re-run those regression tests deliberately.
-
-### B4 — `Batch.expireHooks` grows unbounded within a turn
-
-**Where:** `internal/toolproxy/toolproxy.go:67`, `:586`, `:596`, `:686`
-
-`Broker.Register` appends a removal hook **every** call, and `Register` is invoked once per
-`CaptureRequests` *and once per `handleInvocation`*. An N-tool parallel turn accumulates N+2
-identical `Remove` closures, each doing an O(|calls|) map walk at expiry — quadratic in tool-call
-count for a long agent loop.
-
-**Fix:** register the removal hook exactly once (a `sync.Once` or a `registered bool` on `Batch`), or
-replace the slice with a single `onExpire func(*Batch)` set at construction.
-
-Effort **S** · Risk **Low**.
-
-### B5 — `schemaMap` round-trips JSON Schema without `UseNumber`
-
-**Where:** `internal/toolproxy/toolproxy.go:358-364`
-
-```go
-params := map[string]any{}
-if err := json.Unmarshal(raw, &params); err != nil {
-```
-
-Every JSON number in a client's tool schema becomes a `float64` and is re-marshalled by the SDK.
-`{"maximum": 1e21}` re-encodes as `1e+21`; `{"enum":[9007199254740993]}` becomes `…992`. The model
-then sees a schema the client did not write.
-
-The codebase already knows the fix — `CanonicalRawJSON` in `internal/toolcatalog` explicitly calls
-`dec.UseNumber()` for exactly this reason. The two paths are simply inconsistent.
-
-**Fix:** use `json.NewDecoder(bytes.NewReader(raw))` + `UseNumber()`. Also reject non-object
-`parameters` with a proper `apierr.InvalidRequest` rather than letting a raw Go unmarshal error
-(`"json: cannot unmarshal bool into Go value of type map[string]interface {}"`) reach the client.
-
-Effort **S** · Risk **Low** — this is really a correctness fix wearing a performance hat.
+> [!NOTE]
+> B4 is only partly closed. Growth is still superlinear because `Register`
+> republishes the batch's whole call-id set on each of its N+1 calls — a
+> **separate** O(N²) term, in `Register` itself rather than in expiry. See
+> [Residual backlog](#residual-backlog).
 
 ---
 
 ## Workstream C — Transport & protocol polish
 
-Individually small; batch them. Ordered by user impact.
+| ID      | Commit(s) | Outcome                                                                                                                                                                                                                                                                                                                                                        |
+| ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **C1**  | `a7453b0` | `requestContext` always derives with `context.WithCancel`. A `CancelFunc` whose meaning depends on which transport called it is not a usable contract. Pre-fix, every early return in `handleWebSocketResponseCreate` stranded a gateway goroutine blocked on a send nobody would read.                                                                        |
+| **C2**  | `0747461` | **Corrected** — see [above](#c2--the-prescribed-fix-was-unsafe). Roles split rather than order swapped.                                                                                                                                                                                                                                                        |
+| **C3**  | `0747461` | `connCtx` threaded into `webSocketJSONWriter`; the write context is now a 30 s child of `connCtx`, so it is bounded by both. Pre-fix a frame to a black-holed peer held the writer mutex for the full 30 s even when the connection had been cancelled seconds earlier.                                                                                        |
+| **C4**  | `dcf7dde` | The mux is wrapped in a `ResponseWriter` that converts a 404/405 into the standard envelope via `writeErrorObject`. It only rewrites a response whose `Content-Type` is not already JSON — the exact discriminator between `net/http`'s routing defaults and a handler's deliberate 404. Both bodies match the real API rather than being invented.[^errshape] |
+| **C5**  | `9cd3820` | `GET`/`DELETE /v1/responses/{id}` registered as a wildcard, read via `r.PathValue("id")`, validated against `openai.ValidResponseID`. Pre-fix, `GET /v1/responses/%2E%2E` returned 404 having handed the gateway an id of `".."`. A malformed id is now a **400** naming param `response_id`, which is what the real API returns.                              |
+| **C6**  | `8f824a0` | **Corrected** — see [above](#c6--the-prescribed-error-shape-was-wrong). `KindRateLimit` → 429 with a transport-neutral `RetryAfter`; `KindUnavailable` → 503, used for `WarmResponse`'s "gateway is shutting down", which had been a 502.                                                                                                                      |
+| **C7**  | `c1dc663` | `: keep-alive` comment frames on an idle SSE stream, `COPILOT_SSE_KEEP_ALIVE_INTERVAL` default 15 s.[^proxy] The ticker runs at half the interval and only writes when the stream is actually idle, so a busy stream carries no keep-alives and the worst-case gap is one and a half intervals.                                                                |
+| **C8**  | `80160aa` | `stream_outcome` on the access line, with three values: `completed`, `failed`, `abandoned`. The HTTP status stays 200 (it is correctly 200 once committed) but the record's **severity** now follows the outcome, so a failed stream is an ERROR line and an abandoned one a WARN.                                                                             |
+| **C9**  | `a7453b0` | Folded into C1: `getResponse`/`deleteResponse` now bound their store reads with `COPILOT_REQUEST_TIMEOUT` like every other handler.                                                                                                                                                                                                                            |
+| **C10** | `1929ee1` | `logprobs`/`top_logprobs` relaxed to accept-and-ignore, matching `include: ["message.output_text.logprobs"]` on the other surface. `logprobs: false` keeps its allow predicate — it asks for nothing.                                                                                                                                                          |
 
-| ID | Issue | Where | Fix | Effort |
-| --- | --- | --- | --- | --- |
-| **C1** | `requestContext` returns a **no-op** `CancelFunc` when `RequestTimeout <= 0` (the default). Harmless on SSE (net/http cancels on return) but on WebSocket the parent is `connCtx`, so every early return leaks a producer goroutine and its 32-slot channel until the client disconnects | `internal/httpapi/middleware.go:46-51` | Always return a real `context.WithCancel` so `cancel()` is meaningful on every transport | S |
-| **C2** | `closeWith` blocks on the WebSocket close handshake (up to ~10 s) **before** cancelling `connCtx`, and `closeOnce.Do` serialises other callers behind it. Shutdown takes ~10 s per connection against a 20 s budget | `internal/httpapi/responses_ws.go:202-205` | Swap the order: `cancel()` first, then `conn.Close(...)`. Cancellation is what stops upstream work; the handshake is best-effort cleanup | S |
-| **C3** | WebSocket writer uses `context.Background()`, so a write to a black-holed client holds the writer mutex for the full 30 s even though `connCtx` died seconds earlier | `internal/httpapi/responses_ws.go:38,49` | Thread `connCtx` in and derive the deadline from it | S |
-| **C4** | `404`/`405` return Go's plain-text defaults, not OpenAI JSON envelopes. Clients that unconditionally `.json()` an error body throw a parse error — common when someone hits `/v1/embeddings` | `internal/httpapi/server.go` (no custom handler) | Wrap the mux to convert non-JSON 404/405 into `apierr` envelopes | S |
-| **C5** | Response ids are read from `r.URL.Path` (**decoded**) while `ServeMux` routes on `EscapedPath()`, so `%2E%2E` reaches the gateway. Neutralised downstream by `safeName`, but the transport is relying on an invariant it does not own — and it rejects legitimately encoded ids | `internal/httpapi/responses.go:221,234` | Register `GET/DELETE /v1/responses/{id}` and use `r.PathValue("id")`, validated against the real id grammar | S |
-| **C6** | No 429 in the error taxonomy; upstream throttling degrades to 502 `server_error`. The official SDKs implement backoff keyed on 429 + `Retry-After` and will retry a 502 on a generic schedule instead | `internal/apierr/apierr.go` (no `KindRateLimit`) | Add the kind + a `RetryAfter` field; emit the header in `WriteError`. GitHub Copilot rate-limits aggressively, so this has real operational value | S |
-| **C7** | No SSE keep-alive. A reasoning-heavy turn can go minutes without a byte; ALB (60 s) and Cloudflare (100 s) idle timeouts will drop it[^proxy] | `internal/openai` SSE writer, now in `httpapi` | Periodic `: keep-alive\n\n` comment frame; also gives dead-peer detection | S |
-| **C8** | Streaming failures are never logged and record as `200 OK`, because headers were committed before the failure. An upstream 502 storm is indistinguishable from healthy traffic | `internal/httpapi/responses.go`, `chat.go` | Log the terminal stream outcome; consider surfacing it in `requestLogMetadata` so the access line reflects it | S |
-| **C9** | `getResponse`/`deleteResponse` pass `r.Context()` straight through, ignoring `RequestTimeout` unlike every other handler | `internal/httpapi/responses.go` | Wrap with `requestContext` for consistency (depends on C1) | XS |
-| **C10** | `logprobs: true` is a hard 400 while `include: ["message.output_text.logprobs"]` is accept-and-ignore. Under the policy established in `9ea5821`/`cc28306` both are "missing optional data" and should behave the same | `internal/openai/validation.go` | Relax `logprobs` to accept-and-ignore, matching `include` | XS |
+C7 required a real concurrency change, not just a ticker: two writers now share
+one `http.ResponseWriter`, so `SSEWriter` grew a mutex and every frame goes
+through a single `writeFrame` that takes it, or two writers would interleave
+halves of two frames into one unparseable event. The `stop` func returned by
+`KeepAlive` waits for the goroutine before returning, which is what makes
+`defer stop()` safe against `requestLoggingMiddleware` reading the byte counter
+the instant the handler returns.
+
+C8's Chat path needed different handling from Responses: Chat has no single
+terminal point (its write-error returns are scattered through the event loop),
+so it defaults to `abandoned` on entry and the two terminal paths overwrite it.
+The panic path works out because the metadata is last-write-wins.
 
 > [!NOTE]
-> C1 and C2 are the only two with a resource-leak or shutdown-latency consequence. If the batch has
-> to be split, take those first.
+> C10 was superseded within the same cycle. It moved `logprobs`/`top_logprobs`
+> into the strict-only rejection table; `846871a` (E2) then deleted strict mode
+> entirely, so both fields are now simply never rejected, and
+> `RequestedLogprobs` drives the unhonoured-control debug line. The end state is
+> the one C10 wanted, reached by a shorter path.
+
+C6 has an honest gap, recorded in its own commit body: no pre-fix failing
+assertion exists and none could, because the taxonomy had no way to spell "429"
+— an assertion about a 429 does not compile against the parent. The concrete
+pre-fix observation was that `rg StatusTooManyRequests internal/` found nothing.
 
 ---
 
 ## Workstream D — Test & release engineering
 
-### D1 — Flaky wall-clock test
+### D1 — Flaky wall-clock tests · `54abe94`
 
-**Where:** `cmd/copilot-api/main_test.go:53-60`
+Three tests gated a `t.Fatal` on a short wall-clock budget. Two were made
+genuinely deterministic:
 
-```go
-go runRetentionLoop(ctx, store, slog.Default(), time.Millisecond)
-deadline := time.Now().Add(100 * time.Millisecond)
-for time.Now().Before(deadline) { ... }
-```
+- `TestRetentionLoopPrunesIdleExpiredState` — `runRetentionLoop` took an
+  `onSweep` hook (nil in production, mirroring the existing `modelsFetcher`
+  seam), so the test blocks on a prune the loop reports as finished and then
+  asserts on what that prune did.
+- `TestRefreshModelsDeduplicatesConcurrentForcedRefreshes` — moved into a
+  `testing/synctest` bubble, where `synctest.Wait` returns only once every other
+  goroutine is durably blocked, which is exactly the precondition the assertion
+  needs.
 
-A 100 ms budget for a goroutine to be scheduled, tick, stat the filesystem, and delete a file — with
-`t.Fatal` on miss. This will fail intermittently on a loaded CI runner.
+> [!NOTE]
+> The third was **not** made deterministic, and the commit says so.
+> `TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating` had its idle
+> budget widened from 30 ms to **250 ms**, which is _wider_, not deterministic —
+> its idle timeout doubles as the budget for accepting the socket and scheduling
+> the read loop. The watchdog's actual rules are pinned deterministically
+> instead, in `internal/httpapi/responses_ws_idle_test.go`, which drives
+> `watchResponsesWebSocketIdle` under a `testing/synctest` fake clock with no
+> socket involved.
 
-**Fix:** give the retention loop a completion signal (a channel or an injected hook) and block on it
-with a multi-second timeout. `internal/httpapi/hardening_test.go` already demonstrates the right
-pattern — `newFailureLogSampler` takes `now` as a parameter, making its window test fully
-deterministic. Effort **S**.
+### D2 — Goroutine-leak detection · `fc5e272`, `41a06db`
 
-### D2 — No goroutine-leak detection
+`go.uber.org/goleak` with a `TestMain` in the four packages whose goroutines own
+an SDK session, a parked tool handler, or a retention pin that only that
+goroutine releases: `internal/httpapi`, `internal/copilotgw`,
+`internal/toolproxy`, `internal/sessionstore`. Only **two** ignores were needed,
+both in `internal/httpapi` and both for `net/http`'s own client-side connection
+pool; each carries a comment naming the loop and why it is not ours. The other
+three verify with no ignores at all.
 
-The service's central risk is leaked SDK sessions and parked tool-call handlers — exactly what leak
-detection catches. There are 18 `go func(` sites across the test files and nothing verifies they
-drain.
+Eight further packages were probed and are clean but deliberately not wired up:
+they start no long-lived goroutines, so the check would be inert there.
 
-**Fix:** add `go.uber.org/goleak` with `TestMain` + `goleak.VerifyTestMain` in `internal/httpapi` and
-`internal/copilotgw`, ignoring known background loops. Effort **S** · high value given
-`f8a810b`/`aec20e6` were both leak-adjacent.
+The payoff was immediate and is described in
+[The headline outcome](#the-headline-outcome).
 
-### D3 — No `t.Parallel()` anywhere
+### D3 — `t.Parallel()` · `fb09b70`, `a330ad0`, `fd6aecf`, `62fe47a`, `650c8d1`
 
-Zero occurrences across ~16k lines of tests, so `-race` observes very little real concurrency and the
-green race runs are weaker evidence than they look.
+Rolled out package by package in five commits, riskiest last, each independently
+revertible. The point was never wall-clock: it is that `-race` now observes
+these packages actually running concurrently, so hidden shared state shows up as
+a race rather than as an ordering coincidence. Verified with `-race -count=8`
+(`-count=10` for `copilotgw`).
 
-**Fix:** opt in package by package, starting with the pure-function packages (`openai`,
-`toolcatalog`, `hydration`). Do **not** parallelise tests that mutate process env
-(`cmd/copilot-api/main_test.go`, `internal/config`). Effort **M**.
+Every exception is sequential **with a comment saying why**:
 
-### D4 — The gateway↔SDK seam is structurally untestable
+| Package                              | Sequential exception                                                                                                                                                                                 |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/copilot-api`, `internal/config` | Not parallelised at all — they mutate the process environment via `t.Setenv`                                                                                                                         |
+| `internal/copilotgw`                 | `TestResolvePromptFetchesRemoteImage`, `TestWarmResolvedImageIsReusedWithoutRefetch` swap the package-level `imageHTTPClient`                                                                        |
+| `internal/httpapi`                   | `TestWebSocketReadLoopEndsWhenTheClientVanishesWithoutAClose` (uses `goleak.IgnoreCurrent`); `TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating` (CPU contention is what used to break it) |
+| `internal/sessionstore`              | The hand-written-shapes table in `TestSaveResponseHeaderAgreesWithTheFullRecord`                                                                                                                     |
 
-**Where:** 17 hand-written fake gateways in `internal/httpapi` stub at the *gateway* interface
+That last one is the exercise finding exactly the hazard it exists to find:
+those subtests all write and read the same `"z"` record path, and parallelising
+them made them read each other's bytes.
 
-Consequence, measured at review time: `internal/httpapi` scored 77% while every entry point in
-`internal/copilotgw/chat.go` scored **0%**. `Chat`, `StreamChat`, `CreateResponse`, `WarmResponse`,
-`prepareChatTurn`, `prepareResponseTurn` had no test executing them. The fakes are also frequently
-tautological — returning a hardcoded `"ok"` and asserting `"ok"` appears in the body.
+`a330ad0` also widened three `toolproxy` wall-clock waits from 1 s to 5 s, since
+running the suite concurrently makes a 1 s budget tighter for no benefit.
+Nothing about what they assert changed.
 
-Additionally, every fake embeds a **nil** `copilotgw.Gateway`, so a new interface method surfaces as a
-nil-deref inside `net/http` rather than a clear failure.
+### D4 — The gateway↔SDK seam · `9b0749e`, `e5ad960`
 
-> [!IMPORTANT]
-> D4 is the highest-leverage item in this entire document. It is a prerequisite for
-> [F1](#f1--chat-completions-as-an-adapter-over-responses) and it is why the P0 concurrency bugs in
-> `turn_runner.go` survived to production review. Commits `aec20e6` and `f6dcb69` had to hand-roll
-> one-off harnesses because no seam existed.
+`9b0749e` replaced the embedded **nil** `copilotgw.Gateway` in all 17
+hand-written fakes with `unimplementedGateway`, whose methods panic naming
+themselves. A test drives a misroute through the real mux and asserts the
+recovered panic log identifies `Gateway.CreateResponse`. No fake needed a new
+override, which confirms none of them were silently reaching an unimplemented
+method.
 
-**Fix:** introduce a fake at the **SDK** boundary — a stub `copilot.Session`/client that `NewReal`
-can be constructed against — so the real gateway code executes under test. Keep the handler-level
-fakes for HTTP contract tests but stop treating them as gateway coverage. Replace the embedded nil
-interface with a base struct whose methods `panic("unexpected call to X")` so misroutes name
-themselves.
+`e5ad960` did the substantive half, as a **type-level extraction only** — no
+control flow changed:
 
-Effort **L** · Risk **Low** (test-only) · Unblocks Phase 6.
+- `copilotSession` — the four things the gateway does with an SDK session (`ID`,
+  `Send`, `Abort`, `Disconnect`). The id is a method because `*copilot.Session`
+  already has a `SessionID` field.
+- `sdkSessionOpener` plus a `RealGateway.sessionOpener` field, nil in
+  production, mirroring the existing `modelsFetcher` seam.
+- `wrapSDKSession` keeps "no session and no error" a nil interface, so existing
+  `session == nil` guards keep working.
+
+The tests then run the **real** `RealGateway` — real model cache, prompt
+resolution, session filesystem, tool broker, turn runner and `sessionstore` —
+with only the runtime replaced.
+
+`internal/copilotgw` coverage **60.1% → 71.5%**:
+
+| Entry point           | Before | After |
+| --------------------- | ------ | ----- |
+| `prepareChatTurn`     | 0.0%   | 73.7% |
+| `Chat`                | 0.0%   | 89.5% |
+| `StreamChat`          | 0.0%   | 77.3% |
+| `prepareResponseTurn` | 0.0%   | 73.3% |
+| `CreateResponse`      | 0.0%   | 76.9% |
+| `WarmResponse`        | 0.0%   | 58.6% |
+| `StreamResponse`      | 39.2%  | 66.7% |
 
 ---
 
 ## Workstream E — Surface reduction
 
-| ID | Issue | Where | Resolution |
-| --- | --- | --- | --- |
-| **E1** | `COPILOT_API_CACHE_DIR` is **inert**. Nothing outside `config`/`sessionstore` reads `CacheDir`; the model cache is purely in-memory and the embedded CLI installs under `XDG_CACHE_HOME` (see the Docker fixes in `aadc115`). It still costs a root claim, a marker write with two fsyncs, a per-cycle retention scan, and purge participation. The README describes it inaccurately | `internal/config/config.go`, `internal/sessionstore` | **Delete it** — the knob, the managed root, and the README row. Alternatively point the SDK's CLI install at it so it means something; deleting is simpler and `aadc115` already documented the real cache location |
-| **E2** | `COPILOT_STRICT_COMPAT` is a debugging aid promoted to production config. It toggles three call sites and, since `9ea5821`/`cc28306` established a coherent permissive policy, strict mode's remaining value is unclear | `internal/openai/validation.go` | Decide deliberately: either delete it and keep permissive, or document precisely who strict mode is for. Do not leave it undecided |
-| **E3** | Tool `strict` and `defer_loading` are captured, cloned, persisted — and **never read**. A client sending `strict: true` is told the request succeeded but arguments are not schema-constrained | `internal/toolcatalog/catalog.go:60-61,180-186` | Either enforce `strict` locally (validate the model's arguments against the declared schema before delivering the call) or reject it with a clear 400 so the client can fall back. Silent acceptance is the one option the policy from `cc28306` rules out |
-| **E4** | `AppendFile` has no fsync — the one remaining write path with no durability guarantee after `a6c9867` made `WriteFile` atomic | `internal/sessionfs/provider.go` | Decide whether session-state appends need durability. If yes, fsync; if no, document why |
+| ID     | Commit    | Resolution                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **E1** | `9105ba7` | **Deleted.** `COPILOT_API_CACHE_DIR` had no producer: every hit of `rg -n 'CacheDir\|CACHE_DIR' --type go` was plumbing or a test of that plumbing. It cost a managed-root claim, a marker write with two fsyncs, a per-cycle retention scan over an always-empty directory, and a purge target — to guarantee an empty directory stays empty. **BREAKING.**                                               |
+| **E2** | `846871a` | **Deleted.** `COPILOT_STRICT_COMPAT` reached three call sites, and every one of its additions was a _rejection_ of an item the permissive policy had already classified as safe to ignore. Its stated purpose (debugging client conformance) is already served by the debug-level unhonoured-control logs, without breaking the client. **BREAKING.**                                                      |
+| **E3** | `0fc27a8` | **Enforced locally.** Tool `strict` now compiles the client's declared parameters at request time and validates the model's arguments against them, at _both_ materialisation points (`CaptureRequests` and `handleInvocation`, because their ordering is not guaranteed). `defer_loading` is **forwarded**, not rejected: `true` → `ToolDeferAuto`, `false` → `ToolDeferNever`, absent → runtime decides. |
+| **E4** | `7b2f085` | **Fsynced.** `AppendFile` was the last write path in `sessionfs` with no durability guarantee. The parent directory is synced only when the append created the name, so the extra barrier is paid once per file rather than once per append.                                                                                                                                                               |
 
-> [!TIP]
-> E1 and E2 together remove 2 of 24 environment variables and a whole managed storage root. The
-> original review judged the config surface to be roughly 2× larger than justified for a single-user
-> loopback proxy — this is the cheapest progress against that.
+E2 did not leave the decision open, which the plan explicitly demanded. The
+answer is that permissive is the only policy: every mainstream OpenAI client
+sends `temperature` or `user` by default, so strict mode 400'd essentially every
+real client, all-or-nothing, with no per-field granularity.
+
+E3's choice between "enforce" and "400" was settled by evidence rather than
+taste. `TestHTTPAcceptsValidOpenAIClientRequests` already pins a Chat request
+carrying `{"strict":true}` at 200, and says why: these are calls a widely-used
+client emits by default. Real OpenAI accepts `strict` and honours it, so a 400
+could not be justified against real OpenAI behaviour. Two consequences are
+deliberate: a strict tool whose schema will not compile is a 400 **at request
+time** (a guarantee that was never enforceable should fail before tokens are
+spent), and `strict` on a freeform custom tool is a 400 (there is nothing
+client-declared to constrain).
+
+E4's reasoning is worth keeping, because "a lost append costs nothing" was the
+tempting answer and it is wrong. A Responses continuation first tries
+`resumeSession` on the SDK session id named by the previous record, and only
+rehydrates from the session store when that resume fails. A silently short event
+log therefore means the resume **succeeds** and the model answers without the
+turn whose id the client just passed as `previous_response_id` — silent context
+loss, not a visible fallback.
+
+> [!NOTE]
+> **Verified config surface: 24 → 23 documented variables** in `README.md`'s
+> Configuration table (including `GITHUB_TOKEN`). E1 and E2 removed two; C7
+> added `COPILOT_SSE_KEEP_ALIVE_INTERVAL`. The managed storage root went away
+> with E1, which is the larger structural win: `prune` and `purge` no longer
+> touch anything under `.cache`, and the Dockerfile, compose file and README now
+> say so plainly.
 
 ---
 
-## Workstream F — Deferred structural work
+## Workstream F — the decision
 
-### F1 — Chat Completions as an adapter over Responses
+### F1 — Chat Completions as an adapter over Responses: **declined**
 
-Attempted in `6e9d3ce`/`ed2d02c`/`f33fbd4` and **deliberately stopped**. The independently valuable
-parts shipped (hydration replay for Responses cold-continuation, unified terminal-text
-reconciliation, unified stream sink). The adapter itself was blocked by five concrete findings:
+The plan said: _"Re-evaluate whether the dedup is worth it before committing to
+Phase 6; the honest answer may be no."_ It was re-evaluated against HEAD. **The
+answer is no.**
 
-1. **`ReasoningOpaque` has no field on `openai.Response`.** Chat's
-   `reasoning_details[0].signature` + `format:"anthropic-claude-v1"` come from `TurnResult`.
-   Deriving `ChatCompletion` from a `Response` silently drops both.
-2. **`finish_reason` is not derivable.** `responseFromTurn` hardcodes `Status: "completed"`;
-   `TurnResult.FinishReason` is the only carrier of `stop`/`tool_calls`.
-3. **Reasoning identity diverges.** `reasoning_details[].id` is the SDK reasoning id; the Response
-   reasoning item's `ID` is the `rs_` output-item id that `f6dcb69` made canonical. Different things
-   by design.
-4. **Usage mapping is one-way.** `NewResponseUsage` returns nil when all counts are nil and adds
-   `input_tokens_details.cached_tokens`, which has no Chat home.
-5. **The compatibility-contract tests are written against the Chat types.** Deleting `ChatRequest`,
-   `ChatContinuationRequest`, and `StreamEvent` forces edits to `server_test.go` (10 refs),
-   `reasoning_test.go` (7), and `hardening_test.go` (6) — the exact files whose assertions *are* the
-   contract.
-
-> [!CAUTION]
-> Do not attempt F1 until D4 exists. Without an SDK-level test seam the only regression signal is the
-> wire-byte assertions in those three files, and the refactor requires editing them — removing the
-> safety net and the thing it protects in the same change.
-
-**Recommended path if pursued:**
+This is recorded as a decision with evidence, not a deferral.
 
 ```mermaid
 flowchart TD
-    S1["1 - Land the D4 SDK test seam"]
-    S2["2 - Carry ReasoningOpaque and FinishReason
-    on a shared carrier"]
-    S3["3 - Unify prepareChatTurn into prepareResponseTurn
-    with a stateless-history field"]
-    S4["4 - Keep TurnResult as the shared carrier,
-    not openai.Response"]
-    S5["5 - Chat wire encoder stays bespoke"]
+    Q["F1 - merge Chat into the Responses pipeline?"]
+    PRE["Prerequisite - D4 SDK test seam"]
+    PRE_OK["SATISFIED by e5ad960
+    copilotgw 60.1 to 71.5 percent
+    all six entry points now execute
+    F1 is no longer blocked"]
+    B["Do the five original blockers still stand?"]
+    B_OK["Four of five still stand at HEAD
+    only blocker 5 - the test safety net -
+    was removed, by D4 itself"]
+    PAY["Does the dedup pay for itself?"]
+    PAY_NO["No - roughly 15 lines saved
+    for six-plus new parameters
+    and those 15 lines are already
+    shared as common helpers"]
+    OUT["DECLINED
+    the merge produces a parameterised union
+    not a simplification"]
 
-    S1 --> S2
-    S2 --> S3
-    S3 --> S4
-    S4 --> S5
+    Q --> PRE
+    PRE --> PRE_OK
+    PRE_OK --> B
+    B --> B_OK
+    B_OK --> PAY
+    PAY --> PAY_NO
+    PAY_NO --> OUT
 ```
 
-The variant most likely to succeed keeps `TurnResult` — not `openai.Response` — as the shared
-carrier, which sidesteps blockers 1–4 entirely. Blocker 5 remains and is the reason D4 must come
-first. Note the prior attempt judged the merged `prepareResponseTurn` would need a persistence
-opt-out, a batch-kind parameter, a `retained`-path flavour, and a wire-visible error-`param` prefix
-(`"messages"` vs `"input"`) — a parameterised union rather than a simplification. **Re-evaluate
-whether the dedup is worth it** before committing to Phase 6; the honest answer may be no.
+#### The prerequisite is satisfied — F1 is not blocked, it is not worth it
 
-Effort **L** · Risk **High** · Value **Medium**.
+`e5ad960` introduced the SDK-boundary seam (`copilotSession` +
+`sdkSessionOpener`) the plan named as F1's hard prerequisite, and with it all
+six previously-0% gateway entry points now execute under test. Blocker 5 of the
+original five — "the compatibility-contract tests are written against the Chat
+types, so the refactor removes the safety net and the thing it protects in the
+same change" — is therefore gone. The `[!CAUTION]` the plan attached to F1 no
+longer applies.
+
+Everything below is a judgement about value, not about safety.
+
+#### Four of the five original blockers still stand, verified against HEAD
+
+1. **`ReasoningOpaque` still has no field on `openai.Response`.** It lives on
+   `copilotgw.TurnResult` (`internal/copilotgw/types.go:108`) and is consumed
+   only by `internal/httpapi/chat.go:299`, which builds `reasoning_details` from
+   it. Deriving a `ChatCompletion` from a `Response` still drops it.
+2. **`finish_reason` is still not derivable from a `Response`.**
+   `responseFromTurn` hardcodes `Status: "completed"`
+   (`internal/copilotgw/turn_runner.go:1153`), and `FinishReason` exists only on
+   the Chat type (`internal/openai/chat.go:175`) and its `TurnResult` carrier
+   (`types.go:114`).
+3. **Reasoning identity still diverges by design.**
+   `TurnResult.reasoningOutputItemID()` (`turn_runner.go:1277`) mints the `rs_`
+   output-item id, while `reasoning_details[].id` is the SDK reasoning id.
+   Different things, deliberately.
+4. **Usage mapping is still one-way.** `NewResponseUsage` adds
+   `input_tokens_details.cached_tokens` (`internal/openai/models.go:92`), which
+   has no Chat home. `6c2d1c3` changed usage substantially, but it did not make
+   the mapping bidirectional — it made both sides complete, which is a different
+   property.
+
+#### The dedup itself does not pay
+
+Measured at HEAD:
+
+- `prepareChatTurn` is **53 lines** (`internal/copilotgw/chat.go:28-80`) and is
+  **always stateless**. It mints a fresh `chat_` session per request, hydrates
+  full history into session events, and never consults a previous record, a warm
+  session, or a tool catalog.
+- `prepareResponseTurn` is **125 lines**
+  (`internal/copilotgw/response_session.go:28-152`), built around exactly those
+  three branches.
+
+Merging them needs, at minimum: a `stateless` flag, a catalog-vs-raw-tools
+branch, a persistence opt-out, a batch-kind parameter, a `retained`-path
+flavour, and a wire-visible error-`param` prefix (`"messages"` vs `"input"`).
+That is six-plus parameters to save roughly 15 lines.
+
+And those 15 lines are **already shared**. `requestReasoningEffort`,
+`resolvePromptWithImageBudget`, `newSessionEventSink` and `resumeSession` are
+common helpers today — the duplication the plan wanted to remove has already
+been factored out by every other means. What is left in each function is the
+part that genuinely differs.
+
+> [!IMPORTANT]
+> The merge would produce a **parameterised union, not a simplification** —
+> precisely what the plan suspected when it wrote the caveat. Declining is the
+> plan's own recommendation followed, not overridden.
+
+The independently valuable parts of the original attempt
+(`6e9d3ce`/`ed2d02c`/`f33fbd4`) had already shipped and remain: hydration replay
+for Responses cold-continuation, unified terminal-text reconciliation, and the
+unified stream sink.
+
+---
+
+## Residual backlog
+
+What genuinely remains. Nothing here is a correctness or contamination bug; the
+highest class present is **wasted work**, plus two deliberate scope limits on
+E3.
+
+| ID     | Item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Class       | Effort |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------ |
+| **R1** | `Broker.Register` (`internal/toolproxy/toolproxy.go:174-198`) still republishes the batch's **whole** call-id set on each of its N+1 calls — a residual O(N²) term, separate from the expiry-hook one `b41389c` fixed. A tracked "already published" set was implemented, measured and **reverted**: it removed only the map inserts, not the dominant O(N) iteration, and _cost_ allocations at small N (1720 → 1992 B/op at `tools=1`) for under 4% at `tools=128`. Fixing it properly needs `ensureCall` to hand `Register` the ids it created, which is an API change. | Wasted work | **M**  |
+| **R2** | `prepareResponseTurn` retries `resumeSession` once **per instruction candidate**. `openai.InstructionCandidates("")` yields two (`" "` and a fallback system prompt), and `resumeSession` loops over them (`internal/copilotgw/sessions.go:92-107`), so a single refused resume issues two SDK calls before falling back — doubling cold-continuation latency for requests with no instructions.                                                                                                                                                                           | Wasted work | **S**  |
+| **R3** | E3 does **not** enforce OpenAI's strict _schema subset_ (`additionalProperties: false`, every property listed in `required`).[^strict] Real OpenAI 400s a strict schema that violates it; this proxy validates arguments against whatever schema the client declared. A client whose schema is strict-shaped gets the same guarantee either way; one whose schema is not gets a weaker guarantee than OpenAI would give, silently.                                                                                                                                         | Ergonomics  | **S**  |
+| **R4** | E3 added **no retry loop** for strict violations. A non-conforming tool call fails the turn with an error naming the tool rather than being fed back to the model for correction. This is stated as deliberate in `0fc27a8` — this proxy does not own the model's decoding loop — but it is a real behavioural gap against OpenAI's constrained decoding, which cannot emit a non-conforming call at all.                                                                                                                                                                  | Ergonomics  | **M**  |
+| **R5** | `apierr.RateLimited`'s `RetryAfter` is plumbed, mapped to an RFC 9110 `Retry-After` header and tested end to end, but is **unreachable in production**: the Copilot SDK exposes no retry-after on `SessionErrorData`, so `internal/copilotgw/session_errors.go:43` passes `0` and the header is never emitted today. The field exists so the taxonomy can carry a wait the moment anything can supply one.                                                                                                                                                                 | Ergonomics  | **XS** |
+| **R6** | The SDK's `"quota"` error category is deliberately left as **502**, not 429. The real API returns 429 `insufficient_quota` for it, but no amount of retrying clears a billing block, and this proxy has no channel to tell its single user to add credits other than the message. Revisit only if a client is observed handling `insufficient_quota` usefully.                                                                                                                                                                                                             | Ergonomics  | **XS** |
+| **F1** | Chat Completions as an adapter over Responses. **Declined** with evidence — see [Workstream F](#workstream-f--the-decision). Recorded here so it is not silently re-proposed; re-open only if a _new_ reason appears, not because the prerequisite now exists.                                                                                                                                                                                                                                                                                                             | —           | **L**  |
+
+> [!TIP]
+> R1 and R2 are the only two with a load-proportional cost, and R2 is by far the
+> cheaper: it is one conditional on whether instructions were actually empty.
+> Take it first if this list is picked up.
 
 ---
 
 ## Definition of done
 
-Every commit in this plan must satisfy the gates already enforced by
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and reproducible locally via `make ci`:
+Every commit in this record satisfied the gates enforced by
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and reproducible
+locally via `make ci`:
 
-- [ ] `gofmt -l .` — empty
-- [ ] `go build ./...`
-- [ ] `go vet ./...`
-- [ ] `go test ./... -race -count=1`
-- [ ] `staticcheck@v0.7.0 ./...` — zero findings
-- [ ] `deno fmt --check`, `deno check tests/ai-sdk-deno`, `deno task test:ai-sdk`
+- [x] `gofmt -l .` — empty
+- [x] `go build ./...`
+- [x] `go vet ./...`
+- [x] `go test ./... -race -count=1`
+- [x] `staticcheck@v0.7.0 ./...` — zero findings
+- [x] `deno fmt --check`, `deno check tests/ai-sdk-deno`,
+      `deno task test:ai-sdk`
 
-Additional standards carried forward from the review cycle, which repeatedly caught real defects:
+Three standards were carried forward from the review cycle. All three earned
+their place again:
 
-1. **Demonstrate the bug before fixing it.** Write the regression test first, run it against the
-   parent commit, and record the observed failure in the commit body. This is how the `os.Root`
-   symlink escape (5/5 runs), the toolproxy map race (10/10 plus a reproduced `fatal error`), and the
-   retention data loss were each confirmed to be real rather than theoretical.
-2. **Treat golden-test failures as findings, not chores.** `internal/sessionstore/record_golden_test.go`
-   and `internal/openai/responses_output_item_test.go` pin wire and on-disk formats. A1 and A4 will
-   break them legitimately; anything else breaking them is a bug.
-3. **Verify external facts.** Action pins, image digests, SDK capabilities, and stdlib API shapes were
-   all asserted incorrectly at least once during the review cycle — in both directions. Check them.
+1. **Demonstrate the bug before fixing it.** The regression test was written
+   first, run against the parent commit, and the observed failure recorded in
+   the commit body. Every A- and C-item body above carries one. Where this was
+   _impossible_ — C6, because an assertion about a 429 does not compile against
+   a taxonomy with no 429 — the commit says so and supplies the next-best
+   concrete observation instead of pretending.
+2. **Treat golden-test failures as findings, not chores.** A4 and `bec6806` both
+   broke `internal/sessionstore/record_golden_test.go` legitimately and both
+   said so in the commit message. A4 additionally added
+   `goldenSparseUsageRecordJSON`, because the fully-populated golden was
+   structurally incapable of catching the sparse case.
+3. **Verify external facts.** This paid for itself three times over. The
+   `len([]rune(...))` premise (B2), the WebSocket close ordering (C2) and the
+   429 envelope shape (C6) were each asserted incorrectly in the plan and each
+   corrected only because they were checked against a benchmark, a ten-run
+   measurement, and the upstream issue trail respectively. The 404/405 bodies in
+   C4 and the `defer_loading` semantics in E3 were likewise taken from primary
+   sources rather than invented.
 
-[^usage]: OpenAI Responses API — `usage.input_tokens`, `output_tokens`, and `total_tokens` are
-    required integers on the usage object, with `input_tokens_details` and `output_tokens_details`
-    always present. <https://developers.openai.com/api/reference/resources/responses>
+[^usage]: OpenAI Responses API — `usage.input_tokens`, `output_tokens`, and
+    `total_tokens` are required integers on the usage object, with
+    `input_tokens_details` and `output_tokens_details` always present.
+    <https://developers.openai.com/api/reference/resources/responses>
 
-[^proxy]: AWS Application Load Balancer defaults to a 60-second idle timeout and Cloudflare to
-    100 seconds; both terminate connections with no bytes in flight regardless of the origin's own
-    timeouts. <https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html#connection-idle-timeout>
+[^proxy]: AWS Application Load Balancer defaults to a 60-second idle timeout and
+    Cloudflare to 100 seconds; both terminate connections with no bytes in
+    flight regardless of the origin's own timeouts.
+    <https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html#connection-idle-timeout>
+
+[^wsclose]: `coder/websocket` v1.8.15 installs a `context.AfterFunc` on the read
+    context in `setupReadTimeout` which calls `Conn.close`, so cancelling the
+    context the read loop reads with severs the connection rather than merely
+    interrupting the read. <https://github.com/coder/websocket>
+
+[^ratelimit]: OpenAI's 429 envelope uses `code: "rate_limit_exceeded"` with
+    `type` naming the exhausted dimension (`"requests"` or `"tokens"`), per the
+    openai-node maintainer in <https://github.com/openai/openai-node/issues/168>
+    and reproduced in <https://github.com/openai/openai-python/issues/2703>.
+    `"rate_limit_error"` is Anthropic's vocabulary.
+
+[^errshape]: The 404 wording (`Invalid URL (POST /v1/embeddings)`) is reported
+    identically across <https://github.com/openai/openai-node/issues/132> and
+    <https://github.com/openai/openai-python/issues/250>; the 405 wording
+    (`Only POST requests are accepted.`) and code `method_not_supported` are
+    from <https://github.com/openai/openai-python/issues/2703>.
+
+[^strict]: OpenAI's structured-outputs subset requires
+    `additionalProperties: false` on every object and every property listed in
+    `required`; a strict function schema that violates it is rejected with a 400
+    at request time.
+    <https://platform.openai.com/docs/guides/function-calling#strict-mode>
