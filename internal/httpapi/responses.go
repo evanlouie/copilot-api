@@ -76,9 +76,6 @@ func (s *Server) logUnhonoredResponseControls(ctx context.Context, req *openai.R
 	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
 		s.debugStream(ctx, "parallel_tool_calls=false is not enforced by the Copilot SDK", "surface", "responses")
 	}
-	if format := openai.ResponsesTextFormatType(req); format != "" && format != "text" {
-		s.debugStream(ctx, "text.format is not enforced by this proxy", "surface", "responses", "text_format", format)
-	}
 	if ignored := openai.IgnoredResponsesToolTypes(req.Tools); len(ignored) > 0 {
 		s.debugStream(ctx, "hosted Responses tools were dropped", "surface", "responses", "tool_types", ignored)
 	}

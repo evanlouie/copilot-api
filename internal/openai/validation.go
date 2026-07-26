@@ -9,15 +9,23 @@ import (
 
 // Request validation follows a single policy on both surfaces:
 //
-//	Reject unknown. Accept-and-ignore known-but-unsupported. Never silently drop
-//	something the client could have meant.
+//	Reject unknown. Accept-and-ignore known-but-unsupported, but only when
+//	ignoring degrades gracefully. Never silently drop something the client could
+//	have meant.
 //
 // A parameter OpenAI documents but the Copilot SDK cannot honour (max_tokens,
 // parallel_tool_calls=false, a forcing tool_choice) is accepted here and
-// reported at debug level by the HTTP layer. A parameter, value, or tool type
-// OpenAI does not document is a 400 so client typos surface instead of being
-// dropped. COPILOT_STRICT_COMPAT may still reject more, but permissive mode is
-// the default and has to accept what real OpenAI clients send.
+// reported at debug level by the HTTP layer: ignoring it yields a longer answer,
+// or an answer that skips a tool call, which is degraded but still usable prose.
+// A parameter whose whole purpose is the *shape* of the reply is different.
+// Ignoring response_format/text.format json_schema or json_object hands free
+// prose to a client that is about to call JSON.parse on it, so the failure lands
+// far from its cause or, worse, parses into silently wrong data; those are
+// rejected. {"type":"text"} is the documented default, so ignoring it is a
+// genuine no-op and it is accepted. A parameter, value, or tool type OpenAI does
+// not document is a 400 so client typos surface instead of being dropped.
+// COPILOT_STRICT_COMPAT may still reject more, but permissive mode is the
+// default and has to accept what real OpenAI clients send.
 
 // functionNameRE mirrors OpenAI's documented function-name grammar ("a-z, A-Z,
 // 0-9, underscores and dashes, with a maximum length of 64"), which allows a
@@ -42,7 +50,7 @@ var alwaysRejectChatFields = []unsupportedField{
 	{name: "top_logprobs", message: "top_logprobs is not supported"},
 	{name: "modalities", message: "modalities are not supported"},
 	{name: "prediction", message: "prediction is not supported"},
-	{name: "response_format", message: "response_format is not supported in MVP"},
+	{name: "response_format", message: structuredOutputMessage("response_format"), allow: isDefaultOutputFormat},
 	{name: "stop", message: "stop sequences are not supported by this backend"},
 	{name: "n", message: "n other than 1 is not supported", allow: isOne},
 }
@@ -68,7 +76,7 @@ var strictOnlyResponseFields = []unsupportedField{
 	{name: "top_p", message: "top_p is not forwarded by this proxy in MVP"},
 	{name: "include", message: "include is ignored by this proxy in permissive mode"},
 	{name: "reasoning", message: "reasoning object controls are only partially supported in permissive mode; use reasoning_effort"},
-	{name: "text", message: "text controls are ignored by this proxy in permissive mode"},
+	{name: "text", message: "text controls are ignored by this proxy in permissive mode", allow: isDefaultTextObject},
 	{name: "metadata", message: "metadata is not supported in MVP"},
 	{name: "service_tier", message: "service_tier is not supported"},
 	{name: "user", message: "user is not forwarded by this single-user proxy"},
@@ -80,6 +88,14 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 	}
 	if len(req.Messages) == 0 {
 		return InvalidRequest("messages is required", "messages")
+	}
+	// The shape of response_format decides which error the client gets: a
+	// malformed object or an undocumented type is a typo, while json_object and
+	// json_schema are the documented-but-unsupported case the table below owns.
+	if raw, ok := req.Raw["response_format"]; ok {
+		if _, err := outputFormatType(raw, "response_format"); err != nil {
+			return err
+		}
 	}
 	if err := validateUnsupportedFields(req.Raw, alwaysRejectChatFields); err != nil {
 		return err
@@ -144,6 +160,12 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 	if err := validateUnsupportedFields(req.Raw, alwaysRejectResponseFields); err != nil {
 		return err
 	}
+	// text.format decides whether the client can use the reply at all, so it is
+	// checked ahead of the strict-only table: a structured-output request has to
+	// fail the same way, and name the same param, in both modes.
+	if err := validateResponsesText(req.Text); err != nil {
+		return err
+	}
 	if strict {
 		if err := validateUnsupportedFields(req.Raw, strictOnlyResponseFields); err != nil {
 			return err
@@ -156,9 +178,6 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 		return err
 	}
 	if err := validateResponsesReasoning(req); err != nil {
-		return err
-	}
-	if err := validateResponsesText(req.Text); err != nil {
 		return err
 	}
 	if err := ValidateResponsesTools(req.Tools, strict); err != nil {
@@ -315,49 +334,51 @@ func validateResponsesText(raw json.RawMessage) error {
 	return nil
 }
 
-// validateResponsesTextFormat checks the shape of text.format only. Permissive
-// mode ignores text controls (strict mode rejects the whole field), so a known
-// format type this proxy cannot enforce is accepted and logged at debug rather
-// than rejected; "text" is the explicit default and always fine.
+// validateResponsesTextFormat applies the structured-output clause to
+// text.format. It is the Responses spelling of the rule the response_format
+// entry of alwaysRejectChatFields applies on Chat Completions, down to the
+// message, so a client that switches surfaces gets the same answer.
 func validateResponsesTextFormat(raw json.RawMessage) error {
-	fields, err := rawObject(raw, "text.format")
+	formatType, err := outputFormatType(raw, "text.format")
 	if err != nil {
 		return err
 	}
+	if formatType != outputFormatText {
+		return InvalidRequest(structuredOutputMessage("text.format"), "text.format")
+	}
+	return nil
+}
+
+// outputFormatText is the explicit default both surfaces spell the same way.
+const outputFormatText = "text"
+
+// outputFormatType reports the documented type of a Chat response_format or a
+// Responses text.format object. Anything outside OpenAI's enum is a typo and is
+// rejected on the nested .type param; deciding what to do with a documented type
+// is the caller's job.
+func outputFormatType(raw json.RawMessage, param string) (string, error) {
+	fields, err := rawObject(raw, param)
+	if err != nil {
+		return "", err
+	}
 	var formatType string
 	if err := json.Unmarshal(fields["type"], &formatType); err != nil || formatType == "" {
-		return InvalidRequest("text.format.type must be a string", "text.format.type")
+		return "", InvalidRequest(param+".type must be a string", param+".type")
 	}
 	switch formatType {
-	case "text", "json_object", "json_schema":
-		return nil
+	case outputFormatText, "json_object", "json_schema":
+		return formatType, nil
 	default:
-		return InvalidRequest("unknown text.format.type", "text.format.type")
+		return "", InvalidRequest("unknown "+param+".type", param+".type")
 	}
 }
 
-// ResponsesTextFormatType reports the requested text.format.type, if any.
-func ResponsesTextFormatType(req *ResponsesRequest) string {
-	if len(req.Text) == 0 || string(req.Text) == "null" {
-		return ""
-	}
-	fields, err := rawObject(req.Text, "text")
-	if err != nil {
-		return ""
-	}
-	raw, ok := fields["format"]
-	if !ok {
-		return ""
-	}
-	formatFields, err := rawObject(raw, "text.format")
-	if err != nil {
-		return ""
-	}
-	var formatType string
-	if err := json.Unmarshal(formatFields["type"], &formatType); err != nil {
-		return ""
-	}
-	return formatType
+// structuredOutputMessage is the single wording both surfaces use to turn down
+// json_object and json_schema. It names the feature rather than the payload:
+// the request is well formed, the backend simply cannot constrain model output,
+// and accepting it would return prose to a caller that is about to parse JSON.
+func structuredOutputMessage(param string) string {
+	return "structured output is not supported by this backend: the Copilot SDK exposes no response-format control, so a schema could not be enforced and the model would return free-form text; send " + param + ` {"type":"text"} and parse the reply yourself`
 }
 
 func rawObject(raw json.RawMessage, param string) (map[string]json.RawMessage, error) {
@@ -534,6 +555,30 @@ func isOne(raw json.RawMessage) bool {
 func isFalse(raw json.RawMessage) bool {
 	var b bool
 	return json.Unmarshal(raw, &b) == nil && !b
+}
+
+// isDefaultOutputFormat is the allow predicate for Chat response_format and the
+// nested half of isDefaultTextObject: {"type":"text"} asks for exactly what this
+// proxy already returns, so honouring it is a no-op rather than a silent
+// downgrade. json_object and json_schema fall through to the table message.
+func isDefaultOutputFormat(raw json.RawMessage) bool {
+	var format struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(raw, &format) == nil && format.Type == outputFormatText
+}
+
+// isDefaultTextObject is the strict-mode allow predicate for the Responses text
+// object. Strict mode rejects text because its controls are ignored, but a lone
+// {"format":{"type":"text"}} carries nothing to ignore. Any other control
+// (verbosity, a structured format) is still rejected.
+func isDefaultTextObject(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 1 {
+		return false
+	}
+	format, ok := fields["format"]
+	return ok && isDefaultOutputFormat(format)
 }
 
 // FoldChatInstructions hoists the leading system/developer messages into the

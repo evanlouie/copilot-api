@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -187,7 +188,6 @@ func TestValidateResponsesAcceptsCommonClientParameters(t *testing.T) {
 		{name: "parallel_tool_calls false", body: `{"model":"gpt-5","parallel_tool_calls":false,"input":"hi"}`},
 		{name: "tool_choice required", body: `{"model":"gpt-5","tool_choice":"required","input":"hi"}`},
 		{name: "explicit default text format", body: `{"model":"gpt-5","text":{"format":{"type":"text"}},"input":"hi"}`},
-		{name: "json schema text format", body: `{"model":"gpt-5","text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"input":"hi"}`},
 		{name: "unsupported but documented include", body: `{"model":"gpt-5","include":["file_search_call.results"],"input":"hi"}`},
 	}
 	for _, tt := range tests {
@@ -312,6 +312,87 @@ func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 				t.Fatalf("error = %#v, want param %q", err, tt.param)
 			}
 		})
+	}
+}
+
+// Structured output is the one documented-but-unsupported control that cannot be
+// accepted and ignored: the client is about to JSON.parse the reply, so prose
+// fails far from its cause or parses into silently wrong data. Chat
+// response_format and Responses text.format therefore have to answer the same
+// way, in both modes, for every documented value.
+func TestOutputFormatAcceptsOnlyTheExplicitTextDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		// format is the response_format / text.format object; empty omits it.
+		format string
+		// chatParam and responsesParam are empty when the request is accepted.
+		chatParam      string
+		responsesParam string
+	}{
+		{name: "omitted"},
+		{name: "explicit default", format: `{"type":"text"}`},
+		{
+			name:           "json_schema",
+			format:         `{"type":"json_schema","name":"out","schema":{"type":"object"}}`,
+			chatParam:      "response_format",
+			responsesParam: "text.format",
+		},
+		{
+			name:           "json_object",
+			format:         `{"type":"json_object"}`,
+			chatParam:      "response_format",
+			responsesParam: "text.format",
+		},
+		{
+			name:           "unknown type",
+			format:         `{"type":"jsonschema"}`,
+			chatParam:      "response_format.type",
+			responsesParam: "text.format.type",
+		},
+		{
+			name:           "missing type",
+			format:         `{"name":"out"}`,
+			chatParam:      "response_format.type",
+			responsesParam: "text.format.type",
+		},
+		{
+			name:           "not an object",
+			format:         `"json_schema"`,
+			chatParam:      "response_format",
+			responsesParam: "text.format",
+		},
+	}
+	for _, tt := range tests {
+		for _, strict := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/strict=%t", tt.name, strict), func(t *testing.T) {
+				chatBodyJSON := `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`
+				responsesBodyJSON := `{"model":"gpt-5","input":"hi"}`
+				if tt.format != "" {
+					chatBodyJSON = chatBody("response_format", tt.format)
+					responsesBodyJSON = responsesBody("text", `{"format":`+tt.format+`}`)
+				}
+				chat := decodeChatRequest(t, chatBodyJSON)
+				responses := decodeResponsesRequest(t, responsesBodyJSON)
+				if tt.chatParam == "" {
+					assertChatAccepted(t, chat, strict)
+					assertResponsesAccepted(t, responses, strict)
+					return
+				}
+				assertChatRejected(t, chat, strict, tt.chatParam)
+				assertResponsesRejected(t, responses, strict, tt.responsesParam)
+
+				// The two surfaces must explain the refusal identically, otherwise a
+				// client that switches surfaces learns two different things.
+				chatMessage := ValidateChatRequest(chat, strict).Error()
+				responsesMessage := ValidateResponsesRequest(responses, strict).Error()
+				if got := strings.ReplaceAll(chatMessage, "response_format", "text.format"); got != responsesMessage {
+					t.Fatalf("messages diverge:\n chat: %s\n responses: %s", chatMessage, responsesMessage)
+				}
+				if tt.chatParam == "response_format" && tt.format != `"json_schema"` && !strings.Contains(chatMessage, "structured output is not supported") {
+					t.Fatalf("message = %q, want it to name the unsupported feature", chatMessage)
+				}
+			})
+		}
 	}
 }
 

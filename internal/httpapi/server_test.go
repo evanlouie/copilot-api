@@ -1788,16 +1788,93 @@ func TestUnhonoredControlsAreLoggedAtDebug(t *testing.T) {
 
 	buf.Reset()
 	responses := New(config.Config{}, &captureResponseGateway{}, logger)
-	body := `{"model":"gpt-5","max_output_tokens":256,"text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"tools":[{"type":"web_search"}],"input":"hi"}`
+	body := `{"model":"gpt-5","max_output_tokens":256,"text":{"format":{"type":"text"}},"tools":[{"type":"web_search"}],"input":"hi"}`
 	w = httptest.NewRecorder()
 	responses.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("responses status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	for _, want := range []string{"max output tokens is not forwarded", "text.format is not enforced", "hosted Responses tools were dropped", `"web_search"`} {
+	for _, want := range []string{"max output tokens is not forwarded", "hosted Responses tools were dropped", `"web_search"`} {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("responses debug log missing %q: %s", want, buf.String())
 		}
+	}
+}
+
+// Structured output is not accepted-and-ignored: ignoring it would return prose
+// to a client that is about to parse JSON, so both surfaces fail the request
+// with an OpenAI-shaped body that names the feature.
+func TestHTTPRejectsStructuredOutputOnBothSurfaces(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		body   string
+		param  string
+		strict bool
+	}{
+		{
+			name:  "chat json_schema",
+			path:  "/v1/chat/completions",
+			body:  `{"model":"gpt-5","response_format":{"type":"json_schema","json_schema":{"name":"out","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`,
+			param: "response_format",
+		},
+		{
+			name:   "chat json_schema strict",
+			path:   "/v1/chat/completions",
+			body:   `{"model":"gpt-5","response_format":{"type":"json_schema","json_schema":{"name":"out","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`,
+			param:  "response_format",
+			strict: true,
+		},
+		{
+			name:  "responses json_schema",
+			path:  "/v1/responses",
+			body:  `{"model":"gpt-5","text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"input":"hi"}`,
+			param: "text.format",
+		},
+		{
+			name:   "responses json_schema strict",
+			path:   "/v1/responses",
+			body:   `{"model":"gpt-5","text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"input":"hi"}`,
+			param:  "text.format",
+			strict: true,
+		},
+		{
+			name:  "chat json_object",
+			path:  "/v1/chat/completions",
+			body:  `{"model":"gpt-5","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"hi"}]}`,
+			param: "response_format",
+		},
+		{
+			name:  "responses json_object",
+			path:  "/v1/responses",
+			body:  `{"model":"gpt-5","text":{"format":{"type":"json_object"}},"input":"hi"}`,
+			param: "text.format",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gw copilotgw.HTTPGateway = &resolvingChatGateway{}
+			if tc.path == "/v1/responses" {
+				gw = &captureResponseGateway{}
+			}
+			s := New(config.Config{StrictCompat: tc.strict}, gw, slog.Default())
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			}
+			var env openai.ErrorEnvelope
+			if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Error.Type != "invalid_request_error" || env.Error.Param != tc.param {
+				t.Fatalf("error = %#v, want invalid_request_error param %q", env.Error, tc.param)
+			}
+			if !strings.Contains(env.Error.Message, "structured output is not supported") {
+				t.Fatalf("message = %q, want it to name the unsupported feature", env.Error.Message)
+			}
+		})
 	}
 }
 
