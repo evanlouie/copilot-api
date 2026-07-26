@@ -60,7 +60,7 @@ type responseStreamMeta struct {
 	done              <-chan struct{}
 }
 
-func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session *copilot.Session, rt *toolproxy.RequestTools, events <-chan copilot.SessionEvent, retained string, kind string, responseID string) *turnRunner {
+func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session *copilot.Session, rt *toolproxy.RequestTools, events *sessionEventSink, retained string, kind string, responseID string) *turnRunner {
 	if id == "" {
 		if kind == "response" {
 			id = openai.NewID("resp_")
@@ -80,7 +80,10 @@ func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, sessi
 	if maxOutputBytes <= 0 {
 		maxOutputBytes = config.DefaultMaxTurnOutputBytes
 	}
-	r := &turnRunner{id: id, model: model, ctx: ctx, session: session, rt: rt, events: events, retained: retained, kind: kind, maxOutputBytes: maxOutputBytes, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), created: openai.UnixNow(), store: g.store}
+	r := &turnRunner{id: id, model: model, ctx: ctx, session: session, rt: rt, events: events.events(), retained: retained, kind: kind, maxOutputBytes: maxOutputBytes, responseID: responseID, updates: make(chan toolproxy.TurnFinalResult, 16), closed: make(chan struct{}), created: openai.UnixNow(), store: g.store}
+	// The loop is this sink's only reader, so the sink needs its liveness signal
+	// to stop waiting on a runner that has finished (or never started).
+	events.attach(r.closed)
 	if g.store != nil && session != nil {
 		r.addPin(g.store.PinSession(session.SessionID))
 	}
@@ -801,13 +804,10 @@ func (r *turnRunner) emitError(err error) {
 // synthetic SessionError event, rather than emitting from the Send goroutine.
 // Routing it through the loop keeps emitError/emitResult/closeStreams
 // single-owner (loop-only), so an async send failure cannot race the loop's
-// concurrent stream sends and channel closes. The select on r.closed avoids
-// blocking if the loop has already terminated (turn completed).
-func (r *turnRunner) failSend(events chan<- copilot.SessionEvent, err error) {
-	select {
-	case events <- copilot.SessionEvent{Data: &copilot.SessionErrorData{Message: err.Error()}}:
-	case <-r.closed:
-	}
+// concurrent stream sends and channel closes. The sink keeps the delivery
+// ordered behind any buffered events and never blocks this goroutine.
+func (r *turnRunner) failSend(events *sessionEventSink, err error) {
+	events.send(copilot.SessionEvent{Data: &copilot.SessionErrorData{Message: err.Error()}})
 }
 
 func sendChatStreamEvent(ch chan<- StreamEvent, done <-chan struct{}, ev StreamEvent) bool {

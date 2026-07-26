@@ -15,7 +15,7 @@ type preparedResponseTurn struct {
 	sessionID   string
 	previous    *string
 	rt          *toolproxy.RequestTools
-	events      chan copilot.SessionEvent
+	events      *sessionEventSink
 	prompt      resolvedPrompt
 	catalog     openai.ToolCatalog
 	retained    string
@@ -29,7 +29,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 		return nil, err
 	}
 
-	prepared := &preparedResponseTurn{events: make(chan copilot.SessionEvent, 256), imageBudget: newImageRequestBudget()}
+	prepared := &preparedResponseTurn{events: newSessionEventSink(g.log), imageBudget: newImageRequestBudget()}
 	keepPins := false
 	defer func() {
 		if !keepPins {

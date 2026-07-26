@@ -28,7 +28,7 @@ type WarmResponseSession struct {
 	retained        string
 	session         *copilot.Session
 	rt              *toolproxy.RequestTools
-	events          chan copilot.SessionEvent
+	events          *sessionEventSink
 	disconnected    bool
 }
 
@@ -65,7 +65,7 @@ func (w *WarmResponseSession) Disconnect() {
 type warmResponseUse struct {
 	session     *copilot.Session
 	tools       *toolproxy.RequestTools
-	events      chan copilot.SessionEvent
+	events      *sessionEventSink
 	retained    string
 	previous    *string
 	prompt      resolvedPrompt
@@ -174,7 +174,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
-	events := make(chan copilot.SessionEvent, 256)
+	events := newSessionEventSink(g.log)
 	var session *copilot.Session
 	var sessionID string
 	var previous *string

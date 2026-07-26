@@ -9,7 +9,7 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 )
 
-func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) (*copilot.Session, error) {
+func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) (*copilot.Session, error) {
 	if err := g.fs.EnsureSession(sessionID); err != nil {
 		return nil, fmt.Errorf("ensure session fs: %w", err)
 	}
@@ -24,7 +24,7 @@ func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instr
 	}
 	return nil, lastErr
 }
-func (g *RealGateway) resumeSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) (*copilot.Session, error) {
+func (g *RealGateway) resumeSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) (*copilot.Session, error) {
 	if err := g.fs.EnsureSession(sessionID); err != nil {
 		return nil, fmt.Errorf("ensure session fs: %w", err)
 	}
@@ -39,7 +39,7 @@ func (g *RealGateway) resumeSession(ctx context.Context, sessionID, model, instr
 	}
 	return nil, lastErr
 }
-func (g *RealGateway) newCreateSessionConfig(sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) *copilot.SessionConfig {
+func (g *RealGateway) newCreateSessionConfig(sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) *copilot.SessionConfig {
 	cfg := &copilot.SessionConfig{
 		SessionID:           sessionID,
 		ClientName:          "copilot-api",
@@ -56,7 +56,7 @@ func (g *RealGateway) newCreateSessionConfig(sessionID, model, instructions, rea
 	}
 	return cfg
 }
-func (g *RealGateway) newResumeSessionConfig(model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events chan<- copilot.SessionEvent) *copilot.ResumeSessionConfig {
+func (g *RealGateway) newResumeSessionConfig(model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) *copilot.ResumeSessionConfig {
 	cfg := &copilot.ResumeSessionConfig{
 		ClientName:          "copilot-api",
 		Model:               model,
@@ -94,7 +94,7 @@ type sessionRuntimeDefaults struct {
 	manageScheduleEnabled          *bool
 }
 
-func (g *RealGateway) sessionRuntimeDefaults(streaming bool, events chan<- copilot.SessionEvent) sessionRuntimeDefaults {
+func (g *RealGateway) sessionRuntimeDefaults(streaming bool, events *sessionEventSink) sessionRuntimeDefaults {
 	return sessionRuntimeDefaults{
 		workingDirectory:               "/",
 		configDirectory:                g.cfg.ConfigDir,
@@ -105,7 +105,7 @@ func (g *RealGateway) sessionRuntimeDefaults(streaming bool, events chan<- copil
 		infiniteSessions:               &copilot.InfiniteSessionConfig{Enabled: copilot.Bool(false)},
 		streaming:                      copilot.Bool(streaming),
 		includeSubAgentStreamingEvents: copilot.Bool(false),
-		onEvent:                        func(e copilot.SessionEvent) { sendEvent(events, e) },
+		onEvent:                        events.send,
 		createSessionFSProvider:        func(session *copilot.Session) copilot.SessionFSProvider { return g.fs.Provider(session.SessionID) },
 		skipCustomInstructions:         copilot.Bool(true),
 		enableHostGitOperations:        copilot.Bool(false),
@@ -155,7 +155,4 @@ func (d sessionRuntimeDefaults) applyResume(cfg *copilot.ResumeSessionConfig) {
 	cfg.CustomAgentsLocalOnly = d.customAgentsLocalOnly
 	cfg.CoauthorEnabled = d.coauthorEnabled
 	cfg.ManageScheduleEnabled = d.manageScheduleEnabled
-}
-func sendEvent(ch chan<- copilot.SessionEvent, e copilot.SessionEvent) {
-	ch <- e
 }

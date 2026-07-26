@@ -19,7 +19,7 @@ type preparedChatTurn struct {
 	retained   string
 	final      resolvedPrompt
 	rt         *toolproxy.RequestTools
-	events     chan copilot.SessionEvent
+	events     *sessionEventSink
 	session    *copilot.Session
 	pinRelease func()
 }
@@ -65,7 +65,7 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	if err != nil {
 		return nil, openai.InvalidRequest(err.Error(), "tools")
 	}
-	events := make(chan copilot.SessionEvent, 256)
+	events := newSessionEventSink(g.log)
 	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, streaming, events)
 	if err != nil {
 		return nil, openai.Upstream(err.Error())

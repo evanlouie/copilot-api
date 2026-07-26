@@ -20,13 +20,13 @@ import (
 // of emitting from the Send goroutine. This is what keeps emitError loop-owned
 // and free of the send-on-closed race.
 func TestFailSendDeliversSessionError(t *testing.T) {
-	events := make(chan copilot.SessionEvent, 1)
+	events := newSessionEventSink(nil)
 	r := &turnRunner{closed: make(chan struct{})}
 
 	r.failSend(events, errors.New("boom"))
 
 	select {
-	case ev := <-events:
+	case ev := <-events.events():
 		d, ok := ev.Data.(*copilot.SessionErrorData)
 		if !ok {
 			t.Fatalf("expected *copilot.SessionErrorData, got %T", ev.Data)
@@ -40,12 +40,15 @@ func TestFailSendDeliversSessionError(t *testing.T) {
 }
 
 // TestFailSendUnblocksWhenRunnerClosed ensures a late Send failure cannot block
-// its goroutine forever when the loop has already exited (the events channel has
-// no reader). The select on r.closed must release it.
+// its goroutine forever when the loop has already exited (nothing drains the
+// event channel and it is already full). The sink must absorb the event and
+// return.
 func TestFailSendUnblocksWhenRunnerClosed(t *testing.T) {
-	events := make(chan copilot.SessionEvent) // unbuffered, no reader
 	closed := make(chan struct{})
 	close(closed)
+	events := newSessionEventSink(nil)
+	events.attach(closed)
+	fillSessionEventSink(events)
 	r := &turnRunner{closed: closed}
 
 	done := make(chan struct{})
@@ -154,11 +157,11 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := make(chan copilot.SessionEvent, 4)
+	events := newSessionEventSink(nil)
 	session := &copilot.Session{SessionID: "sdk_test"}
 	runner := (&RealGateway{}).newTurnRunner(context.Background(), "resp_initial", "gpt-test", session, rt, events, t.TempDir(), "response", "resp_initial")
 	runner.setCurrentResponseID("resp_continuation")
-	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}}
+	events.send(copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}})
 
 	select {
 	case update := <-runner.updates:
@@ -180,7 +183,7 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 		t.Fatalf("batch.ResponseID = %q, want resp_continuation", batch.ResponseID)
 	}
 	batch.Cancel(context.Canceled)
-	close(events)
+	close(events.ch)
 }
 
 func TestTurnDebugStatsObserve(t *testing.T) {
