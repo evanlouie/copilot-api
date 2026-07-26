@@ -157,6 +157,7 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 	}
 	var streamedText strings.Builder
 	var streamedReasoning strings.Builder
+	var toolCalls chatToolCallStreams
 	for {
 		select {
 		case <-ctx.Done():
@@ -188,6 +189,10 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 					return
 				}
 				streamedText.WriteString(ev.Delta)
+			case "tool_call_delta":
+				if err := s.writeChatToolCallDelta(ctx, writer, streamID, created, model, &toolCalls, ev, includeUsage); err != nil {
+					return
+				}
 			case "result":
 				if ev.Result == nil {
 					writeFailure(apierr.Internal("chat stream returned an empty result"))
@@ -213,7 +218,15 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 						return
 					}
 				}
-				if err := s.writeChatTerminalWithID(ctx, writer, streamID, created, model, ev.Result, includeUsage); err != nil {
+				// Reconciled before any terminal chunk is written, because a
+				// divergence between the streamed fragments and the finished call has
+				// to be reported as a stream failure rather than as a write error.
+				toolCallDeltas, err := toolCalls.terminalDeltas(ev.Result.ToolCalls)
+				if err != nil {
+					writeFailure(err)
+					return
+				}
+				if err := s.writeChatTerminalWithID(ctx, writer, streamID, created, model, ev.Result, toolCallDeltas, includeUsage); err != nil {
 					return
 				}
 				_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
@@ -244,7 +257,97 @@ func (s *Server) writeChatReasoningDelta(ctx context.Context, writer *SSEWriter,
 	}
 	return s.writeSSEData(ctx, writer, "chat.reasoning_delta", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: chunkDelta}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "reasoning", delta)...)
 }
-func (s *Server) writeChatTerminalWithID(ctx context.Context, writer *SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) error {
+
+// chatToolCallStreams remembers what a Chat Completions stream has already
+// said about each tool call.
+//
+// OpenAI's wire shape for a streamed tool call is a stable `index` per call,
+// with `id`, `type` and `name` carried once on that call's first fragment and
+// nothing but `function.arguments` after it. Both halves of that need memory
+// spanning chunks, and so does the terminal chunk: it may only send arguments
+// the fragments have not already delivered.
+type chatToolCallStreams struct {
+	order    []string
+	streamed map[string]string
+}
+
+// index assigns a call its wire index on first sight and reports whether this
+// is that first sight, which is the same question as whether the identifying
+// fields still have to be sent.
+func (c *chatToolCallStreams) index(id string) (int, bool) {
+	for i, seen := range c.order {
+		if seen == id {
+			return i, false
+		}
+	}
+	c.order = append(c.order, id)
+	return len(c.order) - 1, true
+}
+
+func (c *chatToolCallStreams) record(id, delta string) {
+	if c.streamed == nil {
+		c.streamed = map[string]string{}
+	}
+	c.streamed[id] += delta
+}
+
+// terminalDeltas reconciles a turn's finished tool calls against the fragments
+// already delivered, returning only what the client is still owed.
+//
+// A call whose arguments were streamed in full contributes nothing: every
+// client that reads this stream accumulates `function.arguments` across chunks,
+// so repeating them here would double them. A call that was never streamed -
+// a strict tool, or any turn on a backend that does not emit fragments -
+// contributes the complete arguments exactly as it always has.
+func (c *chatToolCallStreams) terminalDeltas(calls []openai.ChatToolCall) ([]openai.ToolCallDelta, error) {
+	deltas := make([]openai.ToolCallDelta, 0, len(calls))
+	delivered := make(map[string]struct{}, len(calls))
+	for _, tc := range calls {
+		delivered[tc.ID] = struct{}{}
+		index, first := c.index(tc.ID)
+		suffix, err := terminalStreamSuffix(tc.Function.Arguments, c.streamed[tc.ID], "chat stream terminal tool-call arguments do not match the streamed arguments")
+		if err != nil {
+			return nil, err
+		}
+		if !first && suffix == "" {
+			continue
+		}
+		delta := openai.ToolCallDelta{Index: index, Function: &openai.ToolCallDeltaFunction{Arguments: suffix}}
+		if first {
+			delta.ID = tc.ID
+			delta.Type = "function"
+			delta.Function.Name = tc.Function.Name
+		}
+		deltas = append(deltas, delta)
+	}
+	// A call the client accumulated fragments for and never receives is a call it
+	// cannot answer, so it fails the stream rather than leaving the client to
+	// discover the dangling index on its own.
+	for id := range c.streamed {
+		if _, ok := delivered[id]; !ok {
+			return nil, apierr.Upstream("chat stream terminal result is missing tool call " + id + ", whose arguments were streamed")
+		}
+	}
+	return deltas, nil
+}
+
+// writeChatToolCallDelta forwards one incremental tool-call argument fragment.
+func (s *Server) writeChatToolCallDelta(ctx context.Context, writer *SSEWriter, id string, created int64, model string, streams *chatToolCallStreams, ev copilotgw.StreamEvent, includeUsage bool) error {
+	if ev.ToolCallID == "" || ev.Delta == "" {
+		return nil
+	}
+	index, first := streams.index(ev.ToolCallID)
+	delta := openai.ToolCallDelta{Index: index, Function: &openai.ToolCallDeltaFunction{Arguments: ev.Delta}}
+	if first {
+		delta.ID = ev.ToolCallID
+		delta.Type = "function"
+		delta.Function.Name = ev.ToolName
+	}
+	streams.record(ev.ToolCallID, ev.Delta)
+	return s.writeSSEData(ctx, writer, "chat.tool_call_delta", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ToolCalls: []openai.ToolCallDelta{delta}}}}, IncludeUsage: includeUsage}, append(s.chatChunkAttrs(ctx, "tool_call_delta", ev.Delta), "tool_call_id", ev.ToolCallID, "tool_call_index", index)...)
+}
+
+func (s *Server) writeChatTerminalWithID(ctx context.Context, writer *SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, toolCallDeltas []openai.ToolCallDelta, includeUsage bool) error {
 	finish := turn.FinishReason
 	if details := s.chatReasoningDetails(turn); len(details) > 0 {
 		// The plaintext reasoning was already streamed as deltas; this terminal
@@ -254,12 +357,8 @@ func (s *Server) writeChatTerminalWithID(ctx context.Context, writer *SSEWriter,
 			return err
 		}
 	}
-	if len(turn.ToolCalls) > 0 {
-		deltas := make([]openai.ToolCallDelta, 0, len(turn.ToolCalls))
-		for i, tc := range turn.ToolCalls {
-			deltas = append(deltas, openai.ToolCallDelta{Index: i, ID: tc.ID, Type: "function", Function: &openai.ToolCallDeltaFunction{Name: tc.Function.Name, Arguments: tc.Function.Arguments}})
-		}
-		if err := s.writeSSEData(ctx, writer, "chat.tool_calls", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ToolCalls: deltas}}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "tool_calls", "tool_call_count", len(turn.ToolCalls)); err != nil {
+	if len(toolCallDeltas) > 0 {
+		if err := s.writeSSEData(ctx, writer, "chat.tool_calls", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{ToolCalls: toolCallDeltas}}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "tool_calls", "tool_call_count", len(toolCallDeltas)); err != nil {
 			return err
 		}
 	}

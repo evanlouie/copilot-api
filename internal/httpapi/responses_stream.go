@@ -39,6 +39,50 @@ func (x *outputItemIndexer) indexOf(id string) int {
 	return len(x.ids) - 1
 }
 
+// streamedToolCall is one tool call whose arguments this stream published
+// incrementally: the in-progress item the gateway announced it under, the text
+// already delivered, and - once the turn is finished - what is still owed.
+type streamedToolCall struct {
+	item      openai.ResponseOutputItem
+	delivered strings.Builder
+	remaining string
+}
+
+func (s *streamedToolCall) custom() bool { return s.item.Type == "custom_tool_call" }
+
+// deltaEvent names the incremental event this item's input belongs to. A
+// freeform custom tool streams raw grammar input under its own event name;
+// reporting it as response.function_call_arguments.* would tell the client the
+// bytes are JSON arguments when they are not.
+func (s *streamedToolCall) deltaEvent() string {
+	if s.custom() {
+		return "response.custom_tool_call_input.delta"
+	}
+	return "response.function_call_arguments.delta"
+}
+
+// incompleteItem is the item as far as the stream got, for a turn that failed
+// after the fragments began. Every item this stream announces has to be closed.
+func (s *streamedToolCall) incompleteItem() openai.ResponseOutputItem {
+	item := s.item
+	item.Status = "incomplete"
+	if s.custom() {
+		item.Input = s.delivered.String()
+	} else {
+		item.Arguments = s.delivered.String()
+	}
+	return item
+}
+
+// toolCallItemInput is the value a tool call's streamed fragments accumulate
+// towards, which differs by item type.
+func toolCallItemInput(item openai.ResponseOutputItem) string {
+	if item.Type == "custom_tool_call" {
+		return item.Input
+	}
+	return item.Arguments
+}
+
 func writeResponseLifecycleStart(writer responseEventWriter, req copilotgw.ResponseRequest, status string) (*openai.Response, error) {
 	var previous *string
 	if req.PreviousResponseID != "" {
@@ -110,9 +154,17 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 	reasoningSummaryDone := false
 	reasoningItemDone := false
 	var reasoningText strings.Builder
+	// Tool calls whose arguments arrived as fragments, keyed by output-item id,
+	// plus the order they were announced in so a failed turn can close them all.
+	toolCalls := map[string]*streamedToolCall{}
+	var toolCallOrder []string
+	toolCallBytes := 0
 	if maxOutputBytes <= 0 {
 		maxOutputBytes = config.DefaultMaxTurnOutputBytes
 	}
+	// streamedBytes is everything this stream has accumulated for terminal
+	// reconciliation, which is what the output ceiling actually bounds.
+	streamedBytes := func() int64 { return int64(reasoningText.Len() + messageText.Len() + toolCallBytes) }
 	emitReasoningStart := func() error {
 		if reasoningStarted {
 			return nil
@@ -199,7 +251,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 		if suffix == "" {
 			return nil
 		}
-		if int64(reasoningText.Len()+messageText.Len()+len(suffix)) > maxOutputBytes {
+		if streamedBytes()+int64(len(suffix)) > maxOutputBytes {
 			return apierr.Upstream("response output exceeded stream size limit")
 		}
 		idx := index.indexOf(reasoningItemID)
@@ -278,6 +330,15 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 		if err := finishReasoningItem(nil, "incomplete"); err != nil {
 			return err
 		}
+		// Every item this stream announced has to be closed, including a tool call
+		// whose arguments were still arriving when the turn failed.
+		for _, itemID := range toolCallOrder {
+			idx := index.indexOf(itemID)
+			item := toolCalls[itemID].incompleteItem()
+			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item, Status: item.Status}); err != nil {
+				return err
+			}
+		}
 		if !messageStarted || messageDone {
 			return nil
 		}
@@ -311,6 +372,9 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 		}
 		if messageStarted && messageID != "" {
 			partial[messageID] = openai.ResponseOutputItem{ID: messageID, Type: "message", Status: "incomplete", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: messageText.String()}}}
+		}
+		for _, itemID := range toolCallOrder {
+			partial[itemID] = toolCalls[itemID].incompleteItem()
 		}
 		output := make([]openai.ResponseOutputItem, 0, len(partial))
 		for _, id := range index.ids {
@@ -364,7 +428,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 				idx := index.indexOf(reasoningItemID)
 				summaryIdx := 0
-				if int64(reasoningText.Len()+messageText.Len()+len(ev.Delta)) > maxOutputBytes {
+				if streamedBytes()+int64(len(ev.Delta)) > maxOutputBytes {
 					return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 				}
 				reasoningText.WriteString(ev.Delta)
@@ -379,7 +443,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				if err := closeReasoningSummary(); err != nil {
 					return responseStreamWriteResult{Err: err, WriteFailed: true}
 				}
-				if int64(reasoningText.Len()+messageText.Len()+len(ev.Delta)) > maxOutputBytes {
+				if streamedBytes()+int64(len(ev.Delta)) > maxOutputBytes {
 					return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 				}
 				msgIdx := index.indexOf(messageID)
@@ -402,6 +466,37 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Delta: ev.Delta}); err != nil {
 					return responseStreamWriteResult{Err: err, WriteFailed: true}
 				}
+			case "tool_call_delta":
+				// The gateway builds the in-progress item so this layer never has
+				// to invent one; without it a fragment could not be announced.
+				if ev.ItemID == "" || ev.Item == nil {
+					return writeFailure(apierr.Internal("response stream tool-call delta is missing its output item"))
+				}
+				if ev.Delta == "" {
+					continue
+				}
+				if err := closeReasoningSummary(); err != nil {
+					return responseStreamWriteResult{Err: err, WriteFailed: true}
+				}
+				if streamedBytes()+int64(len(ev.Delta)) > maxOutputBytes {
+					return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
+				}
+				idx := index.indexOf(ev.ItemID)
+				streamed, started := toolCalls[ev.ItemID]
+				if !started {
+					streamed = &streamedToolCall{item: *ev.Item}
+					toolCalls[ev.ItemID] = streamed
+					toolCallOrder = append(toolCallOrder, ev.ItemID)
+					added := streamed.item
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &added, Status: added.Status}); err != nil {
+						return responseStreamWriteResult{Err: err, WriteFailed: true}
+					}
+				}
+				streamed.delivered.WriteString(ev.Delta)
+				toolCallBytes += len(ev.Delta)
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: streamed.deltaEvent(), OutputIndex: &idx, ItemID: ev.ItemID, Delta: ev.Delta}); err != nil {
+					return responseStreamWriteResult{Err: err, WriteFailed: true}
+				}
 			case "response":
 				if ev.Response == nil {
 					return writeFailure(apierr.Internal("response stream returned an empty response"))
@@ -413,6 +508,12 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				// filter in place - see filterResponseReasoning.
 				ev.Response = filterResponseReasoning(ev.Response, suppressReasoning)
 				if err := reconcileStreamedReasoning(ev.Response); err != nil {
+					return writeFailure(err)
+				}
+				// Reconciled before any terminal tool-call event is written, so a
+				// divergence closes the announced items and fails the response
+				// instead of emitting arguments that contradict the fragments.
+				if err := reconcileStreamedToolCalls(ev.Response, toolCalls, toolCallOrder); err != nil {
 					return writeFailure(err)
 				}
 				payloadBytes, sizeErr := responseOutputPayloadBytes(ev.Response)
@@ -444,7 +545,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 						if err != nil {
 							return writeFailure(err)
 						}
-						if int64(reasoningText.Len()+messageText.Len()+len(suffix)) > maxOutputBytes {
+						if streamedBytes()+int64(len(suffix)) > maxOutputBytes {
 							return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 						}
 						if suffix != "" {
@@ -473,7 +574,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				} else if err := writeUnstreamedMessageEvents(writer, &index, ev.Response); err != nil {
 					return responseStreamWriteResult{Err: err, WriteFailed: true}
 				}
-				if err := writeResponseOutputEvents(writer, &index, ev.Response); err != nil {
+				if err := writeResponseOutputEvents(writer, &index, ev.Response, toolCalls); err != nil {
 					return responseStreamWriteResult{Err: err, WriteFailed: true}
 				}
 				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.completed", Response: ev.Response, Status: ev.Response.Status}); err != nil {
@@ -607,7 +708,41 @@ func writeUnstreamedMessageEvents(writer responseEventWriter, index *outputItemI
 	return nil
 }
 
-func writeResponseOutputEvents(writer responseEventWriter, index *outputItemIndexer, resp *openai.Response) error {
+// reconcileStreamedToolCalls proves that what the stream already delivered for
+// each tool call is a prefix of what the finished turn reports, and records the
+// remainder each item still owes.
+//
+// A mismatch is fatal rather than papered over. The client has already
+// accumulated the fragments, so silently emitting the full arguments again
+// would double them and silently dropping them would truncate the call; either
+// way the client ends up holding arguments that disagree with the record this
+// service persisted.
+func reconcileStreamedToolCalls(resp *openai.Response, streams map[string]*streamedToolCall, order []string) error {
+	for _, itemID := range order {
+		streamed := streams[itemID]
+		item, err := terminalOutputItem(resp, itemID, streamed.item.Type)
+		if err != nil {
+			return err
+		}
+		if item == nil {
+			return apierr.Upstream("response stream terminal response is missing the streamed " + streamed.item.Type + " item")
+		}
+		suffix, err := terminalStreamSuffix(toolCallItemInput(*item), streamed.delivered.String(), "response stream terminal tool-call arguments do not match the streamed arguments")
+		if err != nil {
+			return err
+		}
+		streamed.remaining = suffix
+	}
+	return nil
+}
+
+// writeResponseOutputEvents closes out the turn's tool-call items. An item
+// whose arguments were streamed keeps the announcement it already received and
+// is only owed whatever the fragments did not deliver; an item that was never
+// streamed is announced and delivered whole, exactly as it always has been.
+// Either way the terminal events are identical, which is what lets a client
+// reconcile the two paths without knowing which one it got.
+func writeResponseOutputEvents(writer responseEventWriter, index *outputItemIndexer, resp *openai.Response, streams map[string]*streamedToolCall) error {
 	if resp == nil {
 		return nil
 	}
@@ -616,11 +751,18 @@ func writeResponseOutputEvents(writer responseEventWriter, index *outputItemInde
 		switch item.Type {
 		case "function_call":
 			idx := index.indexOf(item.ID)
-			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item, Status: item.Status}); err != nil {
-				return err
-			}
-			if item.Arguments != "" {
-				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: &idx, ItemID: item.ID, Delta: item.Arguments}); err != nil {
+			streamed := streams[item.ID]
+			if streamed == nil {
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &item, Status: item.Status}); err != nil {
+					return err
+				}
+				if item.Arguments != "" {
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: &idx, ItemID: item.ID, Delta: item.Arguments}); err != nil {
+						return err
+					}
+				}
+			} else if streamed.remaining != "" {
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: &idx, ItemID: item.ID, Delta: streamed.remaining}); err != nil {
 					return err
 				}
 			}
@@ -632,12 +774,26 @@ func writeResponseOutputEvents(writer responseEventWriter, index *outputItemInde
 			}
 		case "custom_tool_call", "tool_search_call":
 			idx := index.indexOf(item.ID)
-			added := item
-			if added.Status == "completed" {
-				added.Status = "in_progress"
-			}
-			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &added, Status: added.Status}); err != nil {
-				return err
+			streamed := streams[item.ID]
+			if streamed == nil {
+				added := item
+				if added.Status == "completed" {
+					added.Status = "in_progress"
+				}
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &added, Status: added.Status}); err != nil {
+					return err
+				}
+			} else {
+				if streamed.remaining != "" {
+					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.custom_tool_call_input.delta", OutputIndex: &idx, ItemID: item.ID, Delta: streamed.remaining}); err != nil {
+						return err
+					}
+				}
+				// A fragment stream needs a terminator of its own; the item's own
+				// done event carries the whole item and arrives after it.
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.custom_tool_call_input.done", OutputIndex: &idx, ItemID: item.ID, Input: item.Input}); err != nil {
+					return err
+				}
 			}
 			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item, Status: item.Status}); err != nil {
 				return err

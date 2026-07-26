@@ -498,6 +498,12 @@ type RequestTools struct {
 	mu        sync.Mutex
 	ctx       context.Context
 	batch     *Batch
+	// reserved holds the client-visible identity minted for a tool call whose
+	// argument fragments are being streamed, keyed by the model's tool-call id.
+	// It exists because a streamed fragment has to name the call before the SDK
+	// announces the finished tool request that ensureCall would normally mint
+	// the id from.
+	reserved map[string]StreamingCall
 
 	// UnenforceableStrict lists tools whose strict: true was accepted but cannot
 	// be enforced, with the reason. Read once at request setup by the gateway,
@@ -510,6 +516,79 @@ type RequestTools struct {
 type UnenforceableStrictTool struct {
 	Tool   string
 	Reason string
+}
+
+// StreamingCall is the client-visible identity of a tool call whose arguments
+// may be forwarded fragment by fragment, before the call itself exists.
+type StreamingCall struct {
+	CallID string
+	Kind   toolcatalog.ResponsesToolKind
+	Name   string
+}
+
+// ReserveStreamingCall decides whether a tool call's arguments may be streamed
+// as the model produces them, and pins the identity such a stream must use.
+//
+// The gate is strict tools, and it is the whole reason this is a decision
+// rather than a lookup. validateStrictArguments refuses to hand the client a
+// strict call whose arguments do not satisfy the declared schema, and that
+// refusal can only be made once the arguments are complete. Streaming
+// fragments of a strict call would publish arguments this proxy may be about
+// to reject, which is exactly the guarantee strict: true buys. Strict calls
+// therefore stay buffered; everything else streams.
+//
+// The reserved id matters as much as the decision. ensureCall normally mints
+// the client-visible id when the SDK announces the finished tool request, but
+// a streamed fragment names its call long before that. Minting here and
+// consuming the reservation there is what makes the fragments and the final
+// tool call the same call rather than two.
+//
+// custom reports the SDK's tool-call type discriminator, so the kind returned
+// here is the same kind CaptureRequests will settle on.
+func (rt *RequestTools) ReserveStreamingCall(sdkID, sdkName string, custom bool) (StreamingCall, bool) {
+	// An empty id cannot be correlated back to a tool request, so a fragment
+	// carrying one could never be reconciled against a final call.
+	if rt == nil || sdkID == "" || sdkName == "" {
+		return StreamingCall{}, false
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if call, ok := rt.reserved[sdkID]; ok {
+		return call, true
+	}
+	meta, ok := rt.clientTool(sdkName)
+	if !ok || meta.strictEnabled() {
+		return StreamingCall{}, false
+	}
+	kind := meta.ResponseKind
+	if kind == "" {
+		kind = toolcatalog.ToolKindFunction
+	}
+	if custom && kind == toolcatalog.ToolKindFunction {
+		kind = toolcatalog.ToolKindCustom
+	}
+	name := meta.ResponseName
+	if name == "" {
+		name = sdkName
+	}
+	call := StreamingCall{CallID: "call_" + uuid.NewString(), Kind: kind, Name: name}
+	if rt.reserved == nil {
+		rt.reserved = map[string]StreamingCall{}
+	}
+	rt.reserved[sdkID] = call
+	return call, true
+}
+
+// takeReservedCallIDLocked consumes the id reserved for a streamed tool call.
+// Consuming rather than reading keeps the map bounded by the calls still in
+// flight instead of by every call the request ever made.
+func (rt *RequestTools) takeReservedCallIDLocked(sdkID string) string {
+	call, ok := rt.reserved[sdkID]
+	if !ok {
+		return ""
+	}
+	delete(rt.reserved, sdkID)
+	return call.CallID
 }
 
 func NewRequestTools(broker *Broker, tools []openai.Tool, scope openai.ToolScope) (*RequestTools, error) {
@@ -885,7 +964,7 @@ func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolReque
 		if meta.ResponseKind == toolcatalog.ToolKindCustom {
 			input = customInput(req.Arguments, args)
 		}
-		call := rt.batch.ensureCall(req.ToolCallID, req.Name, meta, args, input)
+		call := rt.batch.ensureCall(req.ToolCallID, req.Name, meta, args, input, rt.takeReservedCallIDLocked(req.ToolCallID))
 		calls = append(calls, call.Captured())
 	}
 	rt.broker.Register(rt.batch)
@@ -913,7 +992,7 @@ func (rt *RequestTools) handleInvocation(inv copilot.ToolInvocation) (copilot.To
 	if meta.ResponseKind == toolcatalog.ToolKindCustom {
 		input = customInput(inv.Arguments, args)
 	}
-	call := batch.ensureCall(inv.ToolCallID, inv.ToolName, meta, args, input)
+	call := batch.ensureCall(inv.ToolCallID, inv.ToolName, meta, args, input, rt.takeReservedCallIDLocked(inv.ToolCallID))
 	rt.broker.Register(batch)
 	batch.startTimer()
 	rt.mu.Unlock()
@@ -1099,14 +1178,17 @@ func (b *Batch) configure(responseID, kind string, model string, done <-chan Tur
 
 // ensureCall returns the batch's call for sdkID, creating it on first sight.
 //
-// The client-visible id is always minted here ("call_" + uuid). sdkID comes
-// from the upstream model, and Copilot's backends are not uniform: some emit
-// low-entropy sequential ids such as "call_1". Publishing those verbatim would
-// make them keys in the process-global Broker.byCall map, where two concurrent
-// requests can collide and hand one client's continuation another client's
-// pending batch. The model's id is retained on Call.SDKID and indexed in
-// b.bySDKID, which is per-batch and only used to answer the SDK.
-func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.RawMessage, input string) *Call {
+// The client-visible id is always minted by this proxy, never taken from the
+// model: sdkID comes from upstream, and Copilot's backends are not uniform,
+// with some emitting low-entropy sequential ids such as "call_1". Publishing
+// those verbatim would make them keys in the process-global Broker.byCall map,
+// where two concurrent requests can collide and hand one client's continuation
+// another client's pending batch. The model's id is retained on Call.SDKID and
+// indexed in b.bySDKID, which is per-batch and only used to answer the SDK.
+//
+// reservedID is the id ReserveStreamingCall already published on the wire for
+// this call, and is empty for a call whose arguments were never streamed.
+func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.RawMessage, input string, reservedID string) *Call {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if meta.SDKName == "" {
@@ -1131,7 +1213,10 @@ func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.Raw
 			return call
 		}
 	}
-	openaiID := "call_" + uuid.NewString()
+	openaiID := reservedID
+	if openaiID == "" {
+		openaiID = "call_" + uuid.NewString()
+	}
 	call := &Call{OpenAIID: openaiID, SDKID: sdkID, SDKName: meta.SDKName, PublicName: meta.ResponseName, Namespace: meta.Namespace, Kind: meta.ResponseKind, ArgumentsJSON: append(json.RawMessage{}, args...), Input: input, Execution: meta.Execution, outCh: make(chan string, 1), errCh: make(chan error, 1)}
 	if call.Execution == "" && call.Kind == toolcatalog.ToolKindToolSearch {
 		call.Execution = "client"
