@@ -30,6 +30,7 @@ target functionality is the only compatibility constraint that matters.
 - [Workstream D — Test & release engineering](#workstream-d--test--release-engineering)
 - [Workstream E — Surface reduction](#workstream-e--surface-reduction)
 - [Workstream F — the decision](#workstream-f--the-decision)
+- [Round two — adversarial review](#round-two--adversarial-review)
 - [Residual backlog](#residual-backlog)
 - [Definition of done](#definition-of-done)
 
@@ -604,11 +605,81 @@ unified stream sink.
 
 ---
 
+## Round two — adversarial review
+
+After the workstreams landed, three sub-agents reviewed the result adversarially
+with disjoint scopes — concurrency and lifecycle, wire-protocol conformance, and
+data integrity. They were told that "looks good" was a failed review. Between
+them they found **fourteen** defects in the work above, four of them serious
+enough to have shipped real breakage, and two of the fixes they proposed were
+themselves wrong.
+
+> [!CAUTION]
+> Two of the highest-severity findings were **regressions introduced by the
+> fixes in this very document**, not pre-existing bugs. `0747461` (C2) fixed one
+> abnormal-close race and reintroduced the same race one layer over, through the
+> frame writer it had just bound to `connCtx`. `bec6806` (A3) fixed one
+> warm-input loss and left two more on adjacent paths. A fix landing green is
+> not evidence that it is correct.
+
+### What was found and fixed
+
+| Finding                                                                                                                                                            | Severity | Fix       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | --------- |
+| Close handshake severed by the write-timeout `AfterFunc` — the C2 fix reintroduced the race it avoided, measured **15/20 runs failing, 28/160 shutdowns abnormal** | High     | `b18e0ca` |
+| A request reaching `newTurnRunner` after `Stop()` hung **forever** and leaked its goroutine; `0eb98d1`'s own reasoning about the registry ordering was wrong       | High     | `8a6a582` |
+| Chained warm requests silently dropped the earlier input; `InputPending` was never cleared, so an ordinary retry double-sent it                                    | High     | `5ff87ec` |
+| A truncated record decoded as a _complete_ header — `json.Decoder.More` swallows the read error — resurrecting deleted responses and stranding retention links     | High     | `78eec33` |
+| Warm session installable into already-closed WebSocket state                                                                                                       | Medium   | `a47c536` |
+| `state.finish()` raced the next `response.create`, so a correct client got a spurious "only one response.create may be active" — **4/10 runs**                     | Medium   | `5c902fe` |
+| `cached_tokens` hardcoded to 0 though the SDK reports it, and `cache_write_tokens` missing though the schema requires it                                           | Medium   | `4e36ce0` |
+| Legacy usage records served with a `total_tokens` contradicting their own addends                                                                                  | Medium   | `4e36ce0` |
+| The terminal Chat usage chunk could carry `"usage": null`                                                                                                          | Medium   | `4e36ce0` |
+| Strict tool schemas this proxy merely cannot _compile_ were 400s — Draft-07 spellings and any external `$ref`, both accepted by real OpenAI                        | Medium   | `cd51cc7` |
+| Strict-argument violations reached the client as an unclassified 502/500 with the tool name gone                                                                   | Medium   | `cd51cc7` |
+| Rate-limit classification never ran on SDK call sites — the most likely throttle point still returned 502                                                          | Medium   | `93e3239` |
+| `metadata` accepted and silently discarded, though the real API echoes it                                                                                          | Medium   | `10b9195` |
+| `GET /v1/models` published `model:effort` aliases that `POST` then answered with 404                                                                               | Medium   | `10b9195` |
+| Accept-and-ignore was unobservable for ~12 fields; `AppendFile` could skip its directory sync; `bindBroker` inherited rather than enforced its invariant           | Low      | `08ea85d` |
+
+### Two proposed fixes that were wrong
+
+Both were rejected on measurement rather than argument, which is the same
+standard that caught the three plan errors in the previous round.
+
+- **`UseNumber` for strict arguments.** The review proposed decoding tool
+  arguments with `UseNumber` to match `schemaMap`. Measured against
+  `jsonschema-go` v0.4.3, that breaks **every numeric strict tool**: the library
+  reflects over the instance and types a `json.Number` as `"string"`, so
+  `{"n":5}` against `{"type":"integer"}` reports
+  `5 has type "string", want "integer"`. Both the schema's literals and the
+  instance already round through `float64` and therefore compare correctly. Not
+  changed; the reason is now recorded at the call site so it is not re-proposed.
+- **`quota` → keep 502.** The previous round argued retrying cannot clear a
+  billing block. That argument inverts itself: the official SDKs retry 5xx on
+  their generic schedule, so 502 produced _more_ automatic retries than the 429
+  it was avoiding. Now 429 `insufficient_quota`, matching the real API. This
+  supersedes R6 in the backlog below.
+
+### The one that justifies the exercise
+
+`goleak` (D2) found a **P0 livelock** that a full manual review had missed. A
+WebSocket client vanishing without a close handshake — a dropped network or a
+killed client, i.e. the ordinary case — left the handler goroutine spinning at
+full speed for the life of the process, because `wsjson.Read` returned
+`net.ErrClosed`, which none of the loop's terminal conditions matched, while
+`connCtx` was still live. The handler never returned, so the connection's warm
+SDK session was never disconnected and its retention pins were never released.
+One `-count=1` run left three behind.
+
+---
+
 ## Residual backlog
 
-What genuinely remains. Nothing here is a correctness or contamination bug; the
-highest class present is **wasted work**, plus two deliberate scope limits on
-E3.
+What genuinely remains after both rounds. Nothing here is a correctness or
+contamination bug; the highest class present is **wasted work**, plus several
+deliberate scope limits. R6–R9 were added by round two and are documented limits
+rather than open defects.
 
 | ID     | Item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Class       | Effort |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------ |
@@ -616,14 +687,18 @@ E3.
 | **R2** | `prepareResponseTurn` retries `resumeSession` once **per instruction candidate**. `openai.InstructionCandidates("")` yields two (`" "` and a fallback system prompt), and `resumeSession` loops over them (`internal/copilotgw/sessions.go:92-107`), so a single refused resume issues two SDK calls before falling back — doubling cold-continuation latency for requests with no instructions.                                                                                                                                                                           | Wasted work | **S**  |
 | **R3** | E3 does **not** enforce OpenAI's strict _schema subset_ (`additionalProperties: false`, every property listed in `required`).[^strict] Real OpenAI 400s a strict schema that violates it; this proxy validates arguments against whatever schema the client declared. A client whose schema is strict-shaped gets the same guarantee either way; one whose schema is not gets a weaker guarantee than OpenAI would give, silently.                                                                                                                                         | Ergonomics  | **S**  |
 | **R4** | E3 added **no retry loop** for strict violations. A non-conforming tool call fails the turn with an error naming the tool rather than being fed back to the model for correction. This is stated as deliberate in `0fc27a8` — this proxy does not own the model's decoding loop — but it is a real behavioural gap against OpenAI's constrained decoding, which cannot emit a non-conforming call at all.                                                                                                                                                                  | Ergonomics  | **M**  |
-| **R5** | `apierr.RateLimited`'s `RetryAfter` is plumbed, mapped to an RFC 9110 `Retry-After` header and tested end to end, but is **unreachable in production**: the Copilot SDK exposes no retry-after on `SessionErrorData`, so `internal/copilotgw/session_errors.go:43` passes `0` and the header is never emitted today. The field exists so the taxonomy can carry a wait the moment anything can supply one.                                                                                                                                                                 | Ergonomics  | **XS** |
-| **R6** | The SDK's `"quota"` error category is deliberately left as **502**, not 429. The real API returns 429 `insufficient_quota` for it, but no amount of retrying clears a billing block, and this proxy has no channel to tell its single user to add credits other than the message. Revisit only if a client is observed handling `insufficient_quota` usefully.                                                                                                                                                                                                             | Ergonomics  | **XS** |
+| **R5** | `apierr.RateLimited`'s `RetryAfter` is plumbed, mapped to an RFC 9110 `Retry-After` header and tested end to end, but is **unreachable in production**: the Copilot SDK exposes no retry-after on `SessionErrorData`, so `0` is passed and the header is never emitted today. The field exists so the taxonomy can carry a wait the moment anything can supply one.                                                                                                                                                                                                        | Ergonomics  | **XS** |
+| **R6** | `classifyUpstreamError` classifies SDK-call failures by **string match** on the rendered error. The SDK returns `*internal/jsonrpc2.Error`, an unexported type, so `err.Error()` — `"JSON-RPC Error %d: %s"` — is the only signal available; nothing can read its `Code` or `Data`. A false positive costs a client an unnecessary backoff. Revisit if the SDK ever exports its error type.                                                                                                                                                                                | Ergonomics  | **S**  |
+| **R7** | An unencoded `..` in a response-id path is swallowed by `ServeMux`'s `cleanPath` **before** any handler runs, so `GET /v1/responses/..` returns a `307` with an HTML body — outside the JSON envelope `dcf7dde` guarantees. Encoded traversal (`%2E%2E`) is correctly rejected with a 400. Left alone deliberately: intercepting redirects to rewrite them risks breaking legitimate ones, for a path no client sends on purpose.                                                                                                                                          | Ergonomics  | **S**  |
+| **R8** | Warm-input delivery is **at-least-once**, not exactly-once. The pending claim is retired only after `Send` returns, so a crash between that return and the store write replays input the conversation already has. Clearing first would turn every failed send into silently dropped input the client was told had been accepted — a repeated turn is recoverable, a lost one is not. On the streaming path the claim writes are issued from the send goroutine, widening the window from "a crash" to "another request resumed the same warm id within milliseconds".     | Ergonomics  | **M**  |
+| **R9** | Strict tool schemas this proxy cannot compile are accepted and **not enforced**, logged at warn. That is the graceful degradation — a 400 would break integrations over schemas real OpenAI accepts — but it does mean `strict: true` is not a guarantee on those tools.                                                                                                                                                                                                                                                                                                   | Ergonomics  | **S**  |
 | **F1** | Chat Completions as an adapter over Responses. **Declined** with evidence — see [Workstream F](#workstream-f--the-decision). Recorded here so it is not silently re-proposed; re-open only if a _new_ reason appears, not because the prerequisite now exists.                                                                                                                                                                                                                                                                                                             | —           | **L**  |
 
 > [!TIP]
-> R1 and R2 are the only two with a load-proportional cost, and R2 is by far the
-> cheaper: it is one conditional on whether instructions were actually empty.
-> Take it first if this list is picked up.
+> R1 and R2 remain the only two with a load-proportional cost, and R2 is by far
+> the cheaper: it is one conditional on whether instructions were actually
+> empty. Take it first if this list is picked up. R8 is the only entry that can
+> still surprise a user, and only across a crash.
 
 ---
 
