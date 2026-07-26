@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs:
+      # Verified sufficient: the CLI extracts into XDG_CACHE_HOME, not TMPDIR, so
+      # the default noexec tmpfs does not need to be relaxed or enlarged.
       - /tmp:size=64m,mode=1777
     healthcheck:
       test: ["CMD", "/usr/local/bin/copilot-api", "healthcheck"]
@@ -19,18 +21,28 @@ services:
           memory: 1g
           cpus: "2"
     environment:
-      COPILOT_API_ADDR: "0.0.0.0:8080"
+      # The image already sets COPILOT_API_ADDR=0.0.0.0:8080, HOME, and
+      # XDG_CACHE_HOME. COPILOT_API_KEY is mandatory for a non-loopback bind.
       COPILOT_API_KEY: "${COPILOT_API_KEY:?required}"
       # Optional token auth for the Copilot SDK. Otherwise mount/use logged-in auth appropriate for your environment.
       # GITHUB_TOKEN: "${GITHUB_TOKEN}"
     volumes:
       - copilot-api-data:/home/nonroot/.local/share/copilot-api
       - copilot-api-state:/home/nonroot/.local/state/copilot-api
-      - copilot-api-cache:/home/nonroot/.cache/copilot-api
       - copilot-api-config:/home/nonroot/.config/copilot-api
+      # The whole cache directory, not just .cache/copilot-api, because three
+      # different consumers write under it and with read_only: true none of them
+      # can fall back to the rootfs:
+      #   .cache/copilot-api  the managed cache root
+      #   .cache/copilot-sdk  where the Go SDK unpacks the embedded CLI (~150 MB)
+      #   .cache/copilot      where that CLI extracts its own bundled package
+      # Only .cache/copilot-api is a managed root, so `prune` and `purge` never
+      # touch the other two. Delete this volume to reclaim the CLI's disk use;
+      # it is repopulated on next start.
+      - copilot-cache:/home/nonroot/.cache
 
 volumes:
   copilot-api-data:
   copilot-api-state:
-  copilot-api-cache:
   copilot-api-config:
+  copilot-cache:

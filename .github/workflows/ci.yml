@@ -59,6 +59,87 @@ jobs:
         # green branch red. Bump deliberately.
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 
+  docker:
+    name: Docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: copilot-api:ci
+
+      - name: Verify state directories are scaffolded for uid 65532
+        # Load-bearing: when a compose mountpoint is absent from the image,
+        # Docker initializes the fresh named volume as root:root and the
+        # uid-65532 process cannot chmod it.
+        run: |
+          docker create --name probe --entrypoint /nonexistent copilot-api:ci
+          docker export probe | tar -tv > layout.txt
+          docker rm -f probe
+          status=0
+          for dir in \
+            home/nonroot/.local/share/copilot-api/ \
+            home/nonroot/.local/state/copilot-api/ \
+            home/nonroot/.config/copilot-api/ \
+            home/nonroot/.cache/copilot-api/ \
+            home/nonroot/.cache/copilot-sdk/; do
+            if ! grep -Eq "65532/65532 .* $dir\$" layout.txt; then
+              echo "::error::$dir is missing or not owned by 65532 in the image"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Smoke test the container
+        # No Copilot credentials here, so this deliberately stops at the
+        # "Not authenticated" models.list call. Everything before that point is
+        # what previously made the image unstartable: the volumes must be
+        # claimable by uid 65532, and the embedded CLI must extract, dynamically
+        # link, exec, and complete a JSON-RPC handshake. The named volumes do
+        # not exist yet, which is deliberate: a fresh volume is the case that
+        # used to break.
+        run: |
+          timeout 300 docker run --rm \
+            --read-only --tmpfs /tmp:size=64m,mode=1777 \
+            -e COPILOT_API_KEY=ci-smoke \
+            -v ci-data:/home/nonroot/.local/share/copilot-api \
+            -v ci-state:/home/nonroot/.local/state/copilot-api \
+            -v ci-config:/home/nonroot/.config/copilot-api \
+            -v ci-cache:/home/nonroot/.cache \
+            copilot-api:ci serve > smoke.log 2>&1 || true
+          cat smoke.log
+          if grep -q 'operation not permitted' smoke.log; then
+            echo "::error::volume ownership regression: uid 65532 could not claim a storage root"
+            exit 1
+          fi
+          if ! grep -q 'copilot runtime ready' smoke.log; then
+            echo "::error::the embedded Copilot CLI did not start; the runtime image or its cache mount is wrong"
+            exit 1
+          fi
+          echo "Embedded CLI started and handshook; stopped at authentication as expected."
+
+      - name: Verify the non-loopback bind requires COPILOT_API_KEY
+        # The image sets COPILOT_API_ADDR=0.0.0.0:8080, so this guard is the only
+        # thing keeping the default posture authenticated. No --read-only here:
+        # serve() creates the config dir before it checks the key, so a
+        # read-only rootfs would fail earlier and never exercise the guard.
+        run: |
+          if docker run --rm copilot-api:ci serve > guard.log 2>&1; then
+            cat guard.log
+            echo "::error::serve started on 0.0.0.0 without COPILOT_API_KEY"
+            exit 1
+          fi
+          cat guard.log
+          grep -q 'COPILOT_API_KEY must be set when binding to non-loopback address' guard.log
+
   deno:
     name: Deno
     runs-on: ubuntu-latest

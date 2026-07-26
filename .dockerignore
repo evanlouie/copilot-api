@@ -5,12 +5,14 @@
 .vscode
 .DS_Store
 
-copilot-api
-bin
-build
-dist
-out
-tmp
+# Anchored at the context root so they cannot match nested paths such as
+# cmd/copilot-api.
+/copilot-api
+/bin
+/build
+/dist
+/out
+/tmp
 
 cmd/copilot-api/zcopilot_*
 

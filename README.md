@@ -451,12 +451,83 @@ go tool bundler --output cmd/copilot-api
 go build ./cmd/copilot-api
 ```
 
-Docker builds run the bundler inside the build stage. Local development can skip
-bundling and use `COPILOT_CLI_PATH` or `copilot` on `PATH`, but that weakens
-SDK/CLI version matching.
+Docker builds run the bundler inside the build stage with an explicitly pinned
+`--cli-version`, so the embedded CLI does not depend on when the image was
+built. Local development can skip bundling and use `COPILOT_CLI_PATH` or
+`copilot` on `PATH`, but that weakens SDK/CLI version matching.
 
 Do not upgrade the SDK/CLI unless the hydration, prompt-isolation, tool
 disablement, tool-choice, and provider-shape tests/spikes have been re-run.
+
+## Container deployment
+
+```sh
+docker build -t copilot-api .
+COPILOT_API_KEY=... docker compose -f docker-compose.example.yml up -d
+```
+
+### Runtime image
+
+The runtime stage is `gcr.io/distroless/cc-debian12:nonroot`, not `static`. The
+Go binary is built `CGO_ENABLED=0` and would run on `static`, but the embedded
+Copilot CLI that the SDK unpacks and executes is a **dynamically linked** Node
+single-executable: it requests `/lib/ld-linux-*.so` and links `libc`, `libm`,
+`libdl`, `libpthread`, `libstdc++.so.6`, and `libgcc_s.so.1`. On `static` it
+fails with a misleading `exec: no such file or directory` (no ELF interpreter),
+and on `base` with `error while loading shared libraries: libstdc++.so.6`. `cc`
+is the smallest distroless variant that satisfies it.
+
+Both the builder and the runtime base are pinned by digest, and the embedded CLI
+version is recorded as the `com.github.copilot.cli.version` image label:
+
+```sh
+docker image inspect copilot-api --format '{{index .Config.Labels "com.github.copilot.cli.version"}}'
+```
+
+### Environment baked into the image
+
+| Variable            | Image value              | Why                                                                                                                                                                        |
+| ------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COPILOT_API_ADDR`  | `0.0.0.0:8080`           | The process default is `127.0.0.1:8080`, which makes a published port silently unreachable. **`COPILOT_API_KEY` is therefore mandatory**: the non-loopback guard refuses to start without it. Override to `127.0.0.1:8080` to restore the unauthenticated loopback posture. |
+| `HOME`              | `/home/nonroot`          | Distroless sets no `HOME`. Without it the XDG lookups fall back to `/tmp/xdg-*` and every mounted volume is ignored.                                                        |
+| `XDG_CACHE_HOME`    | `/home/nonroot/.cache`   | Pins all three cache consumers (see below) under one mountable directory.                                                                                                  |
+
+### Volumes
+
+The image scaffolds every mountpoint as `65532:65532` in the build stage. This
+is load-bearing: when a mountpoint is **absent** from the image, Docker creates
+it and initializes the fresh named volume as `root:root 0755`, and the uid-65532
+process then fails startup with
+`secure storage root ...: operation not permitted`.
+
+| Mount                                    | Contents                                            |
+| ---------------------------------------- | --------------------------------------------------- |
+| `/home/nonroot/.local/share/copilot-api` | Managed data root                                   |
+| `/home/nonroot/.local/state/copilot-api` | Managed state root                                  |
+| `/home/nonroot/.config/copilot-api`      | Isolated Copilot SDK config dir                     |
+| `/home/nonroot/.cache`                   | Managed cache root **plus** the CLI caches below    |
+
+### CLI cache caveat
+
+The whole `.cache` directory is mounted, not just `.cache/copilot-api`, because
+three separate consumers write under it and `read_only: true` leaves none of
+them a fallback:
+
+- `.cache/copilot-api` — the managed cache root.
+- `.cache/copilot-sdk` — where the Go SDK installs the extracted CLI
+  (`os.UserCacheDir()/copilot-sdk`; roughly 150 MB). The mount must be writable
+  **and exec-capable**, or the SDK silently returns an empty path and falls back
+  to `copilot` on `PATH`, which does not exist in the image.
+- `.cache/copilot` — where that CLI's own loader then extracts its bundled
+  package and native addons.
+
+Only `.cache/copilot-api` is a managed root, so **`prune` and `purge` never
+touch `.cache/copilot-sdk` or `.cache/copilot`**. Delete the `copilot-cache`
+volume to reclaim their disk use; both are repopulated on the next start.
+
+The CLI extracts into `XDG_CACHE_HOME` rather than `TMPDIR`, so the compose
+file's default 64 MiB `noexec` `/tmp` tmpfs is sufficient and does not need to
+be enlarged or made executable.
 
 ## Development
 
