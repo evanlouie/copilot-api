@@ -34,7 +34,7 @@ const strictLookupSchema = `{"type":"object","properties":{"city":{"type":"strin
 // guarantee is enforced against the arguments instead.
 func TestStrictToolRequestIsAccepted(t *testing.T) {
 	t.Parallel()
-	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, false)
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, openai.ToolScope{})
 	if err != nil {
 		t.Fatalf("strict tool should be accepted: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", tc.schema, boolPtr(true))}, false)
+			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", tc.schema, boolPtr(true))}, openai.ToolScope{})
 			if err != nil {
 				t.Fatalf("uncompilable strict schema should not fail the request: %v", err)
 			}
@@ -93,7 +93,7 @@ func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
 // scoped to schemas this proxy genuinely cannot read.
 func TestStrictToolWithUsableSchemaIsStillEnforced(t *testing.T) {
 	t.Parallel()
-	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, false)
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestStrictToolWithUsableSchemaIsStillEnforced(t *testing.T) {
 // is promised about the arguments.
 func TestNonStrictToolKeepsUnusableSchema(t *testing.T) {
 	t.Parallel()
-	if _, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", `{"type":"object","properties":{"city":{"$ref":"#/nope/missing"}}}`, nil)}, false); err != nil {
+	if _, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", `{"type":"object","properties":{"city":{"$ref":"#/nope/missing"}}}`, nil)}, openai.ToolScope{}); err != nil {
 		t.Fatalf("a non-strict tool must not be schema-checked: %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestStrictArgumentsAreValidatedBeforeReachingTheClient(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, false)
+			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, openai.ToolScope{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestStrictArgumentsAreValidatedBeforeReachingTheClient(t *testing.T) {
 // asked for nothing, so nothing is enforced.
 func TestNonStrictArgumentsAreNotValidated(t *testing.T) {
 	t.Parallel()
-	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, nil)}, false)
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, nil)}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestNonStrictArgumentsAreNotValidated(t *testing.T) {
 // same guarantee rather than letting handler-first ordering slip past.
 func TestStrictArgumentsAreValidatedInTheSDKHandler(t *testing.T) {
 	t.Parallel()
-	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, false)
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestStrictCustomToolIsAcceptedAndReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("flatten: %v", err)
 	}
-	rt, err := newRequestToolsFromClientTools(NewBroker(time.Minute), tools, false)
+	rt, err := newRequestToolsFromClientTools(NewBroker(time.Minute), tools, openai.ToolScope{})
 	if err != nil {
 		t.Fatalf("strict on a custom tool should not fail the request: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestNamespaceDeferLoadingReachesItsChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := newRequestToolsFromClientTools(NewBroker(time.Minute), tools, false)
+	rt, err := newRequestToolsFromClientTools(NewBroker(time.Minute), tools, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestDeferLoadingIsForwardedToTheSDK(t *testing.T) {
 				ResponseName: "lookup",
 				Parameters:   map[string]any{"type": "object"},
 				DeferLoading: tt.defer_,
-			}}, false)
+			}}, openai.ToolScope{})
 			if err != nil {
 				t.Fatal(err)
 			}

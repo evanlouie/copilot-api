@@ -22,7 +22,7 @@ import (
 // "internal server error" with the tool name gone.
 func TestStrictArgumentFailureIsClassified(t *testing.T) {
 	t.Parallel()
-	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, false)
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}

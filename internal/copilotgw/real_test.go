@@ -303,7 +303,7 @@ func TestRealClientOptionsUseV1ModeEmpty(t *testing.T) {
 
 func TestSessionConfigBuildersApplyV1Hardening(t *testing.T) {
 	t.Parallel()
-	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), nil, false)
+	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), nil, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestSessionConfigBuildersExposePublicCustomToolNames(t *testing.T) {
 	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), []openai.Tool{
 		{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}},
 		{Type: "function", Function: openai.FunctionTool{Name: "grep"}},
-	}, false)
+	}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
 	runner.abortOnce.Do(func() {})
 	gateway.pending.put("batch_runner", runner)
 
-	requestTools, err := toolproxy.NewRequestTools(gateway.broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	requestTools, err := toolproxy.NewRequestTools(gateway.broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}

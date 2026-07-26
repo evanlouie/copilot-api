@@ -135,6 +135,10 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 	}
 	reasoningEffort := openai.ResponsesReasoningEffort(req)
 	s.logUnhonoredResponseControls(ctx, req)
+	toolChoice, err := openai.ParseToolChoice(req.ToolChoice)
+	if err != nil {
+		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
+	}
 	normalizedTools, err := openai.NormalizeResponsesTools(req.Tools)
 	if err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
@@ -190,7 +194,7 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 		PreviousResponseID:                 req.PreviousResponseID,
 		Tools:                              normalizedTools,
 		ToolsSet:                           toolsSet,
-		ToolChoiceNone:                     openai.ToolChoiceNone(req.ToolChoice),
+		ToolChoice:                         toolChoice,
 		Store:                              store,
 		StoreSet:                           storeSet,
 		ReasoningEffort:                    reasoningEffort,

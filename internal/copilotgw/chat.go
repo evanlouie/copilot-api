@@ -62,9 +62,9 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	if err != nil {
 		return nil, apierr.Internal("failed to write synthetic session state")
 	}
-	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
+	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoice.Scope())
 	if err != nil {
-		return nil, apierr.InvalidRequest(err.Error(), "tools")
+		return nil, requestToolsError(err)
 	}
 	g.logUnenforceableStrict(rt, "chat")
 	events := newSessionEventSink(g.log)

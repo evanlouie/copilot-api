@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
@@ -475,15 +477,102 @@ type ToolChoice struct {
 	Kind string
 	// Name is the forced tool name for the "function" and "custom" kinds.
 	Name string
+	// Allowed is the tool names an "allowed_tools" choice listed, in the order
+	// the client wrote them.
+	Allowed []string
+	// AllowedMode is an "allowed_tools" choice's mode: "auto" or "required".
+	AllowedMode string
 }
 
-// Honored reports whether the Copilot SDK can enforce this choice. "auto" is
-// the backend's own behavior and "none" is emulated by withholding the tool
-// catalog; the forcing modes have no SDK equivalent, so they are accepted and
-// logged at debug instead of rejected. OpenAI's Structured Outputs guidance
-// alone makes rejecting them untenable.
+// Honored reports whether this proxy delivers the whole of what the choice
+// asks for.
+//
+// "auto" is the backend's own behavior, and everything else that is honored is
+// honored by narrowing the tool catalog handed to the SDK (see ToolScope):
+// "none" withholds it entirely, and an "allowed_tools" allow-list is exactly a
+// catalog restriction, so filtering satisfies it rather than approximating it.
+//
+// What narrowing cannot do is make the model call anything, so "required", an
+// allowed_tools mode of "required", and the forced function/custom kinds are
+// not fully honored. They are still accepted and logged at debug rather than
+// rejected - OpenAI's Structured Outputs guidance alone makes rejecting them
+// untenable.
 func (c ToolChoice) Honored() bool {
-	return c.Kind == "" || c.Kind == "auto" || c.Kind == "none"
+	switch c.Kind {
+	case "", "auto", "none":
+		return true
+	case "allowed_tools":
+		return c.AllowedMode != "required"
+	default:
+		return false
+	}
+}
+
+// ForcesTool reports whether the choice names one tool the model is supposed to
+// call. Such a choice is enforced only as far as narrowing the catalog reaches:
+// the model is left able to call nothing but that tool, which is weaker than
+// OpenAI's guarantee that it will call it.
+func (c ToolChoice) ForcesTool() bool {
+	return c.Kind == "function" || c.Kind == "custom"
+}
+
+// ToolScope is the restriction a tool_choice places on the tool catalog handed
+// to the Copilot SDK. It is the entire enforcement mechanism available: the SDK
+// has no tool_choice concept, so which tools the model may call is decided
+// solely by which tools it is shown.
+type ToolScope struct {
+	// None withholds the catalog outright.
+	None bool
+	// Only is the set of client-facing tool names the catalog is narrowed to,
+	// sorted and deduplicated. It is empty when nothing is narrowed.
+	Only []string
+	// Forced records that Only came from a choice naming a single tool the model
+	// is supposed to call. It changes how an unmatched name is treated - a forced
+	// choice for a tool that does not exist is a client error - but not the
+	// resulting catalog, so Equal ignores it.
+	Forced bool
+}
+
+// Scope derives the catalog restriction this choice implies.
+func (c ToolChoice) Scope() ToolScope {
+	switch c.Kind {
+	case "none":
+		return ToolScope{None: true}
+	case "function", "custom":
+		return ToolScope{Only: []string{c.Name}, Forced: true}
+	case "allowed_tools":
+		// An allow-list that permits nothing is a request for no tools, which is
+		// what "none" already spells; reading it as "no restriction" would honour
+		// the opposite of what the client wrote.
+		if len(c.Allowed) == 0 {
+			return ToolScope{None: true}
+		}
+		return ToolScope{Only: sortedUnique(c.Allowed)}
+	default:
+		return ToolScope{}
+	}
+}
+
+// Equal reports whether two scopes narrow the catalog the same way. It is what
+// decides whether a warm Responses session, whose SDK session was configured
+// with one scope's catalog and cannot be reconfigured, may serve a request that
+// arrived with another.
+func (s ToolScope) Equal(other ToolScope) bool {
+	if s.None != other.None || len(s.Only) != len(other.Only) {
+		return false
+	}
+	for i, name := range s.Only {
+		if other.Only[i] != name {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedUnique(names []string) []string {
+	out := append([]string(nil), names...)
+	sort.Strings(out)
+	return slices.Compact(out)
 }
 
 // ParseToolChoice decodes tool_choice, rejecting only values OpenAI does not
@@ -507,6 +596,15 @@ func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 		Function struct {
 			Name string `json:"name"`
 		} `json:"function"`
+		Mode  string             `json:"mode"`
+		Tools []toolChoiceMember `json:"tools"`
+		// AllowedTools is the Chat Completions nesting of an allowed_tools choice;
+		// Responses puts mode and tools at the top level instead. Both spellings
+		// reach this proxy, exactly as they do for a forced tool name.
+		AllowedTools *struct {
+			Mode  string             `json:"mode"`
+			Tools []toolChoiceMember `json:"tools"`
+		} `json:"allowed_tools"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return ToolChoice{}, apierr.InvalidRequest("tool_choice must be auto, none, required, or a tool object", "tool_choice")
@@ -524,20 +622,47 @@ func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 		}
 		return ToolChoice{Kind: obj.Type, Name: name}, nil
 	case "allowed_tools":
-		return ToolChoice{Kind: obj.Type}, nil
+		mode, members := obj.Mode, obj.Tools
+		if obj.AllowedTools != nil {
+			mode, members = obj.AllowedTools.Mode, obj.AllowedTools.Tools
+		}
+		allowed := make([]string, 0, len(members))
+		for _, member := range members {
+			name := member.name()
+			if name == "" {
+				// The allow-list is enforced by narrowing the catalog to these names,
+				// so an entry this proxy cannot name is one it would silently drop -
+				// turning a tool the client permitted into a withheld one.
+				return ToolChoice{}, apierr.InvalidRequest("allowed_tools entries require a tool name", "tool_choice")
+			}
+			allowed = append(allowed, name)
+		}
+		return ToolChoice{Kind: obj.Type, Allowed: allowed, AllowedMode: mode}, nil
 	default:
 		return ToolChoice{}, apierr.InvalidRequest("unsupported tool_choice", "tool_choice")
 	}
 }
 
+// toolChoiceMember is one entry of an allowed_tools list. Chat Completions
+// nests the name under "function" and Responses puts it at the top level, the
+// same split ParseToolChoice already handles for a forced choice.
+type toolChoiceMember struct {
+	Name     string `json:"name"`
+	Function struct {
+		Name string `json:"name"`
+	} `json:"function"`
+}
+
+func (m toolChoiceMember) name() string {
+	if m.Name != "" {
+		return m.Name
+	}
+	return m.Function.Name
+}
+
 func validateToolChoice(raw json.RawMessage) error {
 	_, err := ParseToolChoice(raw)
 	return err
-}
-
-func ToolChoiceNone(raw json.RawMessage) bool {
-	var s string
-	return len(raw) > 0 && json.Unmarshal(raw, &s) == nil && s == "none"
 }
 
 func isOne(raw json.RawMessage) bool {

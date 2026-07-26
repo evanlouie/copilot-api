@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -109,8 +110,10 @@ func TestValidateToolChoice(t *testing.T) {
 	}
 }
 
-// The forcing modes are accepted but cannot be enforced by the Copilot SDK, so
-// the HTTP layer needs Honored to decide what to report at debug level.
+// Narrowing the tool catalog is all the enforcement the Copilot SDK allows, so
+// the HTTP layer needs Honored to decide which part of a choice is worth
+// reporting at debug level: the demand to actually call a tool, never the
+// allow-list that catalog filtering satisfies exactly.
 func TestToolChoiceHonored(t *testing.T) {
 	t.Parallel()
 	tests := map[string]bool{
@@ -120,7 +123,8 @@ func TestToolChoiceHonored(t *testing.T) {
 		`"required"`:                             false,
 		`{"type":"function","name":"lookup"}`:    false,
 		`{"type":"custom","name":"apply_patch"}`: false,
-		`{"type":"allowed_tools","mode":"auto"}`: false,
+		`{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"lookup"}]}`:     true,
+		`{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"lookup"}]}`: false,
 	}
 	for raw, want := range tests {
 		choice, err := ParseToolChoice(json.RawMessage(raw))
@@ -143,6 +147,85 @@ func mustParseToolChoice(t *testing.T, raw string) ToolChoice {
 		t.Fatal(err)
 	}
 	return choice
+}
+
+// The allow-list is what makes allowed_tools enforceable by catalog filtering,
+// so it has to survive parsing from both the Chat Completions nesting and the
+// flat Responses one.
+func TestParseToolChoiceReadsAllowedToolsFromBothSpellings(t *testing.T) {
+	t.Parallel()
+	for name, raw := range map[string]string{
+		"responses": `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"lookup"},{"type":"custom","name":"apply_patch"}]}`,
+		"chat":      `{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"lookup"}},{"type":"custom","name":"apply_patch"}]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			choice := mustParseToolChoice(t, raw)
+			if choice.AllowedMode != "required" {
+				t.Fatalf("AllowedMode = %q, want required", choice.AllowedMode)
+			}
+			if !slices.Equal(choice.Allowed, []string{"lookup", "apply_patch"}) {
+				t.Fatalf("Allowed = %#v, want the declared order", choice.Allowed)
+			}
+		})
+	}
+}
+
+// An unnameable entry would be dropped from the allow-list, which withholds a
+// tool the client permitted. That is exactly the silent downgrade validation
+// exists to prevent.
+func TestParseToolChoiceRejectsUnnamedAllowedTool(t *testing.T) {
+	t.Parallel()
+	_, err := ParseToolChoice(json.RawMessage(`{"type":"allowed_tools","mode":"auto","tools":[{"type":"function"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "allowed_tools entries require a tool name") {
+		t.Fatalf("error = %v, want a named-entry rejection", err)
+	}
+}
+
+// Scope is the whole of what this proxy can enforce, so each choice has to map
+// onto the catalog it is meant to leave the model with.
+func TestToolChoiceScope(t *testing.T) {
+	t.Parallel()
+	tests := map[string]ToolScope{
+		``:                                       {},
+		`"auto"`:                                 {},
+		`"required"`:                             {},
+		`"none"`:                                 {None: true},
+		`{"type":"function","name":"lookup"}`:    {Only: []string{"lookup"}, Forced: true},
+		`{"type":"custom","name":"apply_patch"}`: {Only: []string{"apply_patch"}, Forced: true},
+		`{"type":"allowed_tools","mode":"auto","tools":[{"name":"b"},{"name":"a"},{"name":"b"}]}`: {Only: []string{"a", "b"}},
+		// An allow-list permitting nothing is a request for no tools, not for no
+		// restriction.
+		`{"type":"allowed_tools","mode":"auto","tools":[]}`: {None: true},
+	}
+	for raw, want := range tests {
+		got := mustParseToolChoice(t, raw).Scope()
+		if got.None != want.None || got.Forced != want.Forced || !slices.Equal(got.Only, want.Only) {
+			t.Fatalf("ParseToolChoice(%s).Scope() = %#v, want %#v", raw, got, want)
+		}
+	}
+}
+
+// Warm-session reuse turns on scope equality, so it must compare the catalog a
+// choice produces rather than how the client spelled it.
+func TestToolScopeEqualComparesCatalogsNotSpellings(t *testing.T) {
+	t.Parallel()
+	auto := mustParseToolChoice(t, `"auto"`).Scope()
+	if !auto.Equal(mustParseToolChoice(t, ``).Scope()) {
+		t.Fatal("auto and an omitted tool_choice must name the same catalog")
+	}
+	if auto.Equal(mustParseToolChoice(t, `"none"`).Scope()) {
+		t.Fatal("auto and none must not name the same catalog")
+	}
+	forced := mustParseToolChoice(t, `{"type":"function","name":"lookup"}`).Scope()
+	allowed := mustParseToolChoice(t, `{"type":"allowed_tools","mode":"auto","tools":[{"name":"lookup"}]}`).Scope()
+	if !forced.Equal(allowed) {
+		// Forced is about how an unmatched name is treated, not about the catalog.
+		t.Fatal("choices narrowing to the same single tool must compare equal")
+	}
+	if forced.Equal(mustParseToolChoice(t, `{"type":"function","name":"other"}`).Scope()) {
+		t.Fatal("forced choices for different tools must not compare equal")
+	}
 }
 
 // Every one of these is a valid OpenAI request that a widely-used client sends

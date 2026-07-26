@@ -58,8 +58,8 @@ func TestResponsesExplicitNullOptionalFieldsAreNotSet(t *testing.T) {
 	if len(gw.got.Tools) != 0 {
 		t.Fatalf("Tools = %#v, want none", gw.got.Tools)
 	}
-	if gw.got.ToolChoiceNone {
-		t.Fatalf(`ToolChoiceNone = true for {"tool_choice":null}, want false`)
+	if gw.got.ToolChoice.Kind != "" {
+		t.Fatalf(`ToolChoice.Kind = %q for {"tool_choice":null}, want ""`, gw.got.ToolChoice.Kind)
 	}
 }
 
@@ -81,8 +81,8 @@ func TestResponsesExplicitStoreAndToolsStaySet(t *testing.T) {
 	if !gw.got.ToolsSet {
 		t.Fatalf(`ToolsSet = false for {"tools":[]}, want true`)
 	}
-	if !gw.got.ToolChoiceNone {
-		t.Fatalf(`ToolChoiceNone = false for {"tool_choice":"none"}, want true`)
+	if gw.got.ToolChoice.Kind != "none" {
+		t.Fatalf(`ToolChoice.Kind = %q for {"tool_choice":"none"}, want "none"`, gw.got.ToolChoice.Kind)
 	}
 }
 

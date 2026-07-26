@@ -45,7 +45,7 @@ func TestRequestToolsPreserveClientNumbers(t *testing.T) {
 	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{{
 		Type:     "function",
 		Function: openai.FunctionTool{Name: "lookup", Description: "look things up", Parameters: json.RawMessage(numericSchema)},
-	}}, false)
+	}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}

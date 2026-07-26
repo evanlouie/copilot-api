@@ -1846,7 +1846,7 @@ func TestUnhonoredControlsAreLoggedAtDebug(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("chat status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	for _, want := range []string{"max output tokens is not forwarded", "parallel_tool_calls=false is not enforced", "tool_choice is not enforced", `"tool_choice_name":"lookup"`} {
+	for _, want := range []string{"max output tokens is not forwarded", "parallel_tool_calls=false is not enforced", "the Copilot SDK cannot make the model call it", `"tool_choice_name":"lookup"`} {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("chat debug log missing %q: %s", want, buf.String())
 		}

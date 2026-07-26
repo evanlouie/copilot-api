@@ -287,6 +287,58 @@ func TestWarmResponseSessionUseRejectsMismatchedInstructions(t *testing.T) {
 	}
 }
 
+// A warm session's SDK session was configured with the catalog its own
+// tool_choice implied and cannot be reconfigured, so serving a request that
+// asks for a different catalog would silently give the client a tool scope it
+// did not ask for. Refusing sends the caller down the resume path, which
+// rebuilds the catalog this request actually named.
+func TestWarmResponseSessionUseRejectsMismatchedToolChoiceScope(t *testing.T) {
+	t.Parallel()
+	tools := []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindFunction, Name: "lookup"},
+		{Kind: toolcatalog.ToolKindFunction, Name: "get_weather"},
+	}
+	tests := map[string]struct {
+		warm    openai.ToolChoice
+		req     openai.ToolChoice
+		reusing bool
+	}{
+		"narrowed then widened":  {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "auto"}},
+		"widened then narrowed":  {warm: openai.ToolChoice{Kind: "auto"}, req: openai.ToolChoice{Kind: "function", Name: "lookup"}},
+		"different forced tools": {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "function", Name: "get_weather"}},
+		"none then auto":         {warm: openai.ToolChoice{Kind: "none"}, req: openai.ToolChoice{Kind: "auto"}},
+		"same forced tool":       {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "function", Name: "lookup"}, reusing: true},
+		// An allow-list and a forced choice that leave the same single tool visible
+		// leave the same SDK session behind them.
+		"equivalent scopes": {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "allowed_tools", AllowedMode: "auto", Allowed: []string{"lookup"}}, reusing: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", tools: tools, toolChoice: tt.warm}
+			req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", ToolChoice: tt.req}
+			if _, ok := warm.use(&req); ok != tt.reusing {
+				t.Fatalf("warm reuse = %t, want %t", ok, tt.reusing)
+			}
+		})
+	}
+}
+
+// An unset tool_choice inherits the warm session's, exactly as instructions and
+// reasoning effort do: the session's catalog is the one the turn will run with,
+// so the request must be told what it is.
+func TestWarmResponseSessionUseInheritsToolChoice(t *testing.T) {
+	t.Parallel()
+	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", toolChoice: openai.ToolChoice{Kind: "none"}}
+	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm"}
+	if _, ok := warm.use(&req); !ok {
+		t.Fatal("warm session was not used for an unset tool_choice")
+	}
+	if req.ToolChoice.Kind != "none" {
+		t.Fatalf("inherited tool_choice = %#v, want the warm session's none", req.ToolChoice)
+	}
+}
+
 // TestPendingWarmInputSurvivesResume covers the durable half of warming: a warm
 // response buffers its input in memory only, so if the client's WebSocket drops
 // before it generates, the resumed SDK session has never seen that input. The

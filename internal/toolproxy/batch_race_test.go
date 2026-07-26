@@ -33,7 +33,7 @@ func TestInvocationDuringExpiryDoesNotRaceOnCallMap(t *testing.T) {
 	)
 	for i := range iterations {
 		broker := NewBroker(ttl)
-		rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+		rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 		if err != nil {
 			t.Fatal(err)
 		}
