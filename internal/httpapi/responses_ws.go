@@ -340,18 +340,23 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 			if websocket.CloseStatus(err) != -1 || connCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				break
 			}
-			// Anything left is a connection this loop can no longer read from: a
-			// transport failure is closed by coder/websocket before the error
-			// surfaces, and a payload that is not JSON at all is closed by wsjson
-			// itself with StatusInvalidFramePayloadData. Either way every later read
-			// returns net.ErrClosed the instant it is issued, so continuing here
-			// spun this goroutine at full speed forever - it never exited, so the
+			// Anything left is a connection this loop can no longer read from, and
+			// which coder/websocket has already closed for us. A transport failure
+			// is closed before the error surfaces; a payload that is not JSON at
+			// all is closed by wsjson with StatusInvalidFramePayloadData, which is
+			// what the WebSocket spec prescribes for non-conforming payload data
+			// and is the behaviour this proxy wants (wsjson.Read calls c.Close
+			// before returning the unmarshal error). Either way every later write
+			// returns net.ErrClosed the instant it is issued, so no error envelope
+			// can reach the client and none is attempted: a client that sends
+			// malformed JSON gets the 1007 close and nothing else.
+			//
+			// Ending the loop is the part that matters. Continuing spun this
+			// goroutine at full speed forever - it never exited, so the
 			// connection's warm session was never disconnected and its retention
 			// pins were never released. A client that vanishes without a close
-			// handshake, which is the ordinary outcome of a dropped network or a
-			// killed client, is enough to reach it. Report what can still be
-			// reported, then end the loop.
-			_ = writer.writeError(apierr.InvalidRequest("invalid JSON websocket message: "+err.Error(), "body"), "")
+			// handshake, the ordinary outcome of a dropped network or a killed
+			// client, is enough to reach it.
 			break
 		}
 		state.markActivity()
