@@ -20,6 +20,7 @@ type ResponsesRequest struct {
 	ReasoningEffort    string                     `json:"reasoning_effort,omitempty"`
 	Include            json.RawMessage            `json:"include,omitempty"`
 	Reasoning          json.RawMessage            `json:"reasoning,omitempty"`
+	Metadata           map[string]string          `json:"metadata,omitempty"`
 	Text               json.RawMessage            `json:"text,omitempty"`
 	Raw                map[string]json.RawMessage `json:"-"`
 }

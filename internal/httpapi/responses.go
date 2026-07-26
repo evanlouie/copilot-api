@@ -194,6 +194,7 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 		DefaultReasoningEffort:             s.cfg.DefaultReasoningEffort,
 		ResolvedReasoningEffort:            resolvedEffort,
 		ReasoningEffortResolved:            resolved,
+		Metadata:                           req.Metadata,
 	}
 	return gwReq, preparedResponseLogFields{reasoningEffort: reasoningEffort, resolvedEffort: resolvedEffort, resolved: resolved, continuation: continuation}, nil
 }

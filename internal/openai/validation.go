@@ -139,6 +139,9 @@ func ValidateResponsesRequest(req *ResponsesRequest) error {
 	if err := ValidateReasoningEffort(req.ReasoningEffort, "reasoning_effort"); err != nil {
 		return err
 	}
+	if err := ValidateMetadata(req.Metadata); err != nil {
+		return err
+	}
 	if err := validateUnsupportedFields(req.Raw, alwaysRejectResponseFields); err != nil {
 		return err
 	}
@@ -613,4 +616,38 @@ func InstructionCandidates(s string) []string {
 		return []string{s}
 	}
 	return []string{" ", "You are a chat completion model."}
+}
+
+// OpenAI's metadata limits: at most 16 pairs, keys up to 64 characters and
+// values up to 512.
+const (
+	maxMetadataPairs    = 16
+	maxMetadataKeyLen   = 64
+	maxMetadataValueLen = 512
+)
+
+// ValidateMetadata bounds the client's own key/value tagging.
+//
+// metadata is round-trippable state - the real API echoes it on the response
+// object and on GET /v1/responses/{id} - so this proxy stores and echoes it
+// rather than dropping it. Accepting it and discarding it would be the silent
+// acceptance the validation policy rules out, and it degrades badly: a client
+// tagging responses with a trace id gets 200 OK and then finds the field gone
+// on read, with nothing to indicate why.
+//
+// The limits are rejected rather than truncated. Truncating a trace id yields a
+// value that looks valid and correlates to nothing.
+func ValidateMetadata(metadata map[string]string) error {
+	if len(metadata) > maxMetadataPairs {
+		return apierr.InvalidRequest(fmt.Sprintf("metadata supports at most %d key-value pairs, got %d", maxMetadataPairs, len(metadata)), "metadata")
+	}
+	for key, value := range metadata {
+		if len(key) > maxMetadataKeyLen {
+			return apierr.InvalidRequest(fmt.Sprintf("metadata keys support at most %d characters, got %d for %q", maxMetadataKeyLen, len(key), key), "metadata")
+		}
+		if len(value) > maxMetadataValueLen {
+			return apierr.InvalidRequest(fmt.Sprintf("metadata values support at most %d characters, got %d for key %q", maxMetadataValueLen, len(value), key), "metadata")
+		}
+	}
+	return nil
 }

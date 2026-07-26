@@ -385,16 +385,22 @@ func TestModelsEndpointNormalizesAndDeduplicatesReasoningAliases(t *testing.T) {
 	t.Parallel()
 	models := []copilotgw.Model{
 		{
-			ID:                        "gpt-future",
+			ID: "gpt-future",
+			// " LOW " and "low" collapse to one alias; "" is skipped; "xhigh" is
+			// canonical and published. "Adaptive" and "BALANCED" are not efforts
+			// this proxy knows, and are deliberately NOT published: the selector
+			// parser only splits a canonical suffix, so listing them advertised an
+			// id that POST then answered with 404 model_not_found. See
+			// TestEveryPublishedModelAliasParsesBack, which closes that loop.
 			Metadata:                  map[string]any{"name": "Future"},
-			SupportedReasoningEfforts: []string{" LOW ", "low", "Adaptive", ""},
+			SupportedReasoningEfforts: []string{" LOW ", "low", "Adaptive", "", "XHigh"},
 			DefaultReasoningEffort:    "BALANCED",
 		},
 		{ID: "plain"},
 	}
 
 	got := openAIModels(models, 123)
-	wantIDs := []string{"gpt-future", "plain", "gpt-future:low", "gpt-future:adaptive", "gpt-future:balanced"}
+	wantIDs := []string{"gpt-future", "plain", "gpt-future:low", "gpt-future:xhigh"}
 	if len(got) != len(wantIDs) {
 		t.Fatalf("models length = %d, want %d: %#v", len(got), len(wantIDs), got)
 	}

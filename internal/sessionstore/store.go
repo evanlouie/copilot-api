@@ -337,7 +337,10 @@ type ResponseRecord struct {
 	// inside that session yet". A resume of SDKSessionID must therefore replay it,
 	// and ClearInputPending must retire it as soon as a send has put it there, or
 	// every later resume of the same session sends the same turn again.
-	InputPending         bool                                `json:"input_pending,omitempty"`
+	InputPending bool `json:"input_pending,omitempty"`
+	// Metadata is the client's own key/value tagging, echoed back verbatim on
+	// the response and on GET. It is opaque to this proxy.
+	Metadata             map[string]string                   `json:"metadata,omitempty"`
 	Output               []openai.ResponseOutputItem         `json:"output"`
 	OutputText           string                              `json:"output_text"`
 	Usage                *openai.ResponseUsage               `json:"usage,omitempty"`

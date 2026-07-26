@@ -119,6 +119,7 @@ type responseParams struct {
 	instructions string
 	previous     *string
 	store        bool
+	metadata     map[string]string
 }
 
 // newTurnRunner builds a runner and starts the loop that owns it, or fails.
@@ -1179,7 +1180,7 @@ func responseFromTurn(p responseParams, turn *TurnResult) *openai.Response {
 	if created == 0 {
 		created = openai.UnixNow()
 	}
-	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: created, Status: "completed", Model: p.model, Instructions: p.instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: p.previous, Store: p.store, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
+	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: created, Status: "completed", Model: p.model, Instructions: p.instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: p.previous, Store: p.store, Metadata: p.metadata, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
 	// The response is always built complete. Reasoning-emission policy is a
 	// presentation concern applied at the edge (internal/httpapi), never here:
 	// this object is also the persisted record, so filtering it would make an
@@ -1347,5 +1348,5 @@ func recordFromResponse(resp *openai.Response, sessionID, retained string) sessi
 	if resp.PreviousResponseID != nil {
 		previous = *resp.PreviousResponseID
 	}
-	return sessionstore.ResponseRecord{ID: resp.ID, SDKSessionID: sessionID, Model: resp.Model, Instructions: resp.Instructions, CreatedAt: time.Unix(resp.CreatedAt, 0).UTC(), UpdatedAt: time.Now().UTC(), Status: resp.Status, Stored: resp.Store, Output: resp.Output, OutputText: resp.OutputText, Usage: resp.Usage, PreviousResponseID: previous, RetainedPath: retained}
+	return sessionstore.ResponseRecord{ID: resp.ID, SDKSessionID: sessionID, Model: resp.Model, Instructions: resp.Instructions, CreatedAt: time.Unix(resp.CreatedAt, 0).UTC(), UpdatedAt: time.Now().UTC(), Status: resp.Status, Stored: resp.Store, Output: resp.Output, OutputText: resp.OutputText, Usage: resp.Usage, Metadata: resp.Metadata, PreviousResponseID: previous, RetainedPath: retained}
 }

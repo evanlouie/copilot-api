@@ -183,6 +183,7 @@ type ResponseRequest struct {
 	DefaultReasoningEffort             string
 	ResolvedReasoningEffort            string
 	ReasoningEffortResolved            bool
+	Metadata                           map[string]string
 }
 
 type ResponseResult struct {

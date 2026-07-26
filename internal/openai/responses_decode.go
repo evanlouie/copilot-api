@@ -45,6 +45,12 @@ func ResponsesRequestFromFields(fields map[string]json.RawMessage) (ResponsesReq
 	if err := decode("reasoning_effort", &request.ReasoningEffort); err != nil {
 		return ResponsesRequest{}, err
 	}
+	// metadata stays in Raw as well: it is listed below so a malformed value is
+	// still reported against the right field, while this decode is what makes it
+	// echoable rather than merely inspected.
+	if err := decode("metadata", &request.Metadata); err != nil {
+		return ResponsesRequest{}, err
+	}
 	for name, target := range map[string]*json.RawMessage{
 		"include": &request.Include, "reasoning": &request.Reasoning, "text": &request.Text,
 	} {

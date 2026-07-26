@@ -16,7 +16,16 @@ import (
 // reasoningEfforts is the canonical enum, ordered from least to most
 // deliberation. The order is meaningful: copilotgw snaps a configured default
 // onto the efforts a model advertises by walking these ranks.
-var reasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+//
+// It is the union of what both sides can say, not just OpenAI's list. "minimal"
+// is OpenAI's; "xhigh" and "max" are Copilot's - the SDK names the latter in
+// its own documentation for AssistantUsageData.ReasoningEffort ("none", "low",
+// "medium", "high", "xhigh", "max"). Missing one is not harmless: the model
+// catalog's SupportedReasoningEfforts is an unconstrained string list, and this
+// set gates both the `model:effort` aliases GET /v1/models publishes and the
+// values POST accepts, so a token in one and not the other means advertising an
+// id that is then rejected.
+var reasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 var reasoningEffortRanks = func() map[string]int {
 	ranks := make(map[string]int, len(reasoningEfforts))

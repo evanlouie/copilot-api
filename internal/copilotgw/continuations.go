@@ -266,7 +266,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		storeVisible = previousRecord.Stored
 	}
 	previous := previousResponseID
-	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: &previous, store: storeVisible}
+	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: &previous, store: storeVisible, metadata: req.Metadata}
 	if err := batch.CompleteToolOutputsWithSetup(outputs, func() {
 		if runner != nil {
 			runner.setCurrentResponseID(req.ResponseID)

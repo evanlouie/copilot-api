@@ -305,7 +305,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 			releaseAll(pinReleases)
 		}
 	}()
-	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: warmResponseCreatedAt(req), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
+	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: warmResponseCreatedAt(req), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Metadata: req.Metadata, Error: nil, IncompleteDetails: nil}
 	record := recordFromResponse(resp, sessionID, retained)
 	record.InputText = incrementalInput
 	// The whole point of generate:false is that this input is primed, not sent:

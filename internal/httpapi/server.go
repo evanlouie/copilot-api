@@ -161,6 +161,15 @@ func openAIModels(models []copilotgw.Model, created int64) []openai.Model {
 			if effort == "" {
 				continue
 			}
+			// Only mint an alias for an effort the selector parser will split
+			// back off. SupportedReasoningEfforts is an unconstrained string list
+			// from the catalog, so without this gate a model advertising an
+			// effort outside the canonical set produced a listed id that
+			// ParseModelSelector then treated as one long model name - a 404
+			// model_not_found for an id this endpoint had just published.
+			if !openai.IsKnownReasoningEffort(effort) {
+				continue
+			}
 			if _, exists := seenEfforts[effort]; exists {
 				continue
 			}

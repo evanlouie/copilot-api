@@ -39,7 +39,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		prepared.pinReleases = nil
 		return nil, err
 	}
-	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: prepared.previous, store: req.Store}
+	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: prepared.previous, store: req.Store, metadata: req.Metadata}
 	runner.setResponseParams(params)
 	releaseAll(prepared.pinReleases)
 	prepared.pinReleases = nil
@@ -129,7 +129,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
-		params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: &previous, store: storeVisible}
+		params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: &previous, store: storeVisible, metadata: req.Metadata}
 		if err := batch.CompleteToolOutputsWithSetup(outputs, func() {
 			runner.setCurrentResponseID(req.ResponseID)
 			runner.attachToRequestContext()
@@ -175,7 +175,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	releaseAll(prepared.pinReleases)
 	prepared.pinReleases = nil
 	runner.watchContext(ctx)
-	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: prepared.previous, store: req.Store}
+	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: prepared.previous, store: req.Store, metadata: req.Metadata}
 	runner.setResponseParams(params)
 	runner.enableResponseStream(ch, ctx.Done())
 	runner.setOnResult(func(turn *TurnResult) error {
@@ -348,7 +348,7 @@ func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Respo
 	if output == nil {
 		output = []openai.ResponseOutputItem{}
 	}
-	resp := &openai.Response{ID: record.ID, Object: openai.ObjectResponse, CreatedAt: record.CreatedAt.Unix(), Status: record.Status, Model: record.Model, Instructions: record.Instructions, Output: output, OutputText: record.OutputText, Store: record.Stored, Usage: record.Usage, Error: nil, IncompleteDetails: nil, ParallelToolCalls: true}
+	resp := &openai.Response{ID: record.ID, Object: openai.ObjectResponse, CreatedAt: record.CreatedAt.Unix(), Status: record.Status, Model: record.Model, Instructions: record.Instructions, Output: output, OutputText: record.OutputText, Store: record.Stored, Metadata: record.Metadata, Usage: record.Usage, Error: nil, IncompleteDetails: nil, ParallelToolCalls: true}
 	if record.PreviousResponseID != "" {
 		resp.PreviousResponseID = &record.PreviousResponseID
 	}
