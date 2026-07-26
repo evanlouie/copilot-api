@@ -86,7 +86,10 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	releaseSession := g.store.PinSession(prepared.sessionID)
 	defer releaseSession()
 	defer prepared.pinRelease()
-	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "chat", "")
+	runner, err := g.newTurnRunner(ctx, req.OpenAIID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "chat", "")
+	if err != nil {
+		return nil, err
+	}
 	runner.watchContext(ctx)
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.final.Text, Attachments: prepared.final.Attachments}); err != nil {
 		runner.failSend(prepared.events, err)
@@ -111,7 +114,11 @@ func (g *RealGateway) StreamChat(ctx context.Context, req ChatRequest) (<-chan S
 	}
 	ch := make(chan StreamEvent, 32)
 	defer prepared.pinRelease()
-	runner := g.newTurnRunner(ctx, req.OpenAIID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "chat", "")
+	runner, err := g.newTurnRunner(ctx, req.OpenAIID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "chat", "")
+	if err != nil {
+		close(ch)
+		return nil, err
+	}
 	runner.watchContext(ctx)
 	runner.enableChatStream(ch, ctx.Done())
 	runner.setOnResult(func(result *TurnResult) error {

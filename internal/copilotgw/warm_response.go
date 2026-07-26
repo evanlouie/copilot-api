@@ -138,21 +138,25 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (warmResponseUse, bool) 
 	} else if req.ToolChoiceNone {
 		return warmResponseUse{}, false
 	}
+	// The SDK session, its pins and its events are about to become the caller's
+	// turn runner's. Ask the gateway registry to give up ownership first: it
+	// refuses once Stop has closed it, and refusing here is what keeps a session
+	// from ending up owned by neither registry.
+	if !w.registry.release(w) {
+		return warmResponseUse{}, false
+	}
 	used := warmResponseUse{
 		session: w.session, tools: w.rt, events: w.events, retained: w.retained,
 		previous: &w.responseID, prompt: w.input, imageBudget: w.imageBudget,
 		pinReleases: w.pinReleases,
 	}
-	registry := w.registry
 	w.imageBudget = nil
 	w.pinReleases = nil
 	w.registry = nil
-	// The SDK session, its pins and its events now belong to the caller's turn
-	// runner, which activeRunnerRegistry accounts for. Marking the session
-	// disconnected keeps a racing gateway Stop from disconnecting it a second
-	// time; deregistering keeps Stop from seeing it at all.
+	// Marking the session disconnected keeps a racing gateway Stop from
+	// disconnecting it a second time; release above already keeps Stop from
+	// seeing it at all.
 	w.disconnected = true
-	registry.remove(w)
 	return used, true
 }
 

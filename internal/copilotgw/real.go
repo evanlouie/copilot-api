@@ -101,14 +101,23 @@ func (g *RealGateway) trackWarmSession(w *WarmResponseSession) bool {
 }
 
 func (g *RealGateway) Stop() error {
-	active := g.active.closeAndSnapshot()
-	pending := g.pending.drain()
+	// Warm sessions are closed and drained *before* the runner registry, not
+	// after. WarmResponseSession.use moves a session out of warm and into a turn
+	// runner that active must then accept; with active closed first, a use
+	// landing in between left the session owned by neither registry - warm had
+	// already been snapshotted past it, and active refused the runner - so it
+	// stayed connected with its pins held and the request hung. Closing warm
+	// first means use is refused (warmSessionRegistry.release) and the session
+	// stays where this snapshot will find it.
+	//
 	// Warm sessions have no runner to abort and await; disconnecting each one
 	// releases its retention pins and drops its SDK session before the client is
 	// stopped below.
 	for _, warm := range g.warm.closeAndSnapshot() {
 		warm.Disconnect()
 	}
+	active := g.active.closeAndSnapshot()
+	pending := g.pending.drain()
 	runners := make([]*turnRunner, 0, len(active)+len(pending))
 	seen := map[*turnRunner]struct{}{}
 	for _, runner := range append(active, pending...) {

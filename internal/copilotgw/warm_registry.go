@@ -53,6 +53,33 @@ func (r *warmSessionRegistry) remove(w *WarmResponseSession) {
 	r.mu.Unlock()
 }
 
+// release deregisters a warm session whose ownership is about to move to a turn
+// runner, and reports whether that transfer is allowed at all.
+//
+// It refuses once the registry is closed. Stop has already snapshotted the
+// session and is about to disconnect it, and by then activeRunnerRegistry is
+// either closed or about to be, so a transfer would hand the session to a
+// runner nothing accounts for - owned by neither registry, connected forever.
+// Refusing leaves the session exactly where Stop's snapshot will tear it down.
+//
+// A nil registry means no gateway ever took ownership of this session, so
+// there is nothing to deregister from and nothing to refuse.
+func (r *warmSessionRegistry) release(w *WarmResponseSession) bool {
+	if w == nil {
+		return false
+	}
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return false
+	}
+	delete(r.sessions, w)
+	return true
+}
+
 // tracked reports whether a warm session is still the gateway's to shut down.
 func (r *warmSessionRegistry) tracked(w *WarmResponseSession) bool {
 	if r == nil || w == nil {

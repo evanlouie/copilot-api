@@ -121,7 +121,16 @@ type responseParams struct {
 	store        bool
 }
 
-func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session copilotSession, rt *toolproxy.RequestTools, events *sessionEventSink, retained string, kind string, responseID string) *turnRunner {
+// newTurnRunner builds a runner and starts the loop that owns it, or fails.
+//
+// It returns an error rather than a runner when the gateway is shutting down.
+// loop is the sole producer on r.updates and the sole owner of closeStreams,
+// the active-registry entry and the retention pins, so a runner handed back
+// without one is not a degraded runner - it is a request that can never
+// complete: waitInitial blocks until the request context dies, the stream
+// channel is never closed, and discardInitial parks on <-r.updates forever.
+// Callers must fail the request instead.
+func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session copilotSession, rt *toolproxy.RequestTools, events *sessionEventSink, retained string, kind string, responseID string) (*turnRunner, error) {
 	if id == "" {
 		if kind == "response" {
 			id = openai.NewID("resp_")
@@ -155,17 +164,28 @@ func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, sessi
 		g.active = newActiveRunnerRegistry()
 	}
 	if !g.active.add(r) {
+		// Stop has already snapshotted the registry, so no loop started here would
+		// ever be awaited. Tear down what this call took ownership of - the SDK
+		// session, the tool-call state and the pins added above - and decline. A
+		// shutdown is this service refusing the request, not a dependency failing,
+		// which is the same 503 WarmResponse returns for the equivalent race.
 		r.abort()
 		r.releasePins()
 		close(r.closed)
-		return r
+		return nil, apierr.Unavailable("gateway is shutting down")
 	}
 	go r.loop(g)
-	return r
+	return r, nil
 }
 
+// discardInitial drains the first turn result for callers that stream instead
+// of waiting on it. It also stops when the runner closes, so it can never
+// outlive the loop that is its only producer.
 func (r *turnRunner) discardInitial() {
-	<-r.updates
+	select {
+	case <-r.updates:
+	case <-r.closed:
+	}
 }
 
 func (r *turnRunner) watchContext(ctx context.Context) {

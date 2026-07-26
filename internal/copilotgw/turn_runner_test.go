@@ -371,7 +371,10 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 	}
 	events := newSessionEventSink(nil)
 	session := &fakeSDKSession{runtime: &fakeSDKRuntime{}, id: "sdk_test"}
-	runner := (&RealGateway{}).newTurnRunner(context.Background(), "resp_initial", "gpt-test", session, rt, events, t.TempDir(), "response", "resp_initial")
+	runner, err := (&RealGateway{}).newTurnRunner(context.Background(), "resp_initial", "gpt-test", session, rt, events, t.TempDir(), "response", "resp_initial")
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner.setCurrentResponseID("resp_continuation")
 	events.send(copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}})
 

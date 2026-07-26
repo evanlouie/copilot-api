@@ -33,7 +33,12 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	releaseResponse := g.store.PinResponse(req.ResponseID)
 	defer releaseSession()
 	defer releaseResponse()
-	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
+	runner, err := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
+	if err != nil {
+		releaseAll(prepared.pinReleases)
+		prepared.pinReleases = nil
+		return nil, err
+	}
 	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: prepared.previous, store: req.Store}
 	runner.setResponseParams(params)
 	releaseAll(prepared.pinReleases)
@@ -159,7 +164,13 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		return nil, err
 	}
 	ch := make(chan ResponseStreamEvent, 32)
-	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
+	runner, err := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
+	if err != nil {
+		close(ch)
+		releaseAll(prepared.pinReleases)
+		prepared.pinReleases = nil
+		return nil, err
+	}
 	releaseAll(prepared.pinReleases)
 	prepared.pinReleases = nil
 	runner.watchContext(ctx)
