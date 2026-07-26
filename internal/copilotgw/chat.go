@@ -70,7 +70,7 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	events := newSessionEventSink(g.log)
 	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, streaming, events)
 	if err != nil {
-		return nil, apierr.Upstream(err.Error())
+		return nil, classifyUpstreamError(err)
 	}
 	if session == nil {
 		return nil, apierr.Upstream("copilot SDK returned nil session")
@@ -95,7 +95,7 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.final.Text, Attachments: prepared.final.Attachments}); err != nil {
 		runner.failSend(prepared.events, err)
 		_, _ = runner.waitInitial(ctx)
-		return nil, apierr.Upstream(err.Error())
+		return nil, classifyUpstreamError(err)
 	}
 	result, err := runner.waitInitial(ctx)
 	if err != nil {

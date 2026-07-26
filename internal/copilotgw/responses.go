@@ -47,7 +47,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.prompt.Text, Attachments: prepared.prompt.Attachments}); err != nil {
 		runner.failSend(prepared.events, err)
 		_, _ = runner.waitInitial(ctx)
-		return nil, apierr.Upstream(err.Error())
+		return nil, classifyUpstreamError(err)
 	}
 	g.markPendingInputDelivered(prepared.pendingInput)
 	turn, err := runner.waitInitial(ctx)

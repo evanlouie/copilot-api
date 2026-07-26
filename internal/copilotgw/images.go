@@ -441,14 +441,14 @@ func (g *RealGateway) findModel(ctx context.Context, id string) (Model, error) {
 		return Model{}, apierr.InvalidRequest("model is required", "model")
 	}
 	if err := g.ensureModels(ctx, false); err != nil {
-		return Model{}, apierr.Upstream(err.Error())
+		return Model{}, classifyUpstreamError(err)
 	}
 	if m, ok := g.lookupModel(id); ok {
 		return m, nil
 	}
 	if g.shouldForceModelRefresh() {
 		if err := g.ensureModels(ctx, true); err != nil {
-			return Model{}, apierr.Upstream(err.Error())
+			return Model{}, classifyUpstreamError(err)
 		}
 		if m, ok := g.lookupModel(id); ok {
 			return m, nil

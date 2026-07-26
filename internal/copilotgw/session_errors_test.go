@@ -1,6 +1,7 @@
 package copilotgw
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
@@ -9,74 +10,78 @@ import (
 
 func statusPtr(v int32) *int32 { return &v }
 
-// A throttled turn used to reach the client as a generic upstream fault, which
-// the transport renders as 502 server_error. The official OpenAI SDKs back off
-// on 429 and retry a 502 on a generic schedule, so the classification decides
-// whether a client waits out a Copilot rate limit or hammers through it.
-func TestUpstreamSessionErrorClassifiesRateLimits(t *testing.T) {
+// TestUpstreamSessionErrorClassification pins how a session.error event maps
+// onto the domain taxonomy, including quota - which is a 429 on the real API
+// with code insufficient_quota, not a 502.
+func TestUpstreamSessionErrorClassification(t *testing.T) {
 	t.Parallel()
-	for _, test := range []struct {
+	for _, tc := range []struct {
 		name string
 		data *copilot.SessionErrorData
 		kind apierr.Kind
 		code string
 	}{
-		{
-			name: "rate_limit error type",
-			data: &copilot.SessionErrorData{ErrorType: "rate_limit", Message: "You have exceeded your premium request allowance."},
-			kind: apierr.KindRateLimit,
-			code: "rate_limit_exceeded",
-		},
-		{
-			name: "upstream 429 without the category",
-			data: &copilot.SessionErrorData{ErrorType: "query", Message: "too many requests", StatusCode: statusPtr(429)},
-			kind: apierr.KindRateLimit,
-			code: "rate_limit_exceeded",
-		},
-		{
-			name: "quota stays an upstream failure",
-			data: &copilot.SessionErrorData{ErrorType: "quota", Message: "billing not configured"},
-			kind: apierr.KindUpstream,
-			code: "upstream_error",
-		},
-		{
-			name: "ordinary session error",
-			data: &copilot.SessionErrorData{ErrorType: "query", Message: "boom"},
-			kind: apierr.KindUpstream,
-			code: "upstream_error",
-		},
-		{
-			name: "upstream 500 is not a rate limit",
-			data: &copilot.SessionErrorData{ErrorType: "query", Message: "boom", StatusCode: statusPtr(500)},
-			kind: apierr.KindUpstream,
-			code: "upstream_error",
-		},
-		{
-			name: "nil event",
-			data: nil,
-			kind: apierr.KindUpstream,
-			code: "upstream_error",
-		},
+		{"rate limit by type", &copilot.SessionErrorData{ErrorType: "rate_limit", Message: "slow down"}, apierr.KindRateLimit, "rate_limit_exceeded"},
+		{"rate limit by status", &copilot.SessionErrorData{ErrorType: "query", StatusCode: statusPtr(429), Message: "slow down"}, apierr.KindRateLimit, "rate_limit_exceeded"},
+		{"quota", &copilot.SessionErrorData{ErrorType: "quota", Message: "out of credits"}, apierr.KindRateLimit, "insufficient_quota"},
+		{"anything else", &copilot.SessionErrorData{ErrorType: "query", Message: "bad query"}, apierr.KindUpstream, "upstream_error"},
+		{"nil", nil, apierr.KindUpstream, "upstream_error"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := upstreamSessionError(test.data)
-			if err.Kind != test.kind || err.Code != test.code {
-				t.Fatalf("upstreamSessionError = %#v, want kind %q code %q", err, test.kind, test.code)
+			got := upstreamSessionError(tc.data)
+			if got.Kind != tc.kind {
+				t.Fatalf("kind = %q, want %q", got.Kind, tc.kind)
 			}
-			if test.data != nil && test.data.Message != "" && err.Message != test.data.Message {
-				t.Fatalf("message = %q, want the upstream message %q", err.Message, test.data.Message)
+			if got.Code != tc.code {
+				t.Fatalf("code = %q, want %q", got.Code, tc.code)
 			}
 		})
 	}
 }
 
-// The SDK exposes no retry-after on a session error, so the wait is genuinely
-// unknown and must stay unset rather than be invented.
-func TestUpstreamRateLimitCarriesNoInventedRetryAfter(t *testing.T) {
+// TestClassifyUpstreamErrorCoversSessionCalls covers the throttle point the
+// session.error mapping cannot see.
+//
+// Session creation and resumption are plain RPC round trips and are where an
+// aggressive rate limit lands first, but every failure there became
+// apierr.Upstream - so a throttled CreateSession was reported as 502 and the
+// client's 429 backoff never engaged.
+func TestClassifyUpstreamErrorCoversSessionCalls(t *testing.T) {
 	t.Parallel()
-	err := upstreamSessionError(&copilot.SessionErrorData{ErrorType: "rate_limit", Message: "slow down"})
-	if err.RetryAfter != 0 {
-		t.Fatalf("RetryAfter = %s, want 0: the Copilot SDK does not report one on this event", err.RetryAfter)
+	for _, tc := range []struct {
+		name string
+		err  error
+		kind apierr.Kind
+		code string
+	}{
+		{"jsonrpc rate limit", errors.New("JSON-RPC Error -32000: rate limit exceeded for model gpt-5"), apierr.KindRateLimit, "rate_limit_exceeded"},
+		{"snake case", errors.New("JSON-RPC Error -32000: user_model_rate_limited"), apierr.KindRateLimit, "rate_limit_exceeded"},
+		{"http status in the text", errors.New("upstream returned 429"), apierr.KindRateLimit, "rate_limit_exceeded"},
+		{"too many requests", errors.New("Too Many Requests"), apierr.KindRateLimit, "rate_limit_exceeded"},
+		{"quota", errors.New("JSON-RPC Error -32000: insufficient_quota"), apierr.KindRateLimit, "insufficient_quota"},
+		{"ordinary failure", errors.New("JSON-RPC Error -32603: internal error"), apierr.KindUpstream, "upstream_error"},
+		{"connection refused", errors.New("dial tcp: connection refused"), apierr.KindUpstream, "upstream_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyUpstreamError(tc.err)
+			if got.Kind != tc.kind {
+				t.Fatalf("kind = %q, want %q (%v)", got.Kind, tc.kind, tc.err)
+			}
+			if got.Code != tc.code {
+				t.Fatalf("code = %q, want %q (%v)", got.Code, tc.code, tc.err)
+			}
+		})
+	}
+
+	// An error this proxy already classified keeps its classification rather
+	// than being re-derived from its rendered message.
+	original := apierr.InvalidRequest("bad tool", "tools")
+	if got := classifyUpstreamError(original); got != original {
+		t.Fatalf("classifyUpstreamError rewrote an already-classified error: %#v", got)
+	}
+	if classifyUpstreamError(nil) != nil {
+		t.Fatal("classifyUpstreamError(nil) should stay nil")
 	}
 }

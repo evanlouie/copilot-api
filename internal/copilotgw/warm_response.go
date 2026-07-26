@@ -288,7 +288,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 	}
 	if err != nil {
-		return nil, apierr.Upstream(err.Error())
+		return nil, classifyUpstreamError(err)
 	}
 	if session == nil {
 		return nil, apierr.Upstream("copilot SDK returned nil session")

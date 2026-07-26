@@ -44,7 +44,14 @@ func httpStatus(kind apierr.Kind) int {
 }
 
 // openAIErrorType maps a domain error onto the OpenAI error-object `type`.
-func openAIErrorType(kind apierr.Kind) string {
+//
+// It takes the code as well as the kind because OpenAI's 429 is not one shape:
+// a throttle names the exhausted dimension, while an exhausted allowance names
+// itself as insufficient_quota.
+func openAIErrorType(kind apierr.Kind, code string) string {
+	if code == "insufficient_quota" {
+		return "insufficient_quota"
+	}
 	switch kind {
 	case apierr.KindUpstream, apierr.KindTimeout, apierr.KindInternal, apierr.KindUnavailable:
 		return "server_error"
@@ -73,7 +80,7 @@ func domainError(err error) *apierr.Error {
 
 func errorObject(err error) openai.ErrorObject {
 	domain := domainError(err)
-	return openai.ErrorObject{Message: domain.Message, Type: openAIErrorType(domain.Kind), Param: domain.Param, Code: domain.Code}
+	return openai.ErrorObject{Message: domain.Message, Type: openAIErrorType(domain.Kind, domain.Code), Param: domain.Param, Code: domain.Code}
 }
 
 // WriteError renders err as an OpenAI error envelope with the mapped status.

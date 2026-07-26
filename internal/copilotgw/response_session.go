@@ -140,7 +140,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 			prepared.session, err = g.createSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
 		}
 		if err != nil {
-			return nil, apierr.Upstream(err.Error())
+			return nil, classifyUpstreamError(err)
 		}
 	}
 

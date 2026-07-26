@@ -100,6 +100,16 @@ func RateLimited(message string, retryAfter time.Duration) *Error {
 	return &Error{Kind: KindRateLimit, Message: message, Code: "rate_limit_exceeded", RetryAfter: retryAfter}
 }
 
+// QuotaExhausted reports that the caller's upstream allowance is spent. It is
+// a rate limit on the wire - the real API answers 429 - but carries its own
+// code, because the remedy is billing rather than waiting.
+func QuotaExhausted(message string) *Error {
+	if message == "" {
+		message = "insufficient quota"
+	}
+	return &Error{Kind: KindRateLimit, Message: message, Code: "insufficient_quota"}
+}
+
 // Unavailable reports that this service cannot take the request right now.
 func Unavailable(message string) *Error {
 	return &Error{Kind: KindUnavailable, Message: message, Code: "service_unavailable"}
