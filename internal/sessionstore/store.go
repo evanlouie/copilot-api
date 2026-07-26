@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -365,14 +366,14 @@ func (s *Store) SaveResponse(record ResponseRecord) error {
 		if _, deleted := s.deletedIDs[record.ID]; deleted {
 			return ErrNotFound
 		}
-		if existing, err := s.loadResponseRecord(record.ID); err == nil {
-			if existing.Deleted {
+		if existing, err := s.readResponseHeader(record.ID); err == nil {
+			if existing.deleted {
 				if s.pins[s.responsePath(record.ID)] > 0 {
 					s.deletedIDs[record.ID] = struct{}{}
 				}
 				return ErrNotFound
 			}
-			previousSession = existing.SDKSessionID
+			previousSession = existing.sessionID
 		} else if !errors.Is(err, ErrNotFound) {
 			return err
 		}
@@ -475,6 +476,128 @@ func (s *Store) loadResponseRecord(id string) (ResponseRecord, error) {
 		return record, fmt.Errorf("response record %q: %w", id, err)
 	}
 	return record, nil
+}
+
+// responseHeader is everything SaveResponse needs to know about the record it
+// is about to replace: whether that record is a delete tombstone, and which SDK
+// session its retention link belongs to.
+type responseHeader struct {
+	version   int
+	id        string
+	sessionID string
+	deleted   bool
+}
+
+// readResponseHeader answers those two questions without materializing the
+// record.
+//
+// SaveResponse used to os.ReadFile and json.Unmarshal the entire previous
+// record to read one boolean and one string, under s.mu, on the request hot
+// path. A turn is capped at 32 MiB, so on a long conversation that was a
+// multi-megabyte read plus a full parse on every save of the same response.
+//
+// The decode is streamed and stops as soon as it has all four fields.
+// ResponseRecord declares sdk_session_id third and deleted tenth, ahead of
+// input_text, output and tool_outputs, so in practice it stops within the first
+// few hundred bytes of a record of any size. Field order is only an
+// optimization: a document that spelled them later still decodes correctly,
+// just after skipping more.
+//
+// Consequence worth stating: a record whose header is well formed but whose
+// tail is corrupt is no longer rejected here, so the save proceeds and replaces
+// it. That record was already unloadable; refusing the save would strand the
+// conversation instead of healing it. Every path that returns the record to a
+// caller (LoadResponse, LoadResponseForContinuation, retention's index build)
+// still parses it in full.
+//
+// Duplicate object names resolve first-wins here and last-wins in
+// json.Unmarshal. RFC 8259 leaves them undefined and writeJSON marshals a
+// struct, so a record this store wrote cannot contain them.
+func (s *Store) readResponseHeader(id string) (responseHeader, error) {
+	file, err := os.Open(s.responsePath(id))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return responseHeader{}, ErrNotFound
+		}
+		return responseHeader{}, err
+	}
+	defer func() { _ = file.Close() }()
+	header, err := decodeResponseHeader(file)
+	if err != nil {
+		return responseHeader{}, fmt.Errorf("decode response record %q: %w", id, err)
+	}
+	if err := header.validate(); err != nil {
+		return responseHeader{}, fmt.Errorf("response record %q: %w", id, err)
+	}
+	return header, nil
+}
+
+func decodeResponseHeader(r io.Reader) (responseHeader, error) {
+	var header responseHeader
+	dec := json.NewDecoder(r)
+	open, err := dec.Token()
+	if err != nil {
+		return header, err
+	}
+	if delim, ok := open.(json.Delim); !ok || delim != '{' {
+		return header, fmt.Errorf("expected a JSON object, got %v", open)
+	}
+	var seen int
+	for dec.More() {
+		token, err := dec.Token()
+		if err != nil {
+			return header, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return header, fmt.Errorf("expected an object key, got %v", token)
+		}
+		var target any
+		switch key {
+		case "version":
+			target = &header.version
+		case "id":
+			target = &header.id
+		case "sdk_session_id":
+			target = &header.sessionID
+		case "deleted":
+			target = &header.deleted
+		default:
+			// Skipping through json.RawMessage copies the value's bytes but builds
+			// none of its structure. The fields ahead of the four wanted here are all
+			// small scalars, and the large ones come after, so this never runs on a
+			// payload field for a record this store wrote.
+			var skipped json.RawMessage
+			if err := dec.Decode(&skipped); err != nil {
+				return header, err
+			}
+			continue
+		}
+		if err := dec.Decode(target); err != nil {
+			return header, err
+		}
+		seen++
+		if seen == 4 {
+			return header, nil
+		}
+	}
+	return header, nil
+}
+
+// validate mirrors migrateResponseRecord's acceptance rules exactly, so a
+// record SaveResponse would have refused to read in full is still refused.
+func (h responseHeader) validate() error {
+	switch h.version {
+	case 0, 1, 2:
+		if h.id == "" {
+			return fmt.Errorf("response record is missing id")
+		}
+		return nil
+	case ResponseRecordVersion:
+		return nil
+	default:
+		return &UnsupportedRecordVersionError{Version: h.version}
+	}
 }
 
 func (s *Store) responsePath(id string) string {
