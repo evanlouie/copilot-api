@@ -524,13 +524,22 @@ type TurnFinalResult struct {
 }
 
 type Batch struct {
-	ID          string
-	Kind        string
-	Model       string
-	ResponseID  string
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
-	calls       map[string]*Call
+	ID         string
+	Kind       string
+	Model      string
+	ResponseID string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	// calls is keyed by the proxy-minted, client-visible tool-call id.
+	calls map[string]*Call
+	// bySDKID maps the upstream model's tool-call id back to the same *Call.
+	// The SDK announces a tool request (CaptureRequests) and separately invokes
+	// the tool handler (handleInvocation) for the same tool call, so this index
+	// is what reunites the blocked SDK invocation with the call already
+	// published to the client. Model-supplied ids are never used as keys in the
+	// process-global broker maps; this index is per-batch and therefore cannot
+	// collide across requests.
+	bySDKID     map[string]*Call
 	Done        <-chan TurnFinalResult
 	abort       func()
 	ctx         context.Context
@@ -548,7 +557,7 @@ func newBatch(ttl time.Duration, responseID string, kind string, model string, d
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, Model: model, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), calls: map[string]*Call{}, Done: done, abort: abort, ctx: ctx, cancel: cancel}
+	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, Model: model, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), calls: map[string]*Call{}, bySDKID: map[string]*Call{}, Done: done, abort: abort, ctx: ctx, cancel: cancel}
 }
 
 func (b *Batch) isOpen() bool {
@@ -617,13 +626,18 @@ func (b *Batch) configure(responseID, kind string, model string, done <-chan Tur
 	}
 }
 
+// ensureCall returns the batch's call for sdkID, creating it on first sight.
+//
+// The client-visible id is always minted here ("call_" + uuid). sdkID comes
+// from the upstream model, and Copilot's backends are not uniform: some emit
+// low-entropy sequential ids such as "call_1". Publishing those verbatim would
+// make them keys in the process-global Broker.byCall map, where two concurrent
+// requests can collide and hand one client's continuation another client's
+// pending batch. The model's id is retained on Call.SDKID and indexed in
+// b.bySDKID, which is per-batch and only used to answer the SDK.
 func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.RawMessage, input string) *Call {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	openaiID := sdkID
-	if openaiID == "" {
-		openaiID = "call_" + uuid.NewString()
-	}
 	if meta.SDKName == "" {
 		meta.SDKName = sdkName
 	}
@@ -633,21 +647,42 @@ func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.Raw
 	if meta.ResponseKind == "" {
 		meta.ResponseKind = toolcatalog.ToolKindFunction
 	}
-	if call, ok := b.calls[openaiID]; ok {
-		if len(call.ArgumentsJSON) == 0 && len(args) > 0 {
-			call.ArgumentsJSON = append(call.ArgumentsJSON[:0], args...)
+	// An empty sdkID cannot be correlated back to a specific SDK tool request,
+	// so every such request becomes its own call.
+	if sdkID != "" {
+		if call, ok := b.bySDKID[sdkID]; ok {
+			if len(call.ArgumentsJSON) == 0 && len(args) > 0 {
+				call.ArgumentsJSON = append(call.ArgumentsJSON[:0], args...)
+			}
+			if call.Input == "" && input != "" {
+				call.Input = input
+			}
+			return call
 		}
-		if call.Input == "" && input != "" {
-			call.Input = input
-		}
-		return call
 	}
+	openaiID := "call_" + uuid.NewString()
 	call := &Call{OpenAIID: openaiID, SDKID: sdkID, SDKName: meta.SDKName, PublicName: meta.ResponseName, Namespace: meta.Namespace, Kind: meta.ResponseKind, ArgumentsJSON: append(json.RawMessage{}, args...), Input: input, Execution: meta.Execution, outCh: make(chan string, 1), errCh: make(chan error, 1)}
 	if call.Execution == "" && call.Kind == toolcatalog.ToolKindToolSearch {
 		call.Execution = "client"
 	}
 	b.calls[openaiID] = call
+	if sdkID != "" {
+		b.bySDKID[sdkID] = call
+	}
 	return call
+}
+
+// callBySDKID resolves the upstream model's tool-call id back to the
+// proxy-owned call, which carries the client-visible id and the channel the
+// blocked SDK tool handler is waiting on.
+func (b *Batch) callBySDKID(sdkID string) (*Call, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if sdkID == "" {
+		return nil, false
+	}
+	call, ok := b.bySDKID[sdkID]
+	return call, ok
 }
 
 func (b *Batch) startTimer() {

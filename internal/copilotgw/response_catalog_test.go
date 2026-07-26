@@ -19,12 +19,13 @@ func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_search", Name: "tool_search", Arguments: map[string]any{"query": "agents"}}}, "resp_prev", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	batch, calls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_search", Name: "tool_search", Arguments: map[string]any{"query": "agents"}}}, "resp_prev", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	callID := calls[0].CallID
 	install, err := validateResponseToolOutputsForBatch(batch, map[string]toolcatalog.ResponseToolOutput{
-		"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
+		callID: {Kind: toolcatalog.ToolKindToolSearch, CallID: callID, Execution: "client", Status: "completed", Output: "loaded", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -40,12 +41,13 @@ func TestValidateResponseToolOutputsRejectsFailedToolSearchWithTools(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_search", Name: "tool_search", Arguments: map[string]any{"query": "agents"}}}, "resp_prev", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	batch, calls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_search", Name: "tool_search", Arguments: map[string]any{"query": "agents"}}}, "resp_prev", "response", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	callID := calls[0].CallID
 	_, err = validateResponseToolOutputsForBatch(batch, map[string]toolcatalog.ResponseToolOutput{
-		"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "failed", Output: "nope", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
+		callID: {Kind: toolcatalog.ToolKindToolSearch, CallID: callID, Execution: "client", Status: "failed", Output: "nope", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "cannot include tools") {
 		t.Fatalf("error = %v, want failed-status loaded tool rejection", err)

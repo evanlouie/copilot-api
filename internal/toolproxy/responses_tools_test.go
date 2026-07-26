@@ -67,15 +67,15 @@ func TestCaptureRequestsRehydratesExtendedResponseToolMetadata(t *testing.T) {
 	}
 	byID := map[string]CapturedCall{}
 	for _, call := range calls {
-		byID[call.CallID] = call
+		byID[call.SDKName] = call
 	}
-	if got := byID["call_patch"]; got.Kind != toolcatalog.ToolKindCustom || got.ResponseName != "apply_patch" || got.Input != "*** Begin Patch\n*** End Patch" {
+	if got := byID["apply_patch"]; got.Kind != toolcatalog.ToolKindCustom || got.ResponseName != "apply_patch" || got.Input != "*** Begin Patch\n*** End Patch" {
 		t.Fatalf("custom captured call = %#v", got)
 	}
-	if got := byID["call_mcp"]; got.Kind != toolcatalog.ToolKindFunction || got.Namespace != "mcp__grep_app" || got.ResponseName != "searchGitHub" || string(got.ArgumentsJSON) != `{"query":"repo:test"}` {
+	if got := byID["mcp__grep_app__searchGitHub"]; got.Kind != toolcatalog.ToolKindFunction || got.Namespace != "mcp__grep_app" || got.ResponseName != "searchGitHub" || string(got.ArgumentsJSON) != `{"query":"repo:test"}` {
 		t.Fatalf("namespace captured call = %#v", got)
 	}
-	if got := byID["call_search"]; got.Kind != toolcatalog.ToolKindToolSearch || got.Execution != "client" || string(got.ArgumentsJSON) != `{"query":"grep"}` {
+	if got := byID["tool_search"]; got.Kind != toolcatalog.ToolKindToolSearch || got.Execution != "client" || string(got.ArgumentsJSON) != `{"query":"grep"}` {
 		t.Fatalf("tool_search captured call = %#v", got)
 	}
 }
@@ -124,11 +124,12 @@ func TestExtendedToolOutputKindMustMatchPendingCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_patch", Name: "apply_patch", Arguments: map[string]any{"input": "patch"}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	batch, calls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_patch", Name: "apply_patch", Arguments: map[string]any{"input": "patch"}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongKind := map[string]toolcatalog.ResponseToolOutput{"call_patch": {Kind: toolcatalog.ToolKindFunction, CallID: "call_patch", Output: "ok"}}
+	callID := calls[0].CallID
+	wrongKind := map[string]toolcatalog.ResponseToolOutput{callID: {Kind: toolcatalog.ToolKindFunction, CallID: callID, Output: "ok"}}
 	if err := batch.CompleteToolOutputsWithSetup(wrongKind, nil); err == nil || !strings.Contains(err.Error(), "output does not match pending") {
 		t.Fatalf("error = %v, want kind mismatch", err)
 	}
@@ -139,15 +140,16 @@ func TestCustomToolOutputNameMustMatchPendingCallWhenPresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_patch", Name: "apply_patch", Arguments: map[string]any{"input": "patch"}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	batch, calls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_patch", Name: "apply_patch", Arguments: map[string]any{"input": "patch"}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad := map[string]toolcatalog.ResponseToolOutput{"call_patch": {Kind: toolcatalog.ToolKindCustom, CallID: "call_patch", Name: "wrong_tool", Output: "ok"}}
+	callID := calls[0].CallID
+	bad := map[string]toolcatalog.ResponseToolOutput{callID: {Kind: toolcatalog.ToolKindCustom, CallID: callID, Name: "wrong_tool", Output: "ok"}}
 	if err := batch.CompleteToolOutputsWithSetup(bad, nil); err == nil || !strings.Contains(err.Error(), "does not match pending custom tool") {
 		t.Fatalf("error = %v, want custom name mismatch", err)
 	}
-	good := map[string]toolcatalog.ResponseToolOutput{"call_patch": {Kind: toolcatalog.ToolKindCustom, CallID: "call_patch", Name: "apply_patch", Output: "ok"}}
+	good := map[string]toolcatalog.ResponseToolOutput{callID: {Kind: toolcatalog.ToolKindCustom, CallID: callID, Name: "apply_patch", Output: "ok"}}
 	if err := batch.CompleteToolOutputsWithSetup(good, nil); err != nil {
 		t.Fatalf("matching custom output name should complete: %v", err)
 	}
@@ -158,12 +160,13 @@ func TestToolSearchOutputToolsDoNotMutateLiveAvailableTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_search", Name: "tool_search", Arguments: map[string]any{"query": "load"}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
+	batch, calls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_search", Name: "tool_search", Arguments: map[string]any{"query": "load"}}}, "resp_1", "response", "gpt-test", make(chan TurnFinalResult, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	callID := calls[0].CallID
 	before := append([]string{}, rt.AvailableTools()...)
-	outputs := map[string]toolcatalog.ResponseToolOutput{"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Output: `[{"type":"function","name":"loaded_tool"}]`, Tools: []byte(`[{"type":"function","name":"loaded_tool"}]`)}}
+	outputs := map[string]toolcatalog.ResponseToolOutput{callID: {Kind: toolcatalog.ToolKindToolSearch, CallID: callID, Execution: "client", Output: `[{"type":"function","name":"loaded_tool"}]`, Tools: []byte(`[{"type":"function","name":"loaded_tool"}]`)}}
 	if err := batch.CompleteToolOutputsWithSetup(outputs, nil); err != nil {
 		t.Fatal(err)
 	}

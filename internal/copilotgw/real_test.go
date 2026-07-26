@@ -481,9 +481,12 @@ func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, _, err := requestTools.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_stop", Name: requestTools.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
+	batch, calls, err := requestTools.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_stop", Name: requestTools.Tools()[0].Name, Arguments: map[string]any{}}}, "", "chat", "gpt-test", make(chan toolproxy.TurnFinalResult, 1), nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := gateway.broker.FindByCallIDs([]string{calls[0].CallID}); err != nil {
+		t.Fatalf("batch was not registered before Stop: %v", err)
 	}
 	if err := gateway.Stop(); err != nil {
 		t.Fatal(err)
@@ -491,7 +494,7 @@ func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
 	if gateway.pending.get("batch_runner") != nil {
 		t.Fatal("pending runner remained after Stop")
 	}
-	if _, err := gateway.broker.FindByCallIDs([]string{"call_stop"}); !errors.Is(err, toolproxy.ErrNotFound) {
+	if _, err := gateway.broker.FindByCallIDs([]string{calls[0].CallID}); !errors.Is(err, toolproxy.ErrNotFound) {
 		t.Fatalf("batch remained after Stop: %v", err)
 	}
 	select {

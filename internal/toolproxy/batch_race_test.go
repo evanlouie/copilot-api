@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
-	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 
 	copilot "github.com/github/copilot-sdk/go"
 )
@@ -63,16 +62,18 @@ func TestInvocationDuringExpiryDoesNotRaceOnCallMap(t *testing.T) {
 // TestRemoveKeepsCallIDsOwnedByAnotherBatch pins the second half of the fix:
 // Remove must not evict lookup entries that a later batch re-registered under
 // the same call id, which would strand the live batch.
+//
+// Proxy-minted call ids make a natural collision vanishingly unlikely, so the
+// shared id is planted directly on both batches' call maps.
 func TestRemoveKeepsCallIDsOwnedByAnotherBatch(t *testing.T) {
 	broker := NewBroker(time.Minute)
-	meta := ClientTool{SDKName: "lookup", ResponseName: "lookup", ResponseKind: toolcatalog.ToolKindFunction}
 
 	stale := newBatch(time.Minute, "", "chat", "gpt-test", nil, nil, context.Background())
-	stale.ensureCall("call_shared", "lookup", meta, nil, "")
+	stale.calls["call_shared"] = &Call{OpenAIID: "call_shared", SDKID: "sdk_stale", outCh: make(chan string, 1), errCh: make(chan error, 1)}
 	broker.Register(stale)
 
 	live := newBatch(time.Minute, "", "chat", "gpt-test", nil, nil, context.Background())
-	live.ensureCall("call_shared", "lookup", meta, nil, "")
+	live.calls["call_shared"] = &Call{OpenAIID: "call_shared", SDKID: "sdk_live", outCh: make(chan string, 1), errCh: make(chan error, 1)}
 	broker.Register(live)
 
 	broker.Remove(stale)

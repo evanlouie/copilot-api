@@ -360,6 +360,7 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 	runner.setCurrentResponseID("resp_continuation")
 	events.send(copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}})
 
+	var callID string
 	select {
 	case update := <-runner.updates:
 		if update.Err != nil {
@@ -369,10 +370,14 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 		if !ok || turn.FinishReason != "tool_calls" {
 			t.Fatalf("update = %#v, want tool_calls TurnResult", update.Value)
 		}
+		if len(turn.ResponseToolCalls) != 1 {
+			t.Fatalf("tool calls = %#v, want one", turn.ResponseToolCalls)
+		}
+		callID = turn.ResponseToolCalls[0].CallID
 	case <-time.After(2 * time.Second):
 		t.Fatal("runner did not emit tool-call result")
 	}
-	batch, err := broker.FindByCallIDs([]string{"call_next"})
+	batch, err := broker.FindByCallIDs([]string{callID})
 	if err != nil {
 		t.Fatal(err)
 	}
