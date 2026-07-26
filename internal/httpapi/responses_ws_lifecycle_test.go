@@ -27,6 +27,9 @@ import (
 // goleak is the assertion because the goroutine was the symptom: nothing the
 // client can observe distinguishes a handler that exited from one that is
 // still spinning.
+// Not parallel: goleak.IgnoreCurrent snapshots the goroutines alive when this
+// test starts, so anything running alongside it would be reported as the leak
+// it is looking for.
 func TestWebSocketReadLoopEndsWhenTheClientVanishesWithoutAClose(t *testing.T) {
 	ignore := goleak.IgnoreCurrent()
 	gateway := &websocketStreamGateway{text: "ok"}
@@ -83,6 +86,7 @@ func (g *blockedProducerGateway) StreamResponse(ctx context.Context, _ copilotgw
 // holds. Cancellation must not be queued behind that — the in-flight turn is
 // burning upstream Copilot quota the whole time.
 func TestWebSocketCloseCancelsWorkWithoutWaitingForTheCloseHandshake(t *testing.T) {
+	t.Parallel()
 	gateway := &blockedProducerGateway{started: make(chan struct{}), producerExited: make(chan struct{})}
 	server := New(config.Config{}, gateway, slog.Default())
 	hts := httptest.NewServer(server.Handler())
@@ -120,6 +124,7 @@ func TestWebSocketCloseCancelsWorkWithoutWaitingForTheCloseHandshake(t *testing.
 // reordering above: a client that is reading has to see StatusGoingAway, not a
 // severed TCP connection.
 func TestWebSocketShutdownStillCompletesTheCloseHandshake(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{}, &websocketStreamGateway{}, slog.Default())
 	hts := httptest.NewServer(server.Handler())
 	defer hts.Close()
@@ -153,6 +158,7 @@ func TestWebSocketShutdownStillCompletesTheCloseHandshake(t *testing.T) {
 // full 30s write timeout even though the connection died seconds earlier, which
 // blocks every other frame on the connection behind it.
 func TestWebSocketWriterStopsWhenTheConnectionContextDies(t *testing.T) {
+	t.Parallel()
 	connCtx, cancelConn := context.WithCancel(context.Background())
 	writer := &webSocketJSONWriter{ctx: connCtx}
 	ctx, cancel := writer.writeContext()

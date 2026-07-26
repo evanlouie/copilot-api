@@ -112,6 +112,7 @@ func responseForReasoningTest(req copilotgw.ResponseRequest, turn *copilotgw.Tur
 }
 
 func TestChatStreamEmitsReasoningDeltasBeforeContent(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &reasoningStreamChatGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	w := httptest.NewRecorder()
@@ -148,6 +149,7 @@ func TestChatStreamEmitsReasoningDeltasBeforeContent(t *testing.T) {
 }
 
 func TestChatNonStreamingAttachesReasoning(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &reasoningChatGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
 	w := httptest.NewRecorder()
@@ -171,7 +173,9 @@ func TestChatNonStreamingAttachesReasoning(t *testing.T) {
 }
 
 func TestChatReasoningEmissionPolicyNarrowing(t *testing.T) {
+	t.Parallel()
 	t.Run("reasoning only", func(t *testing.T) {
+		t.Parallel()
 		s := New(config.Config{ReasoningEmission: "reasoning"}, &reasoningChatGateway{}, slog.Default())
 		out := postChat(t, s)
 		if !strings.Contains(out, `"reasoning":"because"`) {
@@ -185,6 +189,7 @@ func TestChatReasoningEmissionPolicyNarrowing(t *testing.T) {
 		}
 	})
 	t.Run("off", func(t *testing.T) {
+		t.Parallel()
 		s := New(config.Config{ReasoningEmission: "off"}, &reasoningChatGateway{}, slog.Default())
 		out := postChat(t, s)
 		for _, banned := range []string{`"reasoning"`, `"reasoning_content"`, `"reasoning_details"`} {
@@ -196,6 +201,7 @@ func TestChatReasoningEmissionPolicyNarrowing(t *testing.T) {
 }
 
 func TestChatStreamReasoningEmissionPolicy(t *testing.T) {
+	t.Parallel()
 	collect := func(emission string) (reasoning, reasoningContent bool, details bool) {
 		s := New(config.Config{ReasoningEmission: emission}, &reasoningStreamChatGateway{}, slog.Default())
 		body := strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -221,24 +227,28 @@ func TestChatStreamReasoningEmissionPolicy(t *testing.T) {
 	}
 
 	t.Run("both", func(t *testing.T) {
+		t.Parallel()
 		r, rc, d := collect("both")
 		if !r || !rc || !d {
 			t.Fatalf("both: reasoning=%v reasoning_content=%v details=%v, want all true", r, rc, d)
 		}
 	})
 	t.Run("reasoning only", func(t *testing.T) {
+		t.Parallel()
 		r, rc, d := collect("reasoning")
 		if !r || rc || !d {
 			t.Fatalf("reasoning: reasoning=%v reasoning_content=%v details=%v, want true/false/true", r, rc, d)
 		}
 	})
 	t.Run("reasoning_content only", func(t *testing.T) {
+		t.Parallel()
 		r, rc, d := collect("reasoning_content")
 		if r || !rc || !d {
 			t.Fatalf("reasoning_content: reasoning=%v reasoning_content=%v details=%v, want false/true/true", r, rc, d)
 		}
 	})
 	t.Run("off", func(t *testing.T) {
+		t.Parallel()
 		r, rc, d := collect("off")
 		if r || rc || d {
 			t.Fatalf("off: reasoning=%v reasoning_content=%v details=%v, want all false", r, rc, d)
@@ -278,6 +288,7 @@ func postChat(t *testing.T, s *Server) string {
 }
 
 func TestChatAcceptsParallelToolCallsTrue(t *testing.T) {
+	t.Parallel()
 	gw := &captureChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","parallel_tool_calls":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -291,6 +302,7 @@ func TestChatAcceptsParallelToolCallsTrue(t *testing.T) {
 }
 
 func TestResponsesNonStreamingReasoningEmissionOffSuppressesReasoning(t *testing.T) {
+	t.Parallel()
 	gw := &reasoningResponseGateway{}
 	s := New(config.Config{ReasoningEmission: "off"}, gw, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","input":"hi"}`)
@@ -313,6 +325,7 @@ func TestResponsesNonStreamingReasoningEmissionOffSuppressesReasoning(t *testing
 }
 
 func TestResponsesStreamEmitsReasoningSummaryBeforeMessage(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &reasoningResponseStreamGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"claude-sonnet-4.6","stream":true,"input":"hi"}`)
 	w := httptest.NewRecorder()
@@ -367,6 +380,7 @@ func TestResponsesStreamEmitsReasoningSummaryBeforeMessage(t *testing.T) {
 }
 
 func TestResponsesStreamCarriesEncryptedContentOnStreamedReasoningDone(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &encryptedTextReasoningResponseStreamGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","stream":true,"input":"hi"}`)
 	w := httptest.NewRecorder()
@@ -393,6 +407,7 @@ func TestResponsesStreamCarriesEncryptedContentOnStreamedReasoningDone(t *testin
 }
 
 func TestResponsesStreamReasoningEmissionOffSuppressesReasoning(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{ReasoningEmission: "off"}, &reasoningResponseStreamGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"claude-sonnet-4.6","stream":true,"input":"hi"}`)
 	w := httptest.NewRecorder()
@@ -418,6 +433,7 @@ func TestResponsesStreamReasoningEmissionOffSuppressesReasoning(t *testing.T) {
 }
 
 func TestResponsesStreamReconcilesEncryptedOnlyReasoning(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &encryptedReasoningResponseStreamGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","stream":true,"input":"hi"}`)
 	w := httptest.NewRecorder()

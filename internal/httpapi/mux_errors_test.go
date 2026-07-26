@@ -26,6 +26,7 @@ func decodeErrorEnvelope(t *testing.T, status int, body string) openai.ErrorObje
 // than as the 404 it is. Hitting /v1/embeddings on this proxy is the ordinary
 // way to get there.
 func TestUnroutedPathsReturnTheStandardErrorEnvelope(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, modelsGateway{}, slog.Default())
 	for _, tt := range []struct {
 		name   string
@@ -37,6 +38,7 @@ func TestUnroutedPathsReturnTheStandardErrorEnvelope(t *testing.T) {
 		{name: "root", method: http.MethodGet, path: "/"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			rec := httptest.NewRecorder()
 			s.Handler().ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
 			if rec.Code != http.StatusNotFound {
@@ -59,6 +61,7 @@ func TestUnroutedPathsReturnTheStandardErrorEnvelope(t *testing.T) {
 }
 
 func TestWrongMethodReturnsTheStandardErrorEnvelope(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, modelsGateway{}, slog.Default())
 	for _, tt := range []struct {
 		name    string
@@ -73,6 +76,7 @@ func TestWrongMethodReturnsTheStandardErrorEnvelope(t *testing.T) {
 		{name: "post on a get-only endpoint", method: http.MethodPost, path: "/v1/models", allow: "GET, HEAD", message: "Only GET, HEAD requests are accepted."},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			rec := httptest.NewRecorder()
 			s.Handler().ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
 
@@ -98,6 +102,7 @@ func TestWrongMethodReturnsTheStandardErrorEnvelope(t *testing.T) {
 // A 404 a handler produced on purpose already carries the authoritative body
 // and must survive untouched.
 func TestHandlerProducedNotFoundIsNotRewritten(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &statefulResponseGateway{}, slog.Default())
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/responses/resp_missing", nil))

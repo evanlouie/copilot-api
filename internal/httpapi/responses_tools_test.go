@@ -12,6 +12,7 @@ import (
 )
 
 func TestParseResponsesInputAcceptsCustomAndToolSearchOutputs(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[
 		{"type":"custom_tool_call_output","call_id":"call_patch","name":"apply_patch","output":[{"type":"output_text","text":"patched"}]},
 		{"type":"tool_search_output","call_id":"call_search","execution":"client","status":"completed","tools":[{"type":"function","name":"loaded_tool","parameters":{"type":"object","properties":{}}}]}
@@ -32,6 +33,7 @@ func TestParseResponsesInputAcceptsCustomAndToolSearchOutputs(t *testing.T) {
 }
 
 func TestParseResponsesInputRejectsUnsafeToolSearchOutputTools(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[{"type":"tool_search_output","call_id":"call_search","execution":"client","tools":[{"type":"custom","name":"apply_patch"}]}]`)
 	_, _, _, err := parseResponsesInput(raw)
 	if err == nil || !strings.Contains(err.Error(), "tool_search_output.tools may only contain") {
@@ -40,6 +42,7 @@ func TestParseResponsesInputRejectsUnsafeToolSearchOutputTools(t *testing.T) {
 }
 
 func TestParseResponsesInputRejectsToolSearchOutputAliasCollisions(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[{"type":"tool_search_output","call_id":"call_search","execution":"client","tools":[{"type":"function","name":"lookup__child"},{"type":"namespace","name":"lookup","tools":[{"name":"child"}]}]}]`)
 	_, _, _, err := parseResponsesInput(raw)
 	if err == nil || !strings.Contains(err.Error(), "SDK name collision") {
@@ -48,6 +51,7 @@ func TestParseResponsesInputRejectsToolSearchOutputAliasCollisions(t *testing.T)
 }
 
 func TestResponseStreamEmitsExtendedToolCallItems(t *testing.T) {
+	t.Parallel()
 	resp := &openai.Response{ID: "resp_1", Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: "gpt-test", Output: []openai.ResponseOutputItem{
 		{ID: "ctc_call_patch", Type: "custom_tool_call", Status: "completed", CallID: "call_patch", Name: "apply_patch", Input: "*** Begin Patch"},
 		{ID: "tsc_call_search", Type: "tool_search_call", Status: "completed", CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"grep"}`)},

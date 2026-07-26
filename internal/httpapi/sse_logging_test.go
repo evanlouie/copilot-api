@@ -16,6 +16,7 @@ import (
 // sizes and per-delta rune/byte counts, but only include the raw payload preview
 // (which contains the streamed content) when cfg.LogContent is enabled.
 func TestWriteSSEDataContentGating(t *testing.T) {
+	t.Parallel()
 	const secret = "SUPER_SECRET_DELTA_TOKENS"
 	cases := []struct {
 		name        string
@@ -27,6 +28,7 @@ func TestWriteSSEDataContentGating(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			s := &Server{cfg: config.Config{LogContent: tc.logContent}, log: logger}
@@ -68,6 +70,7 @@ func TestWriteSSEDataContentGating(t *testing.T) {
 // circuits at info level (no log work, no attr building) while still performing
 // the actual SSE write.
 func TestWriteSSEDataSkipsLoggingWhenDebugOff(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	s := &Server{cfg: config.Config{}, log: logger}

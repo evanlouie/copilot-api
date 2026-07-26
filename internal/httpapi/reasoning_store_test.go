@@ -98,6 +98,7 @@ func getResponseForStore(t *testing.T, s *Server, id string) openai.Response {
 // it was "off" must still carry reasoning in the store, and reading it back with
 // the knob at "both" must return that reasoning.
 func TestReasoningEmissionOffDoesNotStripStoredReasoning(t *testing.T) {
+	t.Parallel()
 	gw := newStoringReasoningGateway()
 
 	off := New(config.Config{ReasoningEmission: "off"}, gw, slog.Default())
@@ -127,6 +128,7 @@ func TestReasoningEmissionOffDoesNotStripStoredReasoning(t *testing.T) {
 // same boundary: the read path still hides reasoning while the knob is off,
 // and doing so must not mutate the gateway's memoised response object.
 func TestReasoningEmissionOffFiltersStoredRecordOnRead(t *testing.T) {
+	t.Parallel()
 	gw := newStoringReasoningGateway()
 	both := New(config.Config{ReasoningEmission: "both"}, gw, slog.Default())
 	created := postResponseForStore(t, both)

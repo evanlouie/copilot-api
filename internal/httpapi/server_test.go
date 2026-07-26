@@ -263,6 +263,7 @@ func (g *statefulResponseGateway) DeleteResponse(_ context.Context, id string) e
 }
 
 func TestModelsEndpointIncludesContextWindowLimits(t *testing.T) {
+	t.Parallel()
 	contextWindow := int64(200000)
 	s := New(config.Config{}, modelsGateway{models: []copilotgw.Model{{
 		ID: "gpt-5",
@@ -308,6 +309,7 @@ func TestModelsEndpointIncludesContextWindowLimits(t *testing.T) {
 }
 
 func TestModelsEndpointIncludesReasoningAndVisionMetadata(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, modelsGateway{models: []copilotgw.Model{{
 		ID:                        "gpt-5-vision",
 		SupportedReasoningEfforts: []string{"low", "medium", "high"},
@@ -380,6 +382,7 @@ func TestModelsEndpointIncludesReasoningAndVisionMetadata(t *testing.T) {
 }
 
 func TestModelsEndpointNormalizesAndDeduplicatesReasoningAliases(t *testing.T) {
+	t.Parallel()
 	models := []copilotgw.Model{
 		{
 			ID:                        "gpt-future",
@@ -406,6 +409,7 @@ func TestModelsEndpointNormalizesAndDeduplicatesReasoningAliases(t *testing.T) {
 }
 
 func TestRequestLoggingMiddlewareLogsMetadata(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -432,6 +436,7 @@ func TestRequestLoggingMiddlewareLogsMetadata(t *testing.T) {
 }
 
 func TestRequestLoggingMiddlewareContentLoggingDisabled(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -451,6 +456,7 @@ func TestRequestLoggingMiddlewareContentLoggingDisabled(t *testing.T) {
 }
 
 func TestRequestLoggingMiddlewareContentLoggingEnabled(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	h := observability.RequestIDMiddleware(requestLoggingMiddleware(logger, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -476,6 +482,7 @@ func TestRequestLoggingMiddlewareContentLoggingEnabled(t *testing.T) {
 }
 
 func TestRequestLoggingMiddlewareContentLoggingTruncates(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	requestBody := strings.Repeat("a", maxLoggedBodyBytes+1)
@@ -508,6 +515,7 @@ func TestRequestLoggingMiddlewareContentLoggingTruncates(t *testing.T) {
 }
 
 func TestGenerationLoggingUsesGatewayResolvedReasoningEffort(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	gw := &resolvingChatGateway{resolvedEffort: "medium"}
@@ -541,6 +549,7 @@ func TestGenerationLoggingUsesGatewayResolvedReasoningEffort(t *testing.T) {
 }
 
 func TestResponsesSuffixLoggingUsesCanonicalModelAndExplicitEffort(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	gw := &captureResponseGateway{}
@@ -565,6 +574,7 @@ func TestResponsesSuffixLoggingUsesCanonicalModelAndExplicitEffort(t *testing.T)
 }
 
 func TestChatContinuationLoggingDoesNotResolveReasoningEffort(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	gw := &resolvingChatGateway{resolvedEffort: "medium"}
@@ -607,6 +617,7 @@ func TestChatContinuationLoggingDoesNotResolveReasoningEffort(t *testing.T) {
 }
 
 func TestChatRequestPassesReasoningHistoryAndImageInput(t *testing.T) {
+	t.Parallel()
 	gw := &captureChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -651,6 +662,7 @@ func TestChatRequestPassesReasoningHistoryAndImageInput(t *testing.T) {
 }
 
 func TestChatAssistantPrefillBecomesHistoryWithContinuationPrompt(t *testing.T) {
+	t.Parallel()
 	gw := &captureChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -680,6 +692,7 @@ func TestChatAssistantPrefillBecomesHistoryWithContinuationPrompt(t *testing.T) 
 }
 
 func TestChatModelReasoningEffortSuffixIsCanonicalized(t *testing.T) {
+	t.Parallel()
 	gw := &captureChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -703,6 +716,7 @@ func TestChatModelReasoningEffortSuffixIsCanonicalized(t *testing.T) {
 }
 
 func TestChatRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
+	t.Parallel()
 	gw := &captureChatGateway{}
 	s := New(config.Config{DefaultReasoningEffort: "medium"}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -725,6 +739,7 @@ func TestChatRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
 }
 
 func TestChatStreamWithToolCallAndIncludeUsageUsesOpenAIChunkShape(t *testing.T) {
+	t.Parallel()
 	gw := &streamChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -768,6 +783,7 @@ func TestChatStreamWithToolCallAndIncludeUsageUsesOpenAIChunkShape(t *testing.T)
 }
 
 func TestResponsesRequestPassesNestedReasoningImageInputAndIgnoresMCPTool(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -805,6 +821,7 @@ func TestResponsesRequestPassesNestedReasoningImageInputAndIgnoresMCPTool(t *tes
 }
 
 func TestResponsesRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{DefaultReasoningEffort: "high"}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -827,6 +844,7 @@ func TestResponsesRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
 }
 
 func TestStrictResponsesRejectsMCPProviderTool(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{StrictCompat: true}, &captureResponseGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","tools":[{"type":"mcp","server_label":"test-mcp","server_url":"https://example.invalid/mcp"}],"input":"hi"}`)
 	w := httptest.NewRecorder()
@@ -842,6 +860,7 @@ func TestStrictResponsesRejectsMCPProviderTool(t *testing.T) {
 }
 
 func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -877,6 +896,7 @@ func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *test
 }
 
 func TestResponsesRequestAllowsMixedFunctionOutputsAndNewInput(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -903,6 +923,7 @@ func TestResponsesRequestAllowsMixedFunctionOutputsAndNewInput(t *testing.T) {
 }
 
 func TestResponsesRequestBuildsTranscriptFallbackForStatelessFunctionOutputHistory(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -941,6 +962,7 @@ func TestResponsesRequestBuildsTranscriptFallbackForStatelessFunctionOutputHisto
 }
 
 func TestResponsesRequestDoesNotBuildFallbackForOutputOnlyWithoutHistory(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -963,6 +985,7 @@ func TestResponsesRequestDoesNotBuildFallbackForOutputOnlyWithoutHistory(t *test
 }
 
 func TestResponsesStreamEmitsFunctionCallEventsAndCompletedResponse(t *testing.T) {
+	t.Parallel()
 	gw := &functionCallStreamGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -1013,6 +1036,7 @@ func TestResponsesStreamEmitsFunctionCallEventsAndCompletedResponse(t *testing.T
 // so dropping the key (Go's omitempty drops zero-length slices) makes every
 // client.responses.stream(...) call fail on the first text token.
 func TestResponsesStreamOpensMessageItemWithEmptyContentArray(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &codexStreamGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","stream":true,"input":"hi"}`)
 	w := httptest.NewRecorder()
@@ -1031,6 +1055,7 @@ func TestResponsesStreamOpensMessageItemWithEmptyContentArray(t *testing.T) {
 }
 
 func TestResponsesWebSocketNonUpgradeRequiresUpgrade(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &websocketStreamGateway{}, slog.Default())
 	w := httptest.NewRecorder()
 
@@ -1045,6 +1070,7 @@ func TestResponsesWebSocketNonUpgradeRequiresUpgrade(t *testing.T) {
 }
 
 func TestResponsesWebSocketStreamsResponseCreateAndAllowsLatestStoreFalseContinuation(t *testing.T) {
+	t.Parallel()
 	gw := &websocketStreamGateway{text: "pong"}
 	s := New(config.Config{}, gw, slog.Default())
 	hts := httptest.NewServer(s.Handler())
@@ -1088,6 +1114,7 @@ func TestResponsesWebSocketStreamsResponseCreateAndAllowsLatestStoreFalseContinu
 }
 
 func TestResponsesWebSocketSupportsNestedResponsePayloadAndMergesEnvelopeFields(t *testing.T) {
+	t.Parallel()
 	gw := &websocketStreamGateway{text: "nested-ok"}
 	conn, cleanup := newResponsesWebSocketConn(t, gw)
 	defer cleanup()
@@ -1108,6 +1135,7 @@ func TestResponsesWebSocketSupportsNestedResponsePayloadAndMergesEnvelopeFields(
 }
 
 func TestResponsesWebSocketGenerateFalseWarmsSessionAndReturnsCompletedResponse(t *testing.T) {
+	t.Parallel()
 	gw := &websocketStreamGateway{}
 	conn, cleanup := newResponsesWebSocketConn(t, gw)
 	defer cleanup()
@@ -1156,6 +1184,7 @@ func TestResponsesWebSocketGenerateFalseWarmsSessionAndReturnsCompletedResponse(
 }
 
 func TestResponsesWebSocketEmitsTextEventsInOrder(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{text: "hello"})
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1186,6 +1215,7 @@ func TestResponsesWebSocketEmitsTextEventsInOrder(t *testing.T) {
 }
 
 func TestResponsesWebSocketEmitsFunctionCallEvents(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{functionCall: true})
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1210,6 +1240,7 @@ func TestResponsesWebSocketEmitsFunctionCallEvents(t *testing.T) {
 }
 
 func TestResponsesWebSocketStreamErrorClosesTextItemAndFailsResponse(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{text: "partial", errorAfterText: apierr.Upstream("boom")})
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1243,6 +1274,7 @@ func TestResponsesWebSocketStreamErrorClosesTextItemAndFailsResponse(t *testing.
 }
 
 func TestResponsesWebSocketRejectsConcurrentResponseCreate(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{})
 	release := make(chan struct{})
 	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{started: started, release: release})
@@ -1272,6 +1304,7 @@ func TestResponsesWebSocketRejectsConcurrentResponseCreate(t *testing.T) {
 }
 
 func TestResponsesWebSocketPreGenerationErrorsUseTopLevelError(t *testing.T) {
+	t.Parallel()
 	gw := &errorResponseGateway{err: apierr.PreviousResponseNotFound("resp_missing")}
 	conn, cleanup := newResponsesWebSocketConn(t, gw)
 	defer cleanup()
@@ -1288,6 +1321,7 @@ func TestResponsesWebSocketPreGenerationErrorsUseTopLevelError(t *testing.T) {
 }
 
 func TestResponsesWebSocketRejectsMalformedAndConflictingModelSelectors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		body  map[string]any
@@ -1307,6 +1341,7 @@ func TestResponsesWebSocketRejectsMalformedAndConflictingModelSelectors(t *testi
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			gw := &websocketStreamGateway{}
 			conn, cleanup := newResponsesWebSocketConn(t, gw)
 			defer cleanup()
@@ -1328,6 +1363,7 @@ func TestResponsesWebSocketRejectsMalformedAndConflictingModelSelectors(t *testi
 }
 
 func TestResponsesWebSocketIdleTimeoutClosesConnection(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{WebSocketIdleTimeout: 10 * time.Millisecond, WebSocketPingInterval: 0}, &websocketStreamGateway{}, slog.Default())
 	hts := httptest.NewServer(s.Handler())
 	defer hts.Close()
@@ -1351,6 +1387,9 @@ func TestResponsesWebSocketIdleTimeoutClosesConnection(t *testing.T) {
 	}
 }
 
+// Not parallel: the idle timeout below is also the budget for accepting the
+// socket and scheduling the server's read loop, and CPU contention from a
+// parallel batch is exactly what used to make this test fail.
 func TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -1397,6 +1436,7 @@ func TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating(t *testing.T) {
 }
 
 func TestResponsesWebSocketUnknownEventReturnsErrorFrame(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &websocketStreamGateway{}, slog.Default())
 	hts := httptest.NewServer(s.Handler())
 	defer hts.Close()
@@ -1491,6 +1531,7 @@ func readWebSocketEvent(t *testing.T, ctx context.Context, conn *websocket.Conn)
 }
 
 func TestResponsesGetDeleteHTTPContract(t *testing.T) {
+	t.Parallel()
 	gw := &statefulResponseGateway{resp: &openai.Response{ID: "resp_1", Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: "gpt-5", OutputText: "ok", Output: []openai.ResponseOutputItem{}, ParallelToolCalls: true, Store: true}}
 	s := New(config.Config{}, gw, slog.Default())
 
@@ -1525,6 +1566,7 @@ func TestResponsesGetDeleteHTTPContract(t *testing.T) {
 }
 
 func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
+	t.Parallel()
 	gw := &codexStreamGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5.5:MEDIUM","stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":" medium ","summary":"auto"},"text":{"verbosity":"low"},"tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch"}],"instructions":"base","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"desktop context"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
@@ -1566,6 +1608,7 @@ func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
 // that a late (encrypted-only) reasoning item produces, which is exactly the
 // case ad-hoc index arithmetic used to get wrong.
 func TestOutputItemIndexerAssignsOneIndexPerItem(t *testing.T) {
+	t.Parallel()
 	var index outputItemIndexer
 	if got := index.indexOf("msg_1"); got != 0 {
 		t.Fatalf("first announced item index = %d, want 0", got)
@@ -1590,6 +1633,7 @@ func TestOutputItemIndexerAssignsOneIndexPerItem(t *testing.T) {
 }
 
 func TestHTTPValidationErrorsAreOpenAIShaped(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		path  string
@@ -1641,6 +1685,7 @@ func TestHTTPValidationErrorsAreOpenAIShaped(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			s := New(config.Config{}, &captureResponseGateway{}, slog.Default())
 			w := httptest.NewRecorder()
 			s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
@@ -1664,6 +1709,7 @@ func TestHTTPValidationErrorsAreOpenAIShaped(t *testing.T) {
 // None of them can be honoured end to end by the Copilot SDK, and all of them
 // must still return 200 rather than a 400 the client cannot recover from.
 func TestHTTPAcceptsValidOpenAIClientRequests(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		path string
@@ -1732,6 +1778,7 @@ func TestHTTPAcceptsValidOpenAIClientRequests(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var gw copilotgw.HTTPGateway = &resolvingChatGateway{}
 			if tc.path == "/v1/responses" {
 				gw = &captureResponseGateway{}
@@ -1750,6 +1797,7 @@ func TestHTTPAcceptsValidOpenAIClientRequests(t *testing.T) {
 // the transcript instead of being hoisted into the session instructions, where
 // it would outlive and outrank the turn it annotates.
 func TestChatSplicesMidConversationSystemMessageIntoHistory(t *testing.T) {
+	t.Parallel()
 	gw := &resolvingChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := `{"model":"gpt-5","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"},{"role":"system","content":"stay on topic"},{"role":"user","content":"again"}]}`
@@ -1778,6 +1826,7 @@ func TestChatSplicesMidConversationSystemMessageIntoHistory(t *testing.T) {
 
 // LangChain's ToolMessage and MCP bridges send tool results as JSON objects.
 func TestChatAcceptsJSONObjectToolResult(t *testing.T) {
+	t.Parallel()
 	gw := &resolvingChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := `{"model":"gpt-5","tools":[{"type":"function","function":{"name":"2fa_verify"}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"2fa_verify","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":{"ok":true,"code":"123456"}}]}`
@@ -1797,6 +1846,7 @@ func TestChatAcceptsJSONObjectToolResult(t *testing.T) {
 // Accepting a control this proxy cannot honour is only defensible if the gap is
 // observable, so the debug log has to name every one of them.
 func TestUnhonoredControlsAreLoggedAtDebug(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	s := New(config.Config{}, &resolvingChatGateway{}, logger)
@@ -1831,6 +1881,7 @@ func TestUnhonoredControlsAreLoggedAtDebug(t *testing.T) {
 // to a client that is about to parse JSON, so both surfaces fail the request
 // with an OpenAI-shaped body that names the feature.
 func TestHTTPRejectsStructuredOutputOnBothSurfaces(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		path   string
@@ -1879,6 +1930,7 @@ func TestHTTPRejectsStructuredOutputOnBothSurfaces(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var gw copilotgw.HTTPGateway = &resolvingChatGateway{}
 			if tc.path == "/v1/responses" {
 				gw = &captureResponseGateway{}
@@ -1905,6 +1957,7 @@ func TestHTTPRejectsStructuredOutputOnBothSurfaces(t *testing.T) {
 }
 
 func TestAuthMiddlewareProtectsV1ButNotHealth(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{APIKey: "secret"}, modelsGateway{models: []copilotgw.Model{{ID: "gpt-5"}}}, slog.Default())
 
 	health := httptest.NewRecorder()
@@ -1937,6 +1990,7 @@ func TestAuthMiddlewareProtectsV1ButNotHealth(t *testing.T) {
 }
 
 func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
+	t.Parallel()
 	objectContent := openai.Content{Present: true, Raw: json.RawMessage(`{"answer":42}`)}
 	if got, err := objectContent.ToolOutput(); err != nil || got != `{"answer":42}` {
 		t.Fatalf("ToolOutput object = %q, %v; want compact object", got, err)
@@ -2004,6 +2058,7 @@ func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
 }
 
 func TestParseResponsesInputUsesOnlyPostOutputItemsAsContinuationInput(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[
 		{"type":"message","role":"user","content":"look up alpha"},
 		{"type":"function_call","call_id":"call_old","name":"lookup","arguments":"{}"},
@@ -2028,6 +2083,7 @@ func TestParseResponsesInputUsesOnlyPostOutputItemsAsContinuationInput(t *testin
 }
 
 func TestParseResponsesInputDropsStatelessHistoryBeforeFunctionOutput(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[
 		{"type":"message","role":"user","content":"look up alpha"},
 		{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
@@ -2046,6 +2102,7 @@ func TestParseResponsesInputDropsStatelessHistoryBeforeFunctionOutput(t *testing
 }
 
 func TestParseResponsesInputRejectsDuplicateFunctionOutputs(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[
 		{"type":"function_call_output","call_id":"call_1","output":"a"},
 		{"type":"function_call_output","call_id":"call_1","output":"b"}
@@ -2057,6 +2114,7 @@ func TestParseResponsesInputRejectsDuplicateFunctionOutputs(t *testing.T) {
 }
 
 func TestParseResponsesInputFoldsDeveloperMessagesIntoInstructions(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[
 		{"type":"message","role":"developer","content":[{"type":"input_text","text":"desktop context"}]},
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
@@ -2077,6 +2135,7 @@ func TestParseResponsesInputFoldsDeveloperMessagesIntoInstructions(t *testing.T)
 }
 
 func TestParseResponsesInputSerializesAssistantHistoryAsTranscript(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[
 		{"type":"message","role":"user","content":"hi"},
 		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]},
@@ -2096,6 +2155,7 @@ func TestParseResponsesInputSerializesAssistantHistoryAsTranscript(t *testing.T)
 }
 
 func TestParseResponsesInputAcceptsImageParts(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[
 		{"type":"message","role":"user","content":[
 			{"type":"input_text","text":"describe"},

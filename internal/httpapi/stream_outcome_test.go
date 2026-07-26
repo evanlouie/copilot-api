@@ -63,6 +63,7 @@ func (g *completingChatStreamGateway) StreamChat(_ context.Context, req copilotg
 // healthy traffic. The access line has to carry the terminal outcome, and the
 // record has to be severe enough to find.
 func TestFailedResponsesStreamIsRecordedInTheAccessLog(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	s := New(config.Config{}, &failingResponseStreamGateway{}, slog.New(slog.NewJSONHandler(&buf, nil)))
 	rec := httptest.NewRecorder()
@@ -88,6 +89,7 @@ func TestFailedResponsesStreamIsRecordedInTheAccessLog(t *testing.T) {
 }
 
 func TestFailedChatStreamIsRecordedInTheAccessLog(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	s := New(config.Config{}, &failingChatStreamGateway{}, slog.New(slog.NewJSONHandler(&buf, nil)))
 	rec := httptest.NewRecorder()
@@ -109,6 +111,7 @@ func TestFailedChatStreamIsRecordedInTheAccessLog(t *testing.T) {
 // The healthy case must stay quiet and stay INFO, or the failed case is not
 // distinguishable after all.
 func TestCompletedStreamsAreRecordedAsCompleted(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name    string
 		gateway copilotgw.HTTPGateway
@@ -119,6 +122,7 @@ func TestCompletedStreamsAreRecordedAsCompleted(t *testing.T) {
 		{name: "chat", gateway: &completingChatStreamGateway{}, path: "/v1/chat/completions", body: `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var buf bytes.Buffer
 			s := New(config.Config{}, tt.gateway, slog.New(slog.NewJSONHandler(&buf, nil)))
 			rec := httptest.NewRecorder()

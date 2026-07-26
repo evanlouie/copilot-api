@@ -3,6 +3,7 @@ package httpapi
 import "testing"
 
 func TestTerminalStreamSuffix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		terminal string
@@ -19,6 +20,7 @@ func TestTerminalStreamSuffix(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := terminalStreamSuffix(test.terminal, test.streamed, "mismatch")
 			if test.wantErr {
 				if err == nil {

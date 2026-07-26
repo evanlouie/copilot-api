@@ -22,6 +22,7 @@ import (
 // request context when the handler returns, but a WebSocket handler's parent is
 // the connection context, which outlives every individual response.
 func TestRequestContextCancelStopsTheContextWithoutATimeout(t *testing.T) {
+	t.Parallel()
 	for _, timeout := range []time.Duration{0, -time.Second, time.Minute} {
 		ctx, cancel := requestContext(context.Background(), timeout)
 		cancel()
@@ -66,6 +67,7 @@ func (g *leakingStreamGateway) StreamResponse(ctx context.Context, _ copilotgw.R
 // the gateway producer it started. Its parent is the connection context, so the
 // only thing that can free the producer is the per-response cancel func.
 func TestWebSocketResponseCancelsItsGatewayProducerOnEarlyReturn(t *testing.T) {
+	t.Parallel()
 	gateway := &leakingStreamGateway{producerExited: make(chan struct{})}
 	hts := httptest.NewServer(New(config.Config{}, gateway, slog.Default()).Handler())
 	defer hts.Close()
@@ -131,6 +133,7 @@ func (g *deadlineCaptureGateway) DeleteResponse(ctx context.Context, id string) 
 // stored-response reads were the two that passed the raw request context
 // straight through, so a wedged store read had no bound at all.
 func TestStoredResponseHandlersApplyTheRequestTimeout(t *testing.T) {
+	t.Parallel()
 	gateway := &deadlineCaptureGateway{resp: &openai.Response{ID: "resp_1", Object: openai.ObjectResponse, Status: "completed"}}
 	s := New(config.Config{RequestTimeout: time.Minute}, gateway, slog.Default())
 
@@ -174,6 +177,7 @@ func (g *idCaptureGateway) DeleteResponse(_ context.Context, id string) error {
 // percent-encoded traversal segment through to the gateway, where only
 // sessionstore.safeName stopped it — an invariant the transport does not own.
 func TestStoredResponseHandlersRejectIDsTheProxyCannotHaveMinted(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{
 		"/v1/responses/%2E%2E",
 		"/v1/responses/resp_%2E%2E",

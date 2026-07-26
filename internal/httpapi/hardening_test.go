@@ -21,6 +21,7 @@ import (
 )
 
 func TestDecodeJSONAcceptsExactLimitAndRejectsOneByteOver(t *testing.T) {
+	t.Parallel()
 	payload := `{"ok":1}`
 	for _, test := range []struct {
 		name   string
@@ -28,6 +29,7 @@ func TestDecodeJSONAcceptsExactLimitAndRejectsOneByteOver(t *testing.T) {
 		status int
 	}{{"exact", int64(len(payload)), 0}, {"over", int64(len(payload) - 1), http.StatusRequestEntityTooLarge}} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(payload))
 			response := httptest.NewRecorder()
 			var decoded map[string]any
@@ -46,6 +48,7 @@ func TestDecodeJSONAcceptsExactLimitAndRejectsOneByteOver(t *testing.T) {
 }
 
 func TestOversizedJSONBodyReturns413(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{MaxRequestBodyBytes: 32}, &captureChatGateway{}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"too large"}]}`))
 	response := httptest.NewRecorder()
@@ -73,6 +76,7 @@ func (r repeatingReader) Read(p []byte) (int, error) {
 // real number, POST bodies were unbounded while WebSocket frames were capped at
 // the coder/websocket library default of 32 KiB.
 func TestHTTPBodyOverDefaultLimitReturns413(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{MaxRequestBodyBytes: config.DefaultMaxRequestBodyBytes}, &captureChatGateway{}, slog.Default())
 	body := io.MultiReader(
 		strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"`),
@@ -99,6 +103,7 @@ func TestHTTPBodyOverDefaultLimitReturns413(t *testing.T) {
 // tells clients to send whenever a tool sets strict: true, so it has to reach
 // the gateway instead of 400ing; the backend simply cannot enforce it.
 func TestChatAcceptsParallelToolCallsFalse(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{}, &captureChatGateway{}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","parallel_tool_calls":false,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
@@ -135,6 +140,7 @@ func (g *scriptedChatStreamGateway) StreamChat(ctx context.Context, _ copilotgw.
 }
 
 func TestChatSynchronousStreamSetupFailurePreservesHTTPStatus(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{}, &scriptedChatStreamGateway{err: apierr.NotFound("missing model", "model_not_found")}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"missing","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
@@ -145,6 +151,7 @@ func TestChatSynchronousStreamSetupFailurePreservesHTTPStatus(t *testing.T) {
 }
 
 func TestChatTerminalOnlyTextIsEmittedBeforeFinish(t *testing.T) {
+	t.Parallel()
 	result := &copilotgw.TurnResult{ID: "chatcmpl_terminal", Model: "gpt-5", Text: "terminal text", FinishReason: "stop"}
 	server := New(config.Config{}, &scriptedChatStreamGateway{events: []copilotgw.StreamEvent{{Kind: "result", Result: result}}}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
@@ -157,6 +164,7 @@ func TestChatTerminalOnlyTextIsEmittedBeforeFinish(t *testing.T) {
 }
 
 func TestChatTerminalReasoningSuffixIsEmitted(t *testing.T) {
+	t.Parallel()
 	result := &copilotgw.TurnResult{ID: "chatcmpl_reason", Model: "gpt-5", Reasoning: "thinking", FinishReason: "stop"}
 	server := New(config.Config{}, &scriptedChatStreamGateway{events: []copilotgw.StreamEvent{{Kind: "reasoning_delta", Delta: "think"}, {Kind: "result", Result: result}}}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
@@ -168,6 +176,7 @@ func TestChatTerminalReasoningSuffixIsEmitted(t *testing.T) {
 }
 
 func TestChatStreamPrematureClosureEmitsErrorAndDone(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{}, &scriptedChatStreamGateway{}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
@@ -178,6 +187,7 @@ func TestChatStreamPrematureClosureEmitsErrorAndDone(t *testing.T) {
 }
 
 func TestChatStreamStopsAfterError(t *testing.T) {
+	t.Parallel()
 	result := &copilotgw.TurnResult{ID: "chatcmpl_late", Model: "gpt-5", FinishReason: "stop"}
 	gateway := &scriptedChatStreamGateway{events: []copilotgw.StreamEvent{{Kind: "error", Error: apierr.Upstream("boom")}, {Kind: "result", Result: result}}}
 	server := New(config.Config{}, gateway, slog.Default())
@@ -190,6 +200,7 @@ func TestChatStreamStopsAfterError(t *testing.T) {
 }
 
 func TestChatStreamDeadlineEmitsTimeout(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{RequestTimeout: 20 * time.Millisecond}, &scriptedChatStreamGateway{hold: true}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
@@ -200,6 +211,7 @@ func TestChatStreamDeadlineEmitsTimeout(t *testing.T) {
 }
 
 func TestChatStreamClientCancellationDoesNotWriteTerminal(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
 	cancel()
@@ -212,6 +224,7 @@ func TestChatStreamClientCancellationDoesNotWriteTerminal(t *testing.T) {
 }
 
 func TestSynchronousStreamSetupFailurePreservesHTTPStatus(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{}, &errorResponseGateway{err: apierr.NotFound("missing model", "model_not_found")}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"missing","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
@@ -222,6 +235,7 @@ func TestSynchronousStreamSetupFailurePreservesHTTPStatus(t *testing.T) {
 }
 
 func TestPrematureResponseStreamClosureEmitsFailure(t *testing.T) {
+	t.Parallel()
 	channel := make(chan copilotgw.ResponseStreamEvent)
 	close(channel)
 	writer := &captureResponseEventWriter{}
@@ -243,6 +257,7 @@ func TestPrematureResponseStreamClosureEmitsFailure(t *testing.T) {
 // response disagree with the stored record, because persistence already
 // happened in the gateway.
 func TestResponseStreamReconcilesTerminalReasoningAfterSummaryDone(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{ID: "resp_reason_suffix", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "answer", Output: []openai.ResponseOutputItem{
 		{ID: "rs_suffix", Type: "reasoning", Status: "completed", Summary: []openai.ResponseReasoningSummary{{Type: "summary_text", Text: "thinking"}}},
 		{ID: "msg_suffix", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "answer"}}},
@@ -276,6 +291,7 @@ func TestResponseStreamReconcilesTerminalReasoningAfterSummaryDone(t *testing.T)
 }
 
 func TestResponseStreamDeadlineClosesPartialItemsAndUsesTimeoutError(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	channel := make(chan copilotgw.ResponseStreamEvent, 1)
@@ -301,6 +317,7 @@ func TestResponseStreamDeadlineClosesPartialItemsAndUsesTimeoutError(t *testing.
 }
 
 func TestResponseStreamClientCancellationDoesNotAttemptTerminalFrame(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	writer := &captureResponseEventWriter{}
@@ -316,6 +333,7 @@ func TestResponseStreamClientCancellationDoesNotAttemptTerminalFrame(t *testing.
 }
 
 func TestResponseStreamStopsAfterCompletedResponse(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{ID: "resp_done", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", Output: []openai.ResponseOutputItem{}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 2)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
@@ -334,6 +352,7 @@ func TestResponseStreamStopsAfterCompletedResponse(t *testing.T) {
 }
 
 func TestResponseStreamEmitsTerminalTextSuffix(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{ID: "resp_suffix", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "partial", Output: []openai.ResponseOutputItem{{ID: "msg_suffix", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "partial"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 2)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_suffix", Delta: "part"}
@@ -361,6 +380,7 @@ func TestResponseStreamEmitsTerminalTextSuffix(t *testing.T) {
 // message, which failed the response after the client had already been shown
 // every delta.
 func TestResponseStreamAcceptsMultiMessageTurnTerminalText(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{ID: "resp_multi", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "Alpha Beta", Output: []openai.ResponseOutputItem{{ID: "msg_multi", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "Alpha Beta"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 3)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_multi", Delta: "Alpha "}
@@ -391,6 +411,7 @@ func TestResponseStreamAcceptsMultiMessageTurnTerminalText(t *testing.T) {
 // already shown cannot be reconciled, so the response fails. This is the shape a
 // multi-message turn produced before the turn runner accumulated its messages.
 func TestResponseStreamRejectsTerminalTextMissingStreamedContent(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{ID: "resp_dropped", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "Beta", Output: []openai.ResponseOutputItem{{ID: "msg_dropped", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "Beta"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 3)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_dropped", Delta: "Alpha "}
@@ -405,6 +426,7 @@ func TestResponseStreamRejectsTerminalTextMissingStreamedContent(t *testing.T) {
 }
 
 func TestResponseOutputSizeIncludesRawArgumentsAndAnnotations(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{Output: []openai.ResponseOutputItem{
 		{Type: "tool_search_call", ArgumentsJSON: []byte(`{"query":"large"}`)},
 		{Type: "message", Content: []openai.ResponseText{{Type: "output_text", Annotations: []any{map[string]any{"url": "https://example.com"}}}}},
@@ -419,6 +441,7 @@ func TestResponseOutputSizeIncludesRawArgumentsAndAnnotations(t *testing.T) {
 }
 
 func TestTerminalOnlyResponseHonorsStreamOutputLimit(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{ID: "resp_large_terminal", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "oversized", Output: []openai.ResponseOutputItem{{ID: "msg_large", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "oversized"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 1)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
@@ -431,6 +454,7 @@ func TestTerminalOnlyResponseHonorsStreamOutputLimit(t *testing.T) {
 }
 
 func TestTerminalOnlyResponseMessageHasCompleteLifecycle(t *testing.T) {
+	t.Parallel()
 	response := &openai.Response{ID: "resp_terminal", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "terminal text", Output: []openai.ResponseOutputItem{{ID: "msg_terminal", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "terminal text"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 1)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
@@ -466,6 +490,7 @@ func TestTerminalOnlyResponseMessageHasCompleteLifecycle(t *testing.T) {
 }
 
 func TestContentFirstTerminalReasoningHasCompleteLifecycle(t *testing.T) {
+	t.Parallel()
 	channel := make(chan copilotgw.ResponseStreamEvent, 2)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_1", Delta: "answer"}
 	// The gateway orders the terminal output the way the stream announced it, so
@@ -504,6 +529,7 @@ func TestContentFirstTerminalReasoningHasCompleteLifecycle(t *testing.T) {
 }
 
 func TestServerShutdownClosesActiveWebSockets(t *testing.T) {
+	t.Parallel()
 	server := New(config.Config{}, &websocketStreamGateway{}, slog.Default())
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
@@ -539,6 +565,7 @@ func TestServerShutdownClosesActiveWebSockets(t *testing.T) {
 // the server must always pin the limit explicitly. A response.create frame
 // carrying a tool catalog and a multi-turn transcript routinely exceeds 32 KiB.
 func TestResponsesWebSocketAcceptsFrameLargerThanLibraryDefaultReadLimit(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		limit int64
@@ -547,6 +574,7 @@ func TestResponsesWebSocketAcceptsFrameLargerThanLibraryDefaultReadLimit(t *test
 		{"explicitly unlimited", 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			gateway := &websocketStreamGateway{text: "big-ok"}
 			server := New(config.Config{MaxRequestBodyBytes: test.limit}, gateway, slog.Default())
 			httpServer := httptest.NewServer(server.Handler())
@@ -581,6 +609,7 @@ func TestResponsesWebSocketAcceptsFrameLargerThanLibraryDefaultReadLimit(t *test
 // connection must end with an informative StatusMessageTooBig close rather than
 // a bare teardown.
 func TestResponsesWebSocketOversizedFrameClosesWithMessageTooBig(t *testing.T) {
+	t.Parallel()
 	gateway := &websocketStreamGateway{}
 	server := New(config.Config{MaxRequestBodyBytes: 1024}, gateway, slog.Default())
 	httpServer := httptest.NewServer(server.Handler())
@@ -614,6 +643,7 @@ func TestResponsesWebSocketOversizedFrameClosesWithMessageTooBig(t *testing.T) {
 }
 
 func TestAuthenticationFailureSamplerBoundsRepeatedLogs(t *testing.T) {
+	t.Parallel()
 	sampler := newFailureLogSampler(time.Minute)
 	now := time.Now()
 	if !sampler.Allow("127.0.0.1", now) {
@@ -630,6 +660,7 @@ func TestAuthenticationFailureSamplerBoundsRepeatedLogs(t *testing.T) {
 }
 
 func TestUnknownWebSocketErrorsAreGeneric(t *testing.T) {
+	t.Parallel()
 	event := NewWebSocketErrorEvent(errors.New("/secret/path"), "evt")
 	if strings.Contains(event.Error.Message, "/secret/path") || event.Error.Message != "internal server error" {
 		t.Fatalf("websocket error leaked details: %#v", event)

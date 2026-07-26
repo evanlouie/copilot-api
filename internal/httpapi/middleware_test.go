@@ -108,6 +108,7 @@ func assertParsableSSE(t *testing.T, body string) {
 }
 
 func TestUnauthorizedRequestIsAccessLogged(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	s := New(config.Config{APIKey: "secret"}, modelsGateway{}, logger)
@@ -133,6 +134,7 @@ func TestUnauthorizedRequestIsAccessLogged(t *testing.T) {
 }
 
 func TestPanickingHandlerIsAccessLoggedWithStatus500(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	s := New(config.Config{}, panicModelsGateway{}, logger)
@@ -155,6 +157,7 @@ func TestPanickingHandlerIsAccessLoggedWithStatus500(t *testing.T) {
 }
 
 func TestPanicAfterResponsesStreamCommitWritesTerminalSSEFailure(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	s := New(config.Config{}, &codexStreamGateway{}, logger)
@@ -185,6 +188,7 @@ func TestPanicAfterResponsesStreamCommitWritesTerminalSSEFailure(t *testing.T) {
 }
 
 func TestPanicAfterChatStreamCommitWritesTerminalSSEFailure(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	s := New(config.Config{}, &streamChatGateway{}, logger)
@@ -206,6 +210,7 @@ func TestPanicAfterChatStreamCommitWritesTerminalSSEFailure(t *testing.T) {
 }
 
 func TestRecoverMiddlewareRepanicsAbortHandler(t *testing.T) {
+	t.Parallel()
 	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
 	rr := httptest.NewRecorder()
 	h := recoverMiddleware(logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

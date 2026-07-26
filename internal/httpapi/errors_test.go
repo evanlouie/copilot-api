@@ -19,6 +19,7 @@ import (
 // the OpenAI error `type` are derived here and nowhere else. This pins the whole
 // mapping so a taxonomy change cannot silently move a status on the wire.
 func TestDomainErrorHTTPMapping(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		err     error
@@ -42,6 +43,7 @@ func TestDomainErrorHTTPMapping(t *testing.T) {
 		{"unclassified", errors.New("/secret/path"), http.StatusInternalServerError, "server_error", "internal_error", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			response := httptest.NewRecorder()
 			WriteError(response, test.err)
 			if response.Code != test.status {
@@ -61,6 +63,7 @@ func TestDomainErrorHTTPMapping(t *testing.T) {
 // Retry-After is what makes a 429 actionable: the official SDKs read it to
 // schedule their backoff instead of guessing.
 func TestRateLimitRetryAfterHeader(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name       string
 		retryAfter time.Duration
@@ -74,6 +77,7 @@ func TestRateLimitRetryAfterHeader(t *testing.T) {
 		{name: "under a second still waits", retryAfter: 10 * time.Millisecond, want: "1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			response := httptest.NewRecorder()
 			WriteError(response, apierr.RateLimited("rate limit reached", test.retryAfter))
 			if response.Code != http.StatusTooManyRequests {
@@ -88,6 +92,7 @@ func TestRateLimitRetryAfterHeader(t *testing.T) {
 
 // An unclassified error must never reach the client verbatim.
 func TestUnclassifiedErrorIsOpaque(t *testing.T) {
+	t.Parallel()
 	response := httptest.NewRecorder()
 	WriteError(response, errors.New("/secret/path"))
 	if got := response.Body.String(); !json.Valid(response.Body.Bytes()) || got == "" {
@@ -105,6 +110,7 @@ func TestUnclassifiedErrorIsOpaque(t *testing.T) {
 // The taxonomy is only useful if a gateway failure actually carries it all the
 // way to the wire, including the header the SDKs read.
 func TestRateLimitFromTheGatewayReachesTheClientAsA429(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &errorResponseGateway{err: apierr.RateLimited("You have exceeded your premium request allowance.", 20*time.Second)}, slog.Default())
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5","input":"hi","stream":true}`)))

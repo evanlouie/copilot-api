@@ -18,6 +18,7 @@ import (
 // This is the property TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating
 // asserts over a real socket.
 func TestWebSocketIdleWatchdogNeverFiresWhileAResponseIsGenerating(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		const idle = time.Second
 		state := &responsesWebSocketState{lastSeen: time.Now()}
@@ -63,6 +64,7 @@ func TestWebSocketIdleWatchdogNeverFiresWhileAResponseIsGenerating(t *testing.T)
 
 // Client activity restarts the idle clock; only silence should end a connection.
 func TestWebSocketIdleWatchdogRestartsOnClientActivity(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		const idle = time.Second
 		state := &responsesWebSocketState{lastSeen: time.Now()}
@@ -94,6 +96,7 @@ func TestWebSocketIdleWatchdogRestartsOnClientActivity(t *testing.T) {
 // A cancelled connection context must stop the watchdog, or every closed socket
 // would leave a ticker goroutine behind.
 func TestWebSocketIdleWatchdogStopsWithTheConnection(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		state := &responsesWebSocketState{lastSeen: time.Now()}
 		ctx, cancel := context.WithCancel(context.Background())

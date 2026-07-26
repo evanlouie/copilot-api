@@ -15,6 +15,7 @@ import (
 // proxy derives a boolean from field presence.
 
 func TestResponsesExplicitNullOptionalFieldsAreNotSet(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -63,6 +64,7 @@ func TestResponsesExplicitNullOptionalFieldsAreNotSet(t *testing.T) {
 }
 
 func TestResponsesExplicitNullOptionalFieldsAcceptedInStrictMode(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{StrictCompat: true}, gw, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","input":"hi","temperature":null,"top_p":null,"metadata":null,"user":null,"include":null,"reasoning":null,"text":null,"service_tier":null}`)
@@ -76,6 +78,7 @@ func TestResponsesExplicitNullOptionalFieldsAcceptedInStrictMode(t *testing.T) {
 }
 
 func TestResponsesExplicitStoreAndToolsStaySet(t *testing.T) {
+	t.Parallel()
 	gw := &captureResponseGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","input":"hi","store":false,"tools":[],"tool_choice":"none"}`)
@@ -98,6 +101,7 @@ func TestResponsesExplicitStoreAndToolsStaySet(t *testing.T) {
 }
 
 func TestChatCompletionsAcceptsExplicitNullOptionalFields(t *testing.T) {
+	t.Parallel()
 	gw := &captureChatGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 	body := strings.NewReader(`{
@@ -139,6 +143,7 @@ func TestChatCompletionsAcceptsExplicitNullOptionalFields(t *testing.T) {
 }
 
 func TestChatCompletionsStillRejectsNonNullUnsupportedFields(t *testing.T) {
+	t.Parallel()
 	s := New(config.Config{}, &captureChatGateway{}, slog.Default())
 	body := strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"stop":["done"]}`)
 	w := httptest.NewRecorder()

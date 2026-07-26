@@ -43,6 +43,7 @@ func (g *silentThenAnsweringGateway) StreamResponse(ctx context.Context, req cop
 // 100s. A turn that thinks in silence therefore has to be kept warm with a
 // comment frame, which the event-stream grammar defines as a no-op.
 func TestIdleSSEStreamEmitsKeepAliveComments(t *testing.T) {
+	t.Parallel()
 	gateway := &silentThenAnsweringGateway{release: make(chan struct{})}
 	s := New(config.Config{SSEKeepAliveInterval: 20 * time.Millisecond}, gateway, slog.Default())
 	hts := httptest.NewServer(s.Handler())
@@ -119,6 +120,7 @@ func TestIdleSSEStreamEmitsKeepAliveComments(t *testing.T) {
 // A keep-alive must never appear inside another frame, and a stream that is
 // busy must not carry any at all.
 func TestKeepAliveDoesNotInterleaveWithEventFrames(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	writer, ok := NewSSEWriter(rec)
 	if !ok {
@@ -156,6 +158,7 @@ func TestKeepAliveDoesNotInterleaveWithEventFrames(t *testing.T) {
 // the goroutine, so once it returns no frame can still land on a writer the
 // handler has already finished with.
 func TestKeepAliveStopsWithTheStream(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		exit func(cancel context.CancelFunc, stop func())
@@ -164,6 +167,7 @@ func TestKeepAliveStopsWithTheStream(t *testing.T) {
 		{name: "context cancelled", exit: func(cancel context.CancelFunc, stop func()) { cancel(); stop() }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			rec := httptest.NewRecorder()
 			writer, ok := NewSSEWriter(rec)
 			if !ok {
@@ -189,6 +193,7 @@ func TestKeepAliveStopsWithTheStream(t *testing.T) {
 // comment grammar is for. Both SSE parsers in this package already skip it, so
 // this pins that they do.
 func TestKeepAliveCommentIsSkippedByTheStreamParsers(t *testing.T) {
+	t.Parallel()
 	body := ": keep-alive\n\nevent: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\n: keep-alive\n\ndata: [DONE]\n\n"
 	events := parseResponseStreamEvents(t, body)
 	if len(events) != 1 || events[0].Type != "response.created" {

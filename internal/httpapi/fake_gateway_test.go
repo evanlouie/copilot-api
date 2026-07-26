@@ -102,6 +102,7 @@ func (misroutedGateway) ValidateModel(context.Context, string) error { return ni
 // pointer dereference" with a stack rooted in net/http and no mention of the
 // call that was actually unexpected.
 func TestUnimplementedGatewayMethodsNameThemselves(t *testing.T) {
+	t.Parallel()
 	logs := &syncBuffer{}
 	s := New(config.Config{}, misroutedGateway{}, slog.New(slog.NewTextHandler(logs, nil)))
 	rec := httptest.NewRecorder()

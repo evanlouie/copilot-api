@@ -194,6 +194,7 @@ func fetchStoredResponse(t *testing.T, s *Server, id string) *openai.Response {
 // later GET are the same, and each item's streamed output_index is its position
 // in the stored output.
 func TestStreamedPersistedAndFetchedOutputItemIDsAgree(t *testing.T) {
+	t.Parallel()
 	gw := &identityGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 
@@ -239,6 +240,7 @@ func storedItemIDs(resp *openai.Response) []string {
 // response.completed payload and the persisted record are the same object, so
 // they serialize identically.
 func TestTerminalCompletedPayloadMatchesPersistedRecord(t *testing.T) {
+	t.Parallel()
 	gw := &identityGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 
@@ -264,6 +266,7 @@ func TestTerminalCompletedPayloadMatchesPersistedRecord(t *testing.T) {
 // streaming transports serialize, not an independent rendering of the gateway
 // result.
 func TestNonStreamingBodyIsTheFoldedTerminalEvent(t *testing.T) {
+	t.Parallel()
 	gw := &identityGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 
@@ -295,6 +298,7 @@ func TestNonStreamingBodyIsTheFoldedTerminalEvent(t *testing.T) {
 // stored record all report the same created_at. The terminal response used to
 // re-read the clock at emission time and disagree with response.created.
 func TestResponseCreatedAndCompletedShareOneTimestamp(t *testing.T) {
+	t.Parallel()
 	gw := &identityGateway{}
 	s := New(config.Config{}, gw, slog.Default())
 
@@ -350,6 +354,7 @@ func responseEventShapes(events []openai.ResponseStreamEvent) []string {
 // streaming transports serialize one shared event sequence, so they agree event
 // for event, including the sequence_number progression.
 func TestSSEAndWebSocketEmitTheSameEventSequence(t *testing.T) {
+	t.Parallel()
 	sse := responseEventShapes(streamResponseOverSSE(t, New(config.Config{}, &identityGateway{}, slog.Default())))
 	ws := responseEventShapes(streamResponseOverWebSocket(t, New(config.Config{}, &identityGateway{}, slog.Default())))
 	if len(sse) != len(ws) {
@@ -366,6 +371,7 @@ func TestSSEAndWebSocketEmitTheSameEventSequence(t *testing.T) {
 // WebSocket transport is no longer a black box. Both transports emit the same
 // debug record for the same event, distinguished only by the transport name.
 func TestWebSocketResponseEventsAreLoggedLikeSSE(t *testing.T) {
+	t.Parallel()
 	debugServer := func(sink *syncBuffer) *Server {
 		logger := slog.New(slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		return New(config.Config{}, &identityGateway{}, logger)
@@ -391,6 +397,7 @@ func TestWebSocketResponseEventsAreLoggedLikeSSE(t *testing.T) {
 // delta belongs to. The HTTP layer must not paper over a missing ID by minting
 // one, because the gateway has already persisted the item under its own.
 func TestResponseStreamRejectsDeltaWithoutGatewayItemID(t *testing.T) {
+	t.Parallel()
 	channel := make(chan copilotgw.ResponseStreamEvent, 1)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "answer"}
 	close(channel)
@@ -411,6 +418,7 @@ func TestResponseStreamRejectsDeltaWithoutGatewayItemID(t *testing.T) {
 // the stream already announced means two components are assigning IDs, which is
 // reported rather than rewritten.
 func TestResponseStreamRejectsRenamedTerminalMessageItem(t *testing.T) {
+	t.Parallel()
 	channel := make(chan copilotgw.ResponseStreamEvent, 2)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_streamed", Delta: "answer"}
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{

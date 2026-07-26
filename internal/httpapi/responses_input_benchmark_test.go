@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseResponsesInputJoinsManyUserMessages(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[{"type":"message","role":"user","content":"one"},{"type":"message","role":"user","content":"two"}]`)
 	prompt, outputs, instructions, err := parseResponsesInput(raw)
 	if err != nil {
