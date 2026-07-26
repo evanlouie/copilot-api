@@ -7,7 +7,7 @@
 STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.7.0
 
 .DEFAULT_GOAL := ci
-.PHONY: ci go-ci deno-ci fmt fmt-check build vet test lint \
+.PHONY: ci go-ci deno-ci fmt fmt-check build vet test test-short lint \
         deno-fmt-check deno-check deno-test
 
 # Everything CI runs.
@@ -40,6 +40,13 @@ vet:
 # -count=1 defeats the test cache. Live tests skip unless COPILOT_API_LIVE_TESTS=1.
 test:
 	go test ./... -race -count=1
+
+# Fast inner loop. The storage tests are fsync-bound (F_FULLFSYNC costs ~5ms per
+# sync on macOS), so their soak loops dominate a full run; -short scales those
+# loops down while still running every assertion. Use this while iterating, and
+# `make test` before pushing.
+test-short:
+	go test ./... -count=1 -short
 
 lint:
 	go run $(STATICCHECK) ./...

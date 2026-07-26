@@ -772,7 +772,7 @@ func TestPinnedResponseSurvivesConcurrentPrune(t *testing.T) {
 		}()
 	}
 	releaseSession := store.PinSession(sessionID)
-	for i := range 300 {
+	for i := range soakIterations(300) {
 		id := fmt.Sprintf("resp_live_%d", i)
 		// Mirror the gateway: the record is pinned before it is written and stays
 		// pinned until the turn is finished with it.

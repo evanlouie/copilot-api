@@ -267,7 +267,7 @@ func TestProviderRejectsSymlinkPlantedDuringWrite(t *testing.T) {
 			_ = os.Symlink(target, link)
 		}
 	}()
-	for range 150 {
+	for range soakIterations(150) {
 		_ = p.WriteFile("/session-state/events.jsonl", "secret", nil)
 	}
 	close(stop)
@@ -332,7 +332,7 @@ func TestProviderWriteFileIsAtomicForConcurrentReaders(t *testing.T) {
 			check("provider reader", content)
 		}
 	}()
-	for i := range 40 {
+	for i := range soakIterations(40) {
 		content := first
 		if i%2 == 0 {
 			content = second
