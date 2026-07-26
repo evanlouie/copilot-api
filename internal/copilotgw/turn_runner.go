@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/config"
@@ -480,7 +481,9 @@ func (r *turnRunner) loop(g *RealGateway) {
 				// after the message. If we already emitted that tool-call turn, do not
 				// let its late final block seed the next continuation turn.
 				reason.addConsolidated(d.Content, d.ReasoningID)
-				r.debug(g, "copilot final reasoning block", "reasoning_id", d.ReasoningID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "ms_since_turn_start", stats.msSinceTurnStart())
+				if debugEnabled {
+					r.debug(g, "copilot final reasoning block", "reasoning_id", d.ReasoningID, "content_bytes", len(d.Content), "content_runes", utf8.RuneCountInString(d.Content), "ms_since_turn_start", stats.msSinceTurnStart())
+				}
 			case *copilot.AssistantMessageData:
 				toolRequestBytes, err := toolRequestPayloadSize(d.ToolRequests)
 				if err != nil {
@@ -510,7 +513,9 @@ func (r *turnRunner) loop(g *RealGateway) {
 				if d.EncryptedContent != nil {
 					reason.encrypted = *d.EncryptedContent
 				}
-				r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", len([]rune(d.Content)), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
+				if debugEnabled {
+					r.debug(g, "copilot final assistant message", append([]any{"message_id", d.MessageID, "content_bytes", len(d.Content), "content_runes", utf8.RuneCountInString(d.Content), "reasoning_text_bytes", optionalStringByteLen(d.ReasoningText), "tool_request_count", len(d.ToolRequests)}, stats.summaryAttrs()...)...)
+				}
 				if len(d.ToolRequests) > 0 {
 					text.WriteString(d.Content)
 					batch, calls, err := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
@@ -560,7 +565,9 @@ func (r *turnRunner) loop(g *RealGateway) {
 			case *copilot.SessionIdleData:
 				res := r.result(text.String(), reason.resolve(), usage, "stop")
 				reason.applyTo(res)
-				r.debug(g, "copilot session idle", append([]any{"finish_reason", res.FinishReason, "final_text_bytes", len(res.Text), "final_text_runes", len([]rune(res.Text)), "final_reasoning_bytes", len(res.Reasoning)}, stats.summaryAttrs()...)...)
+				if debugEnabled {
+					r.debug(g, "copilot session idle", append([]any{"finish_reason", res.FinishReason, "final_text_bytes", len(res.Text), "final_text_runes", utf8.RuneCountInString(res.Text), "final_reasoning_bytes", len(res.Reasoning)}, stats.summaryAttrs()...)...)
+				}
 				r.emitResult(res)
 				_ = r.session.Disconnect()
 				return
@@ -708,7 +715,7 @@ func (r *turnRunner) debugDelta(g *RealGateway, msg, delta string, stats deltaDe
 		"model", r.model,
 		"delta_index", stats.index,
 		"delta_bytes", len(delta),
-		"delta_runes", len([]rune(delta)),
+		"delta_runes", utf8.RuneCountInString(delta),
 		"cumulative_delta_bytes", stats.cumulativeBytes,
 		"max_delta_bytes", stats.maxBytes,
 		"ms_since_turn_start", stats.msSinceTurnStart,

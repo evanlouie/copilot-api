@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"time"
+	"unicode/utf8"
 
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/observability"
@@ -90,7 +91,7 @@ func (s *Server) logChatStreamEvent(ctx context.Context, ev copilotgw.StreamEven
 		attrs = append(attrs,
 			"finish_reason", ev.Result.FinishReason,
 			"result_text_bytes", len(ev.Result.Text),
-			"result_text_runes", len([]rune(ev.Result.Text)),
+			"result_text_runes", utf8.RuneCountInString(ev.Result.Text),
 			"result_reasoning_bytes", len(ev.Result.Reasoning),
 			"tool_call_count", len(ev.Result.ToolCalls),
 		)
@@ -122,7 +123,7 @@ func (s *Server) debugResponseStreamEvent(ctx context.Context, transport string,
 }
 
 func streamDeltaAttrs(delta string) []any {
-	return []any{"delta_bytes", len(delta), "delta_runes", len([]rune(delta))}
+	return []any{"delta_bytes", len(delta), "delta_runes", utf8.RuneCountInString(delta)}
 }
 
 func responseStreamEventAttrs(ev openai.ResponseStreamEvent) []any {
