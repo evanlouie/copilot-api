@@ -49,6 +49,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 		_, _ = runner.waitInitial(ctx)
 		return nil, apierr.Upstream(err.Error())
 	}
+	g.markPendingInputDelivered(prepared.pendingInput)
 	turn, err := runner.waitInitial(ctx)
 	if err != nil {
 		return nil, err
@@ -201,6 +202,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 			runner.failSend(prepared.events, err)
 			return
 		}
+		g.markPendingInputDelivered(prepared.pendingInput)
 		runner.debug(g, "copilot send returned")
 	}()
 	return ch, nil

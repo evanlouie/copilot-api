@@ -333,8 +333,10 @@ type ResponseRecord struct {
 	// session by the turn that produced it, so the default of false means
 	// "already delivered" and pre-v3 records need no migration.
 	//
-	// A resume of SDKSessionID must replay pending input; a resume of delivered
-	// input must not, or the model sees the same turn twice.
+	// It is a claim about SDKSessionID, not about this record: "this text is not
+	// inside that session yet". A resume of SDKSessionID must therefore replay it,
+	// and ClearInputPending must retire it as soon as a send has put it there, or
+	// every later resume of the same session sends the same turn again.
 	InputPending         bool                                `json:"input_pending,omitempty"`
 	Output               []openai.ResponseOutputItem         `json:"output"`
 	OutputText           string                              `json:"output_text"`
@@ -403,6 +405,38 @@ func (s *Store) SaveResponse(record ResponseRecord) error {
 		s.deletedIDs[record.ID] = struct{}{}
 	}
 	return nil
+}
+
+// ClearInputPending retires a record's InputPending claim: the buffered input
+// has now been sent to the record's SDK session, so no later resume of that
+// session may replay it.
+//
+// It rewrites only that one field, which is why it is not SaveResponse. The
+// caller is a turn that is mid-flight - its own record does not exist yet and
+// the response being settled belongs to an earlier request - so writing a whole
+// record back here would mean inventing one.
+//
+// A missing or deleted record is not an error. Retention may have removed it
+// between the turn resolving its prompt and the send completing, and a record
+// that is gone cannot replay anything.
+func (s *Store) ClearInputPending(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.loadResponseRecord(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if record.Deleted || !record.InputPending {
+		return nil
+	}
+	record.InputPending = false
+	record.UpdatedAt = time.Now().UTC()
+	// SDKSessionID is untouched, so the retention links this record owns are still
+	// exactly right and only the record file needs rewriting.
+	return writeJSON(s.responsePath(id), record)
 }
 
 func (s *Store) LoadResponse(id string) (ResponseRecord, error) {

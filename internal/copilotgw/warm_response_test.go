@@ -293,10 +293,15 @@ func TestWarmResponseSessionUseRejectsMismatchedInstructions(t *testing.T) {
 // record marks it undelivered so the resume replays it ahead of the new turn.
 func TestPendingWarmInputSurvivesResume(t *testing.T) {
 	t.Parallel()
-	record := sessionstore.ResponseRecord{ID: "resp_warm", InputText: "Warm context", InputPending: true}
-	combined := combineResolvedPrompts(pendingInputPrompt(record), resolvedPrompt{Text: "Current turn"})
+	gw := newSDKTestGateway(t, &fakeSDKRuntime{})
+	record := sessionstore.ResponseRecord{ID: "resp_warm", SDKSessionID: "sess_warm", InputText: "Warm context", InputPending: true}
+	pending := gw.pendingInputForSession(record)
+	combined := combineResolvedPrompts(pending.prompt, resolvedPrompt{Text: "Current turn"})
 	if combined.Text != "Warm context\n\nCurrent turn" {
 		t.Fatalf("resumed prompt = %q, want the warmed input ahead of the current turn", combined.Text)
+	}
+	if len(pending.responseIDs) != 1 || pending.responseIDs[0] != "resp_warm" {
+		t.Fatalf("pending records = %q, want the warm record the prompt replays", pending.responseIDs)
 	}
 }
 
@@ -306,13 +311,14 @@ func TestPendingWarmInputSurvivesResume(t *testing.T) {
 // take this path.
 func TestDeliveredInputIsNotReplayedOnResume(t *testing.T) {
 	t.Parallel()
+	gw := newSDKTestGateway(t, &fakeSDKRuntime{})
 	for name, record := range map[string]sessionstore.ResponseRecord{
-		"delivered":     {ID: "resp_prev", InputText: "Already sent"},
-		"pending blank": {ID: "resp_warm", InputText: "   ", InputPending: true},
+		"delivered":     {ID: "resp_prev", SDKSessionID: "sess_prev", InputText: "Already sent"},
+		"pending blank": {ID: "resp_warm", SDKSessionID: "sess_warm", InputText: "   ", InputPending: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			combined := combineResolvedPrompts(pendingInputPrompt(record), resolvedPrompt{Text: "Current turn"})
+			combined := combineResolvedPrompts(gw.pendingInputForSession(record).prompt, resolvedPrompt{Text: "Current turn"})
 			if combined.Text != "Current turn" {
 				t.Fatalf("resumed prompt = %q, want only the current turn", combined.Text)
 			}

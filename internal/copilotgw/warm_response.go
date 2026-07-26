@@ -22,15 +22,19 @@ type WarmResponseSession struct {
 	tools           []toolcatalog.NormalizedTool
 	toolChoiceNone  bool
 	input           resolvedPrompt
-	imageBudget     *imageRequestBudget
-	pinReleases     []func()
-	previous        *string
-	store           bool
-	retained        string
-	session         copilotSession
-	rt              *toolproxy.RequestTools
-	events          *sessionEventSink
-	disconnected    bool
+	// pendingInput names every record whose buffered input this session's primed
+	// prompt carries, including this session's own response. Whoever generates
+	// from the session settles all of them.
+	pendingInput []string
+	imageBudget  *imageRequestBudget
+	pinReleases  []func()
+	previous     *string
+	store        bool
+	retained     string
+	session      copilotSession
+	rt           *toolproxy.RequestTools
+	events       *sessionEventSink
+	disconnected bool
 	// registry is the gateway registry that owns this session's shutdown. Both
 	// paths that hand ownership away - Disconnect and use - deregister from it, so
 	// gateway Stop never sees a session it no longer owns.
@@ -103,14 +107,15 @@ func (w *WarmResponseSession) Disconnect() {
 }
 
 type warmResponseUse struct {
-	session     copilotSession
-	tools       *toolproxy.RequestTools
-	events      *sessionEventSink
-	retained    string
-	previous    *string
-	prompt      resolvedPrompt
-	imageBudget *imageRequestBudget
-	pinReleases []func()
+	session      copilotSession
+	tools        *toolproxy.RequestTools
+	events       *sessionEventSink
+	retained     string
+	previous     *string
+	prompt       resolvedPrompt
+	pendingInput []string
+	imageBudget  *imageRequestBudget
+	pinReleases  []func()
 }
 
 func (w *WarmResponseSession) use(req *ResponseRequest) (warmResponseUse, bool) {
@@ -153,9 +158,10 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (warmResponseUse, bool) 
 	used := warmResponseUse{
 		session: w.session, tools: w.rt, events: w.events, retained: w.retained,
 		previous: &w.responseID, prompt: w.input, imageBudget: w.imageBudget,
-		pinReleases: w.pinReleases,
+		pendingInput: w.pendingInput, pinReleases: w.pinReleases,
 	}
 	w.imageBudget = nil
+	w.pendingInput = nil
 	w.pinReleases = nil
 	w.registry = nil
 	// Marking the session disconnected keeps a racing gateway Stop from
@@ -229,6 +235,9 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	var session copilotSession
 	var sessionID string
 	var previous *string
+	// pendingInput carries the buffered input of any earlier warm responses in
+	// this chain, which this warm session now speaks for.
+	var pendingInput []string
 	var earlySessionPin func()
 	keepSessionPin := false
 	defer func() {
@@ -260,6 +269,17 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 				// prompt stays exactly what the client sent.
 				session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 			}
+		} else {
+			// Warming on top of warming: the session just resumed still has not
+			// received anything an earlier warm response in this chain buffered, and
+			// this request sends nothing either. Fold that run into the prompt this
+			// session primes, so the turn that finally generates delivers the whole
+			// chain instead of only the newest link. Recording it durably is not
+			// enough on its own: the in-memory warm session is what a client on a
+			// live WebSocket actually generates from.
+			pending := g.pendingInputForSession(*previousRecord)
+			pendingInput = pending.responseIDs
+			prompt = combineResolvedPrompts(pending.prompt, prompt)
 		}
 	} else {
 		sessionID = "resp_sdk_" + uuid.NewString()
@@ -290,14 +310,17 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	// The whole point of generate:false is that this input is primed, not sent:
 	// it lives in warm.input and reaches the SDK only when a later request
 	// generates. Recording that it is still undelivered is what lets a resume
-	// replay it after the client's WebSocket drops or this process restarts.
+	// replay it after the client's WebSocket drops or this process restarts. Only
+	// this request's own text is recorded here - any earlier warm input in the
+	// chain is still claimed by its own record, so folding it in above is an
+	// in-memory convenience and not a second durable copy.
 	record.InputPending = true
 	record.InstalledToolCatalog = catalog.StoredDTO()
 	if err := g.store.SaveResponse(record); err != nil {
 		_ = session.Disconnect()
 		return nil, apierr.Internal("failed to persist response")
 	}
-	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: prompt, imageBudget: imageBudget, pinReleases: pinReleases, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: prompt, pendingInput: append(pendingInput, req.ResponseID), imageBudget: imageBudget, pinReleases: pinReleases, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
 	// The session now owns the pins, so the deferred release must not fire; from
 	// here on teardown goes through warm.Disconnect.
 	keepPins = true

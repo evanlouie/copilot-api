@@ -824,3 +824,64 @@ func TestResponseStoreVisibility(t *testing.T) {
 		t.Fatalf("store:false response should remain available for continuation/debug metadata: %v", err)
 	}
 }
+
+// ClearInputPending is how a turn records that the input a warm response
+// buffered has now reached its SDK session. It must retire only that claim: the
+// record is a response the client can still read back, and its retention link is
+// what keeps the session alive.
+func TestClearInputPendingRetiresOnlyTheClaim(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	original := ResponseRecord{ID: "resp_warm", SDKSessionID: "sdk_warm", Model: "gpt-5", Stored: true, InputText: "ALPHA", InputPending: true, OutputText: "", RetainedPath: "/retained/resp_warm"}
+	if err := store.SaveResponse(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearInputPending("resp_warm"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LoadResponse("resp_warm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InputPending {
+		t.Fatal("the claim survived; every later resume of sdk_warm would send ALPHA again")
+	}
+	if got.InputText != "ALPHA" || got.SDKSessionID != "sdk_warm" || got.Model != "gpt-5" || got.RetainedPath != "/retained/resp_warm" || !got.Stored {
+		t.Fatalf("record = %#v, want only input_pending changed", got)
+	}
+	if links, err := os.ReadDir(filepath.Join(store.linksDir(), safeName("sdk_warm"))); err != nil || len(links) != 1 {
+		t.Fatalf("retention link for the record's session = %v (err %v), want it untouched", links, err)
+	}
+	// Idempotent, so a retry of the same turn is harmless.
+	if err := store.ClearInputPending("resp_warm"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A record retention removed between resolving a prompt and completing the send
+// cannot replay anything, so there is nothing for the caller to handle.
+func TestClearInputPendingIgnoresRecordsThatAreGone(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearInputPending("resp_missing"); err != nil {
+		t.Fatalf("missing record reported an error: %v", err)
+	}
+	if err := store.SaveResponse(ResponseRecord{ID: "resp_gone", SDKSessionID: "sdk", Stored: true, InputText: "ALPHA", InputPending: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteResponse("resp_gone"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearInputPending("resp_gone"); err != nil {
+		t.Fatalf("deleted record reported an error: %v", err)
+	}
+	if _, err := store.LoadResponseForContinuation("resp_gone"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ClearInputPending resurrected a deleted response: %v", err)
+	}
+}

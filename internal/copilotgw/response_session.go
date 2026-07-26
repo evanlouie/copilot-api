@@ -2,6 +2,7 @@ package copilotgw
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
@@ -23,6 +24,10 @@ type preparedResponseTurn struct {
 	retained    string
 	imageBudget *imageRequestBudget
 	pinReleases []func()
+	// pendingInput names the warm records whose buffered input this turn's prompt
+	// carries. They stay pending until the send that delivers them succeeds; see
+	// markPendingInputDelivered.
+	pendingInput []string
 }
 
 func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequest, streaming bool) (*preparedResponseTurn, error) {
@@ -53,6 +58,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 			}
 			prepared.prompt = combineResolvedPrompts(warmUse.prompt, currentPrompt)
 			promptResolved = true
+			prepared.pendingInput = warmUse.pendingInput
 			prepared.session = warmUse.session
 			prepared.rt = warmUse.tools
 			prepared.events = warmUse.events
@@ -119,10 +125,13 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 				}
 			} else {
 				// The resumed session is the one the previous record names, so it holds
-				// everything that record's turn actually sent - and nothing it only
-				// buffered. Replaying pending input here is what makes a warm
-				// (generate:false) response survive a dropped WebSocket or a restart.
-				prepared.prompt = combineResolvedPrompts(pendingInputPrompt(*previousRecord), prepared.prompt)
+				// everything the chain's turns actually sent - and nothing a warm
+				// (generate:false) response in that chain only buffered. Replaying the
+				// buffered run here is what makes warming survive a dropped WebSocket
+				// or a restart.
+				pending := g.pendingInputForSession(*previousRecord)
+				prepared.pendingInput = pending.responseIDs
+				prepared.prompt = combineResolvedPrompts(pending.prompt, prepared.prompt)
 			}
 		} else {
 			prepared.sessionID = "resp_sdk_" + uuid.NewString()
@@ -151,27 +160,88 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 	return prepared, nil
 }
 
-// pendingInputPrompt returns the input a record buffered without ever sending it
-// to its SDK session, which only a warm (generate:false) response produces.
+// pendingSessionInput is everything a run of warm (generate:false) responses
+// buffered for one SDK session and never sent.
+type pendingSessionInput struct {
+	// responseIDs names the records holding that input, oldest first. They are
+	// what markPendingInputDelivered settles once a send has put prompt into the
+	// session.
+	responseIDs []string
+	prompt      resolvedPrompt
+}
+
+// pendingInputForSession collects the input the record chain ending at previous
+// buffered for previous.SDKSessionID without ever sending it.
 //
-// Only text survives. The warm session's resolvedPrompt also carries fetched
-// image attachments, and those are held in memory alone; a client that warms
-// with images and then loses its WebSocket keeps the text and re-fetches nothing.
+// Warming is chainable: generate:false itself accepts previous_response_id and
+// resumes that response's SDK session, so a client can prime ALPHA, prime BRAVO
+// on top of it, and have neither reach the session. Reading only the immediate
+// previous record recovers BRAVO and silently drops ALPHA, even though the
+// client was told both had been accepted.
 //
-// The flag is never cleared once consumed. It records a durable fact about the
-// record's own SDK session - "this input was buffered, not sent as its own turn"
-// - and clearing it would mean writing the store back before the send that
-// consumes it has succeeded, which would drop the input on a failed turn. The
-// only way to consume it twice is for a client to branch from the same warm
-// response id more than once, and branching already resumes the single shared
-// SDK session rather than forking it, so that path is approximate either way.
-// Repeating a warmed prompt on a re-branch is a much smaller wrong than silently
-// dropping input the client was told had been accepted.
-func pendingInputPrompt(record sessionstore.ResponseRecord) resolvedPrompt {
-	if !record.InputPending || strings.TrimSpace(record.InputText) == "" {
-		return resolvedPrompt{}
+// The walk stops at the first record that has already delivered its input or
+// that names a different SDK session. A record on another session is not this
+// session's business: the synthetic-continuation fallback opens a fresh session
+// and replays such chains into it as history, so their input is already there.
+//
+// Only text survives. A warm session's in-memory resolvedPrompt also carries
+// fetched image attachments, and those are held in memory alone; a client that
+// warms with images and then loses its WebSocket keeps the text and re-fetches
+// nothing.
+func (g *RealGateway) pendingInputForSession(previous sessionstore.ResponseRecord) pendingSessionInput {
+	var pending pendingSessionInput
+	var texts []string
+	seen := map[string]struct{}{}
+	record := previous
+	for len(seen) < responseContinuationChainLimit {
+		if _, ok := seen[record.ID]; ok {
+			break
+		}
+		seen[record.ID] = struct{}{}
+		if !record.InputPending || record.SDKSessionID != previous.SDKSessionID {
+			break
+		}
+		// A pending record with no text is still settled: there is nothing to
+		// replay, and leaving the claim standing only invites re-examining it.
+		pending.responseIDs = append(pending.responseIDs, record.ID)
+		if strings.TrimSpace(record.InputText) != "" {
+			texts = append(texts, record.InputText)
+		}
+		if record.PreviousResponseID == "" {
+			break
+		}
+		earlier, err := g.store.LoadResponseForContinuation(record.PreviousResponseID)
+		if err != nil || earlier.Deleted {
+			break
+		}
+		record = earlier
 	}
-	return resolvedPrompt{Text: record.InputText}
+	slices.Reverse(pending.responseIDs)
+	slices.Reverse(texts)
+	pending.prompt = resolvedPrompt{Text: strings.Join(texts, "\n\n")}
+	return pending
+}
+
+// markPendingInputDelivered retires the buffered-input claims a send has just
+// satisfied. It runs after Send returns and never before, because Send returning
+// is the moment that text is demonstrably inside the SDK session.
+//
+// That ordering makes delivery at-least-once rather than exactly-once: a process
+// that dies between Send returning and these writes landing - or a disk error on
+// them, which is logged rather than propagated because the input is already in
+// the session - leaves the claims standing, so the next resume of that session
+// replays input the conversation already has. On the streaming path the writes
+// also race the turn's own completion, which widens that window from a crash to
+// "another request resumed the same warm response id in the last few
+// milliseconds". The opposite order - clearing first - would turn every failed
+// send into silently dropped input the client was told had been accepted. A
+// repeated turn is recoverable; a lost one is not.
+func (g *RealGateway) markPendingInputDelivered(responseIDs []string) {
+	for _, id := range responseIDs {
+		if err := g.store.ClearInputPending(id); err != nil && g.log != nil {
+			g.log.Warn("failed to record warmed input as delivered; a later resume may repeat it", "response_id", id, "error", err)
+		}
+	}
 }
 
 func combineResolvedPrompts(previous, current resolvedPrompt) resolvedPrompt {
