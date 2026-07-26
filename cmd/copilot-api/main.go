@@ -19,6 +19,18 @@ import (
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 )
 
+const (
+	// startupTimeout bounds the initial Copilot runtime handshake.
+	startupTimeout = 60 * time.Second
+	// shutdownGrace is the budget for draining in-flight HTTP requests and
+	// WebSocket sessions before their contexts are cancelled.
+	shutdownGrace = 20 * time.Second
+	// retentionShutdownWait bounds how long shutdown blocks on a retention prune
+	// that is already running. store.Prune is not cancellable, so on a large store
+	// the wait is abandoned rather than held open indefinitely.
+	retentionShutdownWait = 5 * time.Second
+)
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "copilot-api:", err)
@@ -48,6 +60,21 @@ func run(args []string) error {
 }
 
 func serve(args []string) error {
+	// Trap signals before acquiring any resource. Startup prunes the store and
+	// waits up to startupTimeout for the Copilot runtime; a signal delivered
+	// before Notify runs takes Go's default disposition and kills the process
+	// without running a single defer, orphaning the Copilot CLI child. The
+	// 10s docker stop grace and Kubernetes rolling restarts routinely land in
+	// that window. The buffer holds the shutdown trigger plus one escalation.
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	// A second registration, used only to abort startup work. The signal package
+	// delivers to every registered channel, so a signal that cancels startup is
+	// still queued on signals for the shutdown handling below.
+	startupSignalCtx, stopStartupSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopStartupSignals()
+
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", "", "HTTP listen address (overrides COPILOT_API_ADDR)")
 	if err := fs.Parse(args); err != nil {
@@ -104,10 +131,18 @@ func serve(args []string) error {
 	}
 
 	gw := copilotgw.NewReal(cfg, store, logger)
-	startupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if err := gw.Start(startupCtx); err != nil {
-		return err
+	startupCtx, cancelStartup := context.WithTimeout(startupSignalCtx, startupTimeout)
+	startErr := gw.Start(startupCtx)
+	// Release the startup deadline as soon as Start returns; the context is unused
+	// afterwards and deferring the cancel keeps a 60s timer armed for the whole
+	// process lifetime.
+	cancelStartup()
+	if startErr != nil {
+		if startupSignalCtx.Err() != nil {
+			logger.Info("shutting down before startup completed", "error", startErr)
+			return nil
+		}
+		return startErr
 	}
 	defer func() {
 		if err := gw.Stop(); err != nil {
@@ -122,7 +157,12 @@ func serve(args []string) error {
 	}()
 	defer func() {
 		stopRetention()
-		<-retentionDone
+		// store.Prune is not cancellable, so a prune that is already running can
+		// hold this well past the shutdown budget. Bound the wait and let the
+		// process exit; the loop goroutine dies with it.
+		if !awaitClose(retentionDone, retentionShutdownWait) {
+			logger.Warn("abandoning in-flight retention prune", "timeout", retentionShutdownWait)
+		}
 	}()
 
 	apiServer := httpapi.New(cfg, gw, logger)
@@ -145,30 +185,84 @@ func serve(args []string) error {
 		errCh <- srv.ListenAndServe()
 	}()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	select {
-	case sig := <-sigCh:
+	case sig := <-signals:
 		logger.Info("shutting down", "signal", sig.String())
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		httpShutdown := make(chan error, 1)
-		go func() { httpShutdown <- srv.Shutdown(ctx) }()
-		webSocketShutdown := make(chan error, 1)
-		go func() { webSocketShutdown <- apiServer.Shutdown(ctx) }()
-		cancelRequests()
-		webSocketErr := <-webSocketShutdown
-		httpErr := <-httpShutdown
-		serveErr := <-errCh
-		if errors.Is(serveErr, http.ErrServerClosed) {
-			serveErr = nil
-		}
-		return errors.Join(webSocketErr, httpErr, serveErr)
+		return shutdownServer(logger, srv, apiServer, errCh, signals, cancelRequests, shutdownGrace)
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
+	}
+}
+
+// webSocketShutdowner drains long-lived WebSocket sessions. *httpapi.Server
+// implements it.
+type webSocketShutdowner interface {
+	Shutdown(ctx context.Context) error
+}
+
+type shutdownErrors struct {
+	webSocket error
+	http      error
+}
+
+// shutdownServer drains in-flight work before cancelling request contexts.
+//
+// Every request context descends from the root that cancelRequests cancels, so
+// calling it is equivalent to aborting every streaming response mid-token and
+// unwinding every WebSocket handler before it can close cleanly. It is therefore
+// the escalation rather than the trigger: both Shutdown calls get the full grace
+// period, and requests are only cancelled once they have drained, the budget has
+// expired, or a second signal has asked for a hard stop. On the drained path the
+// caller's deferred cancelRequests is the backstop.
+func shutdownServer(logger *slog.Logger, srv *http.Server, webSockets webSocketShutdowner, serveErrCh <-chan error, signals <-chan os.Signal, cancelRequests context.CancelFunc, grace time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	httpShutdown := make(chan error, 1)
+	go func() { httpShutdown <- srv.Shutdown(ctx) }()
+	webSocketShutdown := make(chan error, 1)
+	go func() { webSocketShutdown <- webSockets.Shutdown(ctx) }()
+	drained := make(chan shutdownErrors, 1)
+	go func() {
+		webSocketErr := <-webSocketShutdown
+		httpErr := <-httpShutdown
+		drained <- shutdownErrors{webSocket: webSocketErr, http: httpErr}
+	}()
+
+	var result shutdownErrors
+	select {
+	case result = <-drained:
+	case sig := <-signals:
+		logger.Warn("second signal received; cancelling in-flight requests", "signal", sig.String())
+		cancelRequests()
+		if err := srv.Close(); err != nil {
+			logger.Error("failed to close http server", "error", err)
+		}
+		result = <-drained
+	case <-ctx.Done():
+		logger.Warn("shutdown grace period expired; cancelling in-flight requests", "grace", grace)
+		cancelRequests()
+		result = <-drained
+	}
+	serveErr := <-serveErrCh
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(result.webSocket, result.http, serveErr)
+}
+
+// awaitClose waits for done to be closed, giving up after timeout. It reports
+// whether done closed within the budget.
+func awaitClose(done <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
