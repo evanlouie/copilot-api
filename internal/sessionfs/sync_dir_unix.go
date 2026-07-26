@@ -4,8 +4,8 @@ package sessionfs
 
 import "os"
 
-func syncDirectory(path string) error {
-	dir, err := os.Open(path)
+func syncDirectory(root *os.Root, name string) error {
+	dir, err := root.Open(name)
 	if err != nil {
 		return err
 	}

@@ -113,10 +113,10 @@ func (g *RealGateway) Stop() error {
 			// Do not force-release pins for a runner that has not closed. Its loop
 			// remains the sole owner and will release them if it exits; otherwise the
 			// process is shutting down and retaining state is safer than pruning it.
-			return errors.Join(waitErr, stopErr, g.store.TakeMaintenanceError())
+			return errors.Join(waitErr, stopErr, g.fs.Close(), g.store.TakeMaintenanceError())
 		}
 	}
-	return errors.Join(waitErr, g.client.Stop(), g.store.TakeMaintenanceError())
+	return errors.Join(waitErr, g.client.Stop(), g.fs.Close(), g.store.TakeMaintenanceError())
 }
 func (g *RealGateway) Ready(ctx context.Context) error {
 	if g.client.RPC == nil {
