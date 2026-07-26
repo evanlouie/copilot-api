@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
@@ -136,7 +137,7 @@ func responseToolsEqual(a, b []openai.NormalizedTool) bool {
 
 func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*WarmResponseResult, error) {
 	if len(req.ToolOutputs) > 0 {
-		return nil, openai.InvalidRequest("generate:false with tool-output continuations is not supported", "input")
+		return nil, apierr.InvalidRequest("generate:false with tool-output continuations is not supported", "input")
 	}
 	if err := g.ValidateModel(ctx, req.Model); err != nil {
 		return nil, err
@@ -161,7 +162,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		previousPins = append(previousPins, g.store.PinResponse(req.PreviousResponseID))
 		record, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
 		if err != nil {
-			return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
+			return nil, apierr.PreviousResponseNotFound(req.PreviousResponseID)
 		}
 		previousPins = append(previousPins, g.store.PinSession(record.SDKSessionID))
 		previousRecord = &record
@@ -172,7 +173,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	}
 	rt, err := toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoiceNone)
 	if err != nil {
-		return nil, openai.InvalidRequest(err.Error(), "tools")
+		return nil, apierr.InvalidRequest(err.Error(), "tools")
 	}
 	events := newSessionEventSink(g.log)
 	var session *copilot.Session
@@ -207,10 +208,10 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
 	}
 	if err != nil {
-		return nil, openai.Upstream(err.Error())
+		return nil, apierr.Upstream(err.Error())
 	}
 	if session == nil {
-		return nil, openai.Upstream("copilot SDK returned nil session")
+		return nil, apierr.Upstream("copilot SDK returned nil session")
 	}
 	retained := g.fs.SessionRoot(sessionID)
 	if earlySessionPin == nil {
@@ -230,7 +231,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	record.InstalledToolCatalog = catalog.StoredDTO()
 	if err := g.store.SaveResponse(record); err != nil {
 		_ = session.Disconnect()
-		return nil, openai.Internal("failed to persist response")
+		return nil, apierr.Internal("failed to persist response")
 	}
 	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: prompt, imageBudget: imageBudget, pinReleases: pinReleases, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
 	keepPins = true

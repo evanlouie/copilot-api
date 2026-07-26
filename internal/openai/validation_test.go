@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/evanlouie/copilot-api/internal/apierr"
 )
 
 func TestResponseTextMarshalsEmptyAnnotationsArray(t *testing.T) {
@@ -253,7 +255,7 @@ func TestPermissiveChatRejectsUnsafeUnsupportedFields(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected unsafe field rejection in permissive mode")
 			}
-			apiErr, ok := err.(*APIError)
+			apiErr, ok := err.(*apierr.Error)
 			if !ok || apiErr.Param != tt.param {
 				t.Fatalf("error = %#v, want param %q", err, tt.param)
 			}
@@ -307,7 +309,7 @@ func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected unsafe field rejection in permissive mode")
 			}
-			apiErr, ok := err.(*APIError)
+			apiErr, ok := err.(*apierr.Error)
 			if !ok || apiErr.Param != tt.param {
 				t.Fatalf("error = %#v, want param %q", err, tt.param)
 			}
@@ -485,7 +487,7 @@ func TestResponsesRejectsUnknownToolTypeInBothModes(t *testing.T) {
 	}
 	for _, strict := range []bool{false, true} {
 		err := ValidateResponsesRequest(&req, strict)
-		apiErr, ok := err.(*APIError)
+		apiErr, ok := err.(*apierr.Error)
 		if !ok || apiErr.Param != "tools.0.type" {
 			t.Fatalf("ValidateResponsesRequest(strict=%t) = %#v, want a 400 on tools.0.type", strict, err)
 		}

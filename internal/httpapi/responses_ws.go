@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
 )
@@ -38,7 +39,7 @@ func (w *webSocketJSONWriter) write(v any) error {
 }
 
 func (w *webSocketJSONWriter) writeError(err error, eventID string) error {
-	return w.write(openai.NewWebSocketErrorEvent(err, eventID))
+	return w.write(NewWebSocketErrorEvent(err, eventID))
 }
 
 type responsesWebSocketState struct {
@@ -155,7 +156,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	if !isWebSocketUpgrade(r) {
 		w.Header().Set("Connection", "Upgrade")
 		w.Header().Set("Upgrade", "websocket")
-		openai.WriteError(w, &openai.APIError{Status: http.StatusUpgradeRequired, Message: "websocket upgrade required", Type: "invalid_request_error", Code: "websocket_upgrade_required"})
+		writeErrorObject(w, http.StatusUpgradeRequired, openai.ErrorObject{Message: "websocket upgrade required", Type: "invalid_request_error", Code: "websocket_upgrade_required"})
 		return
 	}
 
@@ -204,7 +205,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	// fires when no response is generating and the client has gone quiet.
 	if s.cfg.WebSocketIdleTimeout > 0 {
 		go watchResponsesWebSocketIdle(connCtx, state, s.cfg.WebSocketIdleTimeout, func() {
-			_ = writer.writeError(openai.InvalidRequest("websocket idle timeout", "body"), "")
+			_ = writer.writeError(apierr.InvalidRequest("websocket idle timeout", "body"), "")
 			closeWith(websocket.StatusGoingAway, "websocket idle timeout")
 		})
 	}
@@ -234,14 +235,14 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 			if websocket.CloseStatus(err) != -1 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				break
 			}
-			_ = writer.writeError(openai.InvalidRequest("invalid JSON websocket message: "+err.Error(), "body"), "")
+			_ = writer.writeError(apierr.InvalidRequest("invalid JSON websocket message: "+err.Error(), "body"), "")
 			continue
 		}
 		state.markActivity()
 
 		fields := map[string]json.RawMessage{}
 		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-			_ = writer.writeError(openai.InvalidRequest("invalid JSON websocket message", "body"), "")
+			_ = writer.writeError(apierr.InvalidRequest("invalid JSON websocket message", "body"), "")
 			continue
 		}
 		eventType, eventID, err := webSocketEnvelopeFields(fields)
@@ -252,7 +253,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		switch eventType {
 		case "response.create":
 			if !state.tryStart() {
-				_ = writer.writeError(openai.InvalidRequest("only one response.create may be active per WebSocket connection", "type"), eventID)
+				_ = writer.writeError(apierr.InvalidRequest("only one response.create may be active per WebSocket connection", "type"), eventID)
 				continue
 			}
 			go func(fields map[string]json.RawMessage, eventID string) {
@@ -261,7 +262,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 						if s.log != nil {
 							s.log.Error("panic in Responses WebSocket response handler", "panic", v, "stack", string(debug.Stack()))
 						}
-						_ = writer.writeError(openai.Internal("internal server error"), eventID)
+						_ = writer.writeError(apierr.Internal("internal server error"), eventID)
 						closeWith(websocket.StatusInternalError, "internal server error")
 					}
 					state.finish()
@@ -269,9 +270,9 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				s.handleWebSocketResponseCreate(connCtx, r, writer, state, closeWith, fields)
 			}(fields, eventID)
 		case "":
-			_ = writer.writeError(openai.InvalidRequest("websocket event type is required", "type"), eventID)
+			_ = writer.writeError(apierr.InvalidRequest("websocket event type is required", "type"), eventID)
 		default:
-			_ = writer.writeError(openai.InvalidRequest("unsupported websocket event type", "type"), eventID)
+			_ = writer.writeError(apierr.InvalidRequest("unsupported websocket event type", "type"), eventID)
 		}
 	}
 	closeWith(websocket.StatusNormalClosure, "")
@@ -383,13 +384,13 @@ func webSocketEnvelopeFields(fields map[string]json.RawMessage) (string, string,
 	var eventType string
 	if raw, ok := fields["type"]; ok {
 		if err := json.Unmarshal(raw, &eventType); err != nil {
-			return "", "", openai.InvalidRequest("websocket event type must be a string", "type")
+			return "", "", apierr.InvalidRequest("websocket event type must be a string", "type")
 		}
 	}
 	var eventID string
 	if raw, ok := fields["event_id"]; ok {
 		if err := json.Unmarshal(raw, &eventID); err != nil {
-			return eventType, "", openai.InvalidRequest("event_id must be a string", "event_id")
+			return eventType, "", apierr.InvalidRequest("event_id must be a string", "event_id")
 		}
 	}
 	return eventType, eventID, nil
@@ -413,7 +414,7 @@ func decodeWebSocketResponseCreateFields(fields map[string]json.RawMessage) (ope
 	if len(responseRaw) > 0 && !bytes.Equal(bytes.TrimSpace(responseRaw), []byte("null")) {
 		var responseFields map[string]json.RawMessage
 		if err := json.Unmarshal(responseRaw, &responseFields); err != nil || responseFields == nil {
-			return openai.ResponsesRequest{}, eventID, true, openai.InvalidRequest("response must be an object", "response")
+			return openai.ResponsesRequest{}, eventID, true, apierr.InvalidRequest("response must be an object", "response")
 		}
 		for name, value := range responseFields {
 			merged[name] = value
@@ -422,7 +423,7 @@ func decodeWebSocketResponseCreateFields(fields map[string]json.RawMessage) (ope
 	generate := true
 	if raw, ok := merged["generate"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		if err := json.Unmarshal(raw, &generate); err != nil {
-			return openai.ResponsesRequest{}, eventID, true, openai.InvalidRequest("generate must be a boolean", "generate")
+			return openai.ResponsesRequest{}, eventID, true, apierr.InvalidRequest("generate must be a boolean", "generate")
 		}
 	}
 	delete(merged, "stream")
@@ -430,7 +431,7 @@ func decodeWebSocketResponseCreateFields(fields map[string]json.RawMessage) (ope
 	delete(merged, "generate")
 	req, err := openai.ResponsesRequestFromFields(merged)
 	if err != nil {
-		return openai.ResponsesRequest{}, eventID, true, openai.InvalidRequest("invalid response.create request: "+err.Error(), "body")
+		return openai.ResponsesRequest{}, eventID, true, apierr.InvalidRequest("invalid response.create request: "+err.Error(), "body")
 	}
 	return req, eventID, generate, nil
 }

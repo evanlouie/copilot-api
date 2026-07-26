@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/observability"
 	"github.com/evanlouie/copilot-api/internal/openai"
@@ -272,7 +273,7 @@ func (r *turnRunner) waitInitial(ctx context.Context) (*TurnResult, error) {
 		}
 		res, ok := first.Value.(*TurnResult)
 		if !ok {
-			return nil, openai.Internal(fmt.Sprintf("unexpected turn result %T", first.Value))
+			return nil, apierr.Internal(fmt.Sprintf("unexpected turn result %T", first.Value))
 		}
 		return res, nil
 	case <-ctx.Done():
@@ -282,7 +283,7 @@ func (r *turnRunner) waitInitial(ctx context.Context) (*TurnResult, error) {
 
 func requestContextError(ctx context.Context) error {
 	if ctx != nil && ctx.Err() == context.DeadlineExceeded {
-		return openai.Timeout()
+		return apierr.Timeout()
 	}
 	return context.Canceled
 }
@@ -353,7 +354,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 		case event, ok := <-r.events:
 			if !ok {
 				r.debug(g, "copilot session event stream ended before idle")
-				r.emitError(openai.Upstream("copilot session event stream ended before idle"))
+				r.emitError(apierr.Upstream("copilot session event stream ended before idle"))
 				return
 			}
 			// Only a delivered event proves the session is still alive, so the
@@ -374,7 +375,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 				r.debug(g, "copilot assistant message started", "message_id", d.MessageID, "phase", optionalString(d.Phase), "ms_since_turn_start", stats.msSinceTurnStart())
 			case *copilot.AssistantReasoningDeltaData:
 				if contentBytes+reasoningStreamBytes+int64(len(d.DeltaContent)) > r.maxOutputBytes || contentBytes+reason.retainedSizeAfterDelta(d.DeltaContent) > r.maxOutputBytes {
-					r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
+					r.emitError(apierr.Upstream("copilot reasoning output exceeded size limit"))
 					r.abort()
 					return
 				}
@@ -393,7 +394,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			case *copilot.AssistantMessageDeltaData:
 				if d.DeltaContent != "" {
 					if contentBytes+int64(len(d.DeltaContent))+reasoningStreamBytes > r.maxOutputBytes || contentBytes+int64(len(d.DeltaContent))+reason.retainedSize() > r.maxOutputBytes {
-						r.emitError(openai.Upstream("copilot output exceeded size limit"))
+						r.emitError(apierr.Upstream("copilot output exceeded size limit"))
 						r.abort()
 						return
 					}
@@ -406,7 +407,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 				}
 			case *copilot.AssistantReasoningData:
 				if contentBytes+reason.retainedSizeAfterConsolidated(d.Content) > r.maxOutputBytes {
-					r.emitError(openai.Upstream("copilot reasoning output exceeded size limit"))
+					r.emitError(apierr.Upstream("copilot reasoning output exceeded size limit"))
 					r.abort()
 					return
 				}
@@ -418,7 +419,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			case *copilot.AssistantMessageData:
 				toolRequestBytes, err := toolRequestPayloadSize(d.ToolRequests)
 				if err != nil {
-					r.emitError(openai.Upstream("failed to measure copilot tool-call output"))
+					r.emitError(apierr.Upstream("failed to measure copilot tool-call output"))
 					r.abort()
 					return
 				}
@@ -430,7 +431,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 				// text already holds this turn's earlier messages, so the guard has to
 				// measure the whole retained turn rather than this message alone.
 				if int64(text.Len()+len(d.Content)+reasoningBytes)+toolRequestBytes > r.maxOutputBytes {
-					r.emitError(openai.Upstream("copilot output exceeded size limit"))
+					r.emitError(apierr.Upstream("copilot output exceeded size limit"))
 					r.abort()
 					return
 				}
@@ -449,7 +450,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 					text.WriteString(d.Content)
 					batch, calls, err := r.rt.CaptureRequests(d.ToolRequests, r.currentResponseID(), r.kind, r.model, r.updates, r.abort)
 					if err != nil {
-						r.emitError(openai.Upstream(err.Error()))
+						r.emitError(apierr.Upstream(err.Error()))
 						r.abort()
 						return
 					}
@@ -484,7 +485,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 				usage = usageFromSDK(d)
 				r.debug(g, "copilot usage received", "input_tokens", optionalInt(d.InputTokens), "output_tokens", optionalInt(d.OutputTokens), "reasoning_tokens", optionalInt(d.ReasoningTokens), "ms_since_turn_start", stats.msSinceTurnStart())
 			case *copilot.SessionErrorData:
-				err := openai.Upstream(d.Message)
+				err := apierr.Upstream(d.Message)
 				r.debug(g, "copilot session error", "error", d.Message, "ms_since_turn_start", stats.msSinceTurnStart())
 				r.emitError(err)
 				_ = r.session.Disconnect()
@@ -516,12 +517,12 @@ func (r *turnRunner) loop(g *RealGateway) {
 			// is over. It covers gateway shutdown, tool-call batch expiry, and
 			// aborts this loop inflicted on itself.
 			r.debug(g, "copilot turn aborted before completion", "ms_since_turn_start", stats.msSinceTurnStart())
-			r.emitError(openai.Upstream("copilot turn aborted before completion"))
+			r.emitError(apierr.Upstream("copilot turn aborted before completion"))
 			return
 		case <-idle.C:
 			r.debug(g, "copilot session idle timeout", "idle_timeout", idleTimeout.String(), "ms_since_turn_start", stats.msSinceTurnStart())
 			r.abort()
-			r.emitError(openai.Upstream(fmt.Sprintf("copilot session delivered no events for %s; turn abandoned", idleTimeout)))
+			r.emitError(apierr.Upstream(fmt.Sprintf("copilot session delivered no events for %s; turn abandoned", idleTimeout)))
 			return
 		}
 	}

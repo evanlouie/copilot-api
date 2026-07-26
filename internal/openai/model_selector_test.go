@@ -3,6 +3,8 @@ package openai
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/evanlouie/copilot-api/internal/apierr"
 )
 
 func TestParseModelSelector(t *testing.T) {
@@ -37,8 +39,8 @@ func TestParseModelSelector(t *testing.T) {
 				if err == nil {
 					t.Fatalf("ParseModelSelector(%q) succeeded: %#v", test.raw, got)
 				}
-				apiErr, ok := err.(*APIError)
-				if !ok || apiErr.Type != "invalid_request_error" || apiErr.Param != "model" {
+				apiErr, ok := err.(*apierr.Error)
+				if !ok || apiErr.Kind != apierr.KindInvalidInput || apiErr.Param != "model" {
 					t.Fatalf("ParseModelSelector(%q) error = %#v, want invalid_request_error on model", test.raw, err)
 				}
 				return
@@ -78,8 +80,8 @@ func TestMergeReasoningEffort(t *testing.T) {
 				if err == nil {
 					t.Fatalf("MergeReasoningEffort() = %q, want error", got)
 				}
-				apiErr, ok := err.(*APIError)
-				if !ok || apiErr.Param != "reasoning_effort" || apiErr.Type != "invalid_request_error" {
+				apiErr, ok := err.(*apierr.Error)
+				if !ok || apiErr.Param != "reasoning_effort" || apiErr.Kind != apierr.KindInvalidInput {
 					t.Fatalf("MergeReasoningEffort() error = %#v, want invalid_request_error on reasoning_effort", err)
 				}
 				return
@@ -123,7 +125,7 @@ func TestResponsesReasoningEffortUsesNormalizedConflictComparison(t *testing.T) 
 			}
 			err := ValidateResponsesRequest(&req, false)
 			if test.wantErr {
-				apiErr, ok := err.(*APIError)
+				apiErr, ok := err.(*apierr.Error)
 				if !ok || apiErr.Param != "reasoning.effort" {
 					t.Fatalf("ValidateResponsesRequest() error = %#v, want reasoning.effort conflict", err)
 				}

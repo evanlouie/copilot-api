@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/hydration"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionfs"
@@ -34,7 +35,7 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	}
 	finalPrompt, err := req.FinalUser.Prompt()
 	if err != nil {
-		return nil, openai.InvalidRequest(err.Error(), "messages")
+		return nil, apierr.InvalidRequest(err.Error(), "messages")
 	}
 	imageBudget := newImageRequestBudget()
 	final, err := g.resolvePromptWithImageBudget(ctx, req.Model, finalPrompt, "messages", imageBudget)
@@ -55,23 +56,23 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	}()
 	h, err := hydration.BuildChatHistoryJSONL(history, hydration.Options{SessionID: sessionID, Model: req.Model})
 	if err != nil {
-		return nil, openai.InvalidRequest("failed to hydrate chat history: "+err.Error(), "messages")
+		return nil, apierr.InvalidRequest("failed to hydrate chat history: "+err.Error(), "messages")
 	}
 	retained, err := sessionfs.WriteEvents(g.cfg.DataDir, sessionID, h.JSONL)
 	if err != nil {
-		return nil, openai.Internal("failed to write synthetic session state")
+		return nil, apierr.Internal("failed to write synthetic session state")
 	}
 	rt, err := toolproxy.NewRequestTools(g.broker, req.Tools, req.ToolChoiceNone)
 	if err != nil {
-		return nil, openai.InvalidRequest(err.Error(), "tools")
+		return nil, apierr.InvalidRequest(err.Error(), "tools")
 	}
 	events := newSessionEventSink(g.log)
 	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, streaming, events)
 	if err != nil {
-		return nil, openai.Upstream(err.Error())
+		return nil, apierr.Upstream(err.Error())
 	}
 	if session == nil {
-		return nil, openai.Upstream("copilot SDK returned nil session")
+		return nil, apierr.Upstream("copilot SDK returned nil session")
 	}
 	keepPin = true
 	return &preparedChatTurn{sessionID: sessionID, retained: retained, final: final, rt: rt, events: events, session: session, pinRelease: pinRelease}, nil
@@ -90,7 +91,7 @@ func (g *RealGateway) Chat(ctx context.Context, req ChatRequest) (*TurnResult, e
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.final.Text, Attachments: prepared.final.Attachments}); err != nil {
 		runner.failSend(prepared.events, err)
 		_, _ = runner.waitInitial(ctx)
-		return nil, openai.Upstream(err.Error())
+		return nil, apierr.Upstream(err.Error())
 	}
 	result, err := runner.waitInitial(ctx)
 	if err != nil {
@@ -152,7 +153,7 @@ func (g *RealGateway) resolveChatHistoryWithImageBudget(ctx context.Context, mod
 		case "user":
 			prompt, err := msg.Prompt()
 			if err != nil {
-				return nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
+				return nil, apierr.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 			}
 			resolved, err := g.resolvePromptWithImageBudget(ctx, model, prompt, fmt.Sprintf("messages.%d.content", i), imageBudget)
 			if err != nil {
@@ -162,11 +163,11 @@ func (g *RealGateway) resolveChatHistoryWithImageBudget(ctx context.Context, mod
 		case "assistant", "tool":
 			text, err := msg.Text()
 			if err != nil {
-				return nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
+				return nil, apierr.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 			}
 			out = append(out, hydration.Message{Role: msg.Role, Content: text, Reasoning: msg.InboundReasoning(), ToolCallID: msg.ToolCallID, ToolCalls: msg.ToolCalls})
 		default:
-			return nil, openai.InvalidRequest(fmt.Sprintf("unsupported message role %q", msg.Role), fmt.Sprintf("messages.%d.role", i))
+			return nil, apierr.InvalidRequest(fmt.Sprintf("unsupported message role %q", msg.Role), fmt.Sprintf("messages.%d.role", i))
 		}
 	}
 	return out, nil

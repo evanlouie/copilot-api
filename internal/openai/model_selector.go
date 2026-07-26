@@ -1,6 +1,10 @@
 package openai
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/evanlouie/copilot-api/internal/apierr"
+)
 
 // ModelSelector is the OpenAI-facing model selector split into its canonical
 // model ID and optional explicit reasoning effort.
@@ -17,18 +21,18 @@ func ParseModelSelector(raw string) (ModelSelector, error) {
 	separator := strings.LastIndex(raw, ":")
 	if separator < 0 {
 		if raw == "" {
-			return ModelSelector{}, InvalidRequest("model is required", "model")
+			return ModelSelector{}, apierr.InvalidRequest("model is required", "model")
 		}
 		return ModelSelector{Model: raw}, nil
 	}
 
 	model := raw[:separator]
 	if model == "" {
-		return ModelSelector{}, InvalidRequest("model selector must include a model before the reasoning effort suffix", "model")
+		return ModelSelector{}, apierr.InvalidRequest("model selector must include a model before the reasoning effort suffix", "model")
 	}
 	effort := NormalizeReasoningEffort(raw[separator+1:])
 	if effort == "" {
-		return ModelSelector{}, InvalidRequest("model reasoning effort suffix must not be empty", "model")
+		return ModelSelector{}, apierr.InvalidRequest("model reasoning effort suffix must not be empty", "model")
 	}
 	return ModelSelector{Model: model, ReasoningEffort: effort, HasEffort: true}, nil
 }
@@ -51,7 +55,7 @@ func MergeReasoningEffort(selector ModelSelector, explicit, explicitParam string
 		if explicitParam == "" {
 			explicitParam = "reasoning_effort"
 		}
-		return "", InvalidRequest("model reasoning effort suffix conflicts with "+explicitParam, explicitParam)
+		return "", apierr.InvalidRequest("model reasoning effort suffix conflicts with "+explicitParam, explicitParam)
 	}
 	return selector.ReasoningEffort, nil
 }

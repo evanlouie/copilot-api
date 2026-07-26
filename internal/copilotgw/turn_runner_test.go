@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
@@ -220,7 +221,7 @@ func TestOnResultErrorTerminatesLoop(t *testing.T) {
 	runner.rt = rt
 	stream := make(chan ResponseStreamEvent, 4)
 	runner.enableResponseStream(stream, "resp_1", "gpt-test", "", nil, true, false, nil)
-	runner.setOnResult(func(*TurnResult) error { return openai.Internal("failed to persist response") })
+	runner.setOnResult(func(*TurnResult) error { return apierr.Internal("failed to persist response") })
 
 	go runner.loop(&RealGateway{})
 	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}}

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/evanlouie/copilot-api/internal/apierr"
 )
 
 const (
@@ -112,7 +114,7 @@ func ToolCatalogFromStored(stored *StoredToolCatalog) (ToolCatalog, bool, error)
 		return ToolCatalog{}, true, err
 	}
 	if stored.CatalogKey != "" && catalog.Key() != stored.CatalogKey {
-		return ToolCatalog{}, true, InvalidRequest("stored tool catalog key mismatch", "previous_response_id")
+		return ToolCatalog{}, true, apierr.InvalidRequest("stored tool catalog key mismatch", "previous_response_id")
 	}
 	return catalog, true, nil
 }
@@ -193,7 +195,7 @@ func (c ToolCatalog) MergeLoaded(sourceCallID string, loaded []NormalizedTool) (
 		return c.WithoutRaw(), nil
 	}
 	if flattenedToolCount(loaded) > MaxLoadedToolCount {
-		return ToolCatalog{}, InvalidRequest("tool_search_output.tools contains too many loadable tools", "input")
+		return ToolCatalog{}, apierr.InvalidRequest("tool_search_output.tools contains too many loadable tools", "input")
 	}
 	if err := validateLoadedToolLimits(loaded); err != nil {
 		return ToolCatalog{}, err
@@ -276,7 +278,7 @@ func responseToolOutputType(kind ResponsesToolKind) string {
 
 func mergeCatalogTool(existing []NormalizedTool, incoming NormalizedTool, loadedOnly bool) ([]NormalizedTool, error) {
 	if loadedOnly && incoming.Kind != ToolKindFunction && incoming.Kind != ToolKindNamespace {
-		return nil, InvalidRequest("tool_search_output.tools may only install function or namespace tools", "input")
+		return nil, apierr.InvalidRequest("tool_search_output.tools may only install function or namespace tools", "input")
 	}
 	if incoming.Kind == ToolKindNamespace {
 		return mergeLoadedNamespace(existing, incoming)
@@ -290,7 +292,7 @@ func mergeCatalogTool(existing []NormalizedTool, incoming NormalizedTool, loaded
 					if normalizedToolSemanticKey(child) == normalizedToolSemanticKey(incoming) {
 						return existing, nil
 					}
-					return nil, InvalidRequest("Responses tool conflicts with an installed tool", "input")
+					return nil, apierr.InvalidRequest("Responses tool conflicts with an installed tool", "input")
 				}
 			}
 			continue
@@ -299,7 +301,7 @@ func mergeCatalogTool(existing []NormalizedTool, incoming NormalizedTool, loaded
 			if normalizedToolSemanticKey(tool) == normalizedToolSemanticKey(incoming) {
 				return existing, nil
 			}
-			return nil, InvalidRequest("Responses tool conflicts with an installed tool", "input")
+			return nil, apierr.InvalidRequest("Responses tool conflicts with an installed tool", "input")
 		}
 	}
 	return append(existing, incoming), nil
@@ -315,7 +317,7 @@ func mergeLoadedNamespace(existing []NormalizedTool, loaded NormalizedTool) ([]N
 			continue
 		}
 		if namespaceHeaderKey(existing[i]) != namespaceHeaderKey(loaded) {
-			return nil, InvalidRequest("tool_search_output.tools conflicts with an installed namespace", "input")
+			return nil, apierr.InvalidRequest("tool_search_output.tools conflicts with an installed namespace", "input")
 		}
 		children := append([]NormalizedTool{}, existing[i].Children...)
 		for _, child := range loaded.Children {
@@ -331,7 +333,7 @@ func mergeLoadedNamespace(existing []NormalizedTool, loaded NormalizedTool) ([]N
 				existingChild := children[found]
 				existingChild.Namespace = loaded.Name
 				if normalizedToolSemanticKey(existingChild) != normalizedToolSemanticKey(child) {
-					return nil, InvalidRequest("tool_search_output.tools conflicts with an installed namespace child", "input")
+					return nil, apierr.InvalidRequest("tool_search_output.tools conflicts with an installed namespace child", "input")
 				}
 				continue
 			}
@@ -398,14 +400,14 @@ func normalizedToolFromStored(spec StoredToolSpec, param string) (NormalizedTool
 	switch spec.Type {
 	case ToolKindFunction:
 		if tool.Name == "" {
-			return NormalizedTool{}, InvalidRequest("stored function tool requires name", param+".name")
+			return NormalizedTool{}, apierr.InvalidRequest("stored function tool requires name", param+".name")
 		}
 		if err := validateSchemaRaw(tool.Parameters, param+".parameters", "function parameters must be valid JSON Schema"); err != nil {
 			return NormalizedTool{}, err
 		}
 	case ToolKindCustom:
 		if tool.Name == "" {
-			return NormalizedTool{}, InvalidRequest("stored custom tool requires name", param+".name")
+			return NormalizedTool{}, apierr.InvalidRequest("stored custom tool requires name", param+".name")
 		}
 		if err := validateJSONRaw(tool.Format, param+".format", "custom tool format must be valid JSON"); err != nil {
 			return NormalizedTool{}, err
@@ -416,14 +418,14 @@ func normalizedToolFromStored(spec StoredToolSpec, param string) (NormalizedTool
 			tool.Execution = "client"
 		}
 		if tool.Execution != "client" {
-			return NormalizedTool{}, InvalidRequest("stored tool_search execution must be client", param+".execution")
+			return NormalizedTool{}, apierr.InvalidRequest("stored tool_search execution must be client", param+".execution")
 		}
 		if err := validateSchemaRaw(tool.Parameters, param+".parameters", "tool_search parameters must be valid JSON Schema"); err != nil {
 			return NormalizedTool{}, err
 		}
 	case ToolKindNamespace:
 		if tool.Name == "" {
-			return NormalizedTool{}, InvalidRequest("stored namespace tool requires name", param+".name")
+			return NormalizedTool{}, apierr.InvalidRequest("stored namespace tool requires name", param+".name")
 		}
 		tool.Children = make([]NormalizedTool, 0, len(spec.Tools))
 		for i, childSpec := range spec.Tools {
@@ -432,13 +434,13 @@ func normalizedToolFromStored(spec StoredToolSpec, param string) (NormalizedTool
 				return NormalizedTool{}, err
 			}
 			if child.Kind != ToolKindFunction {
-				return NormalizedTool{}, InvalidRequest("stored namespace tools may only contain function tools", fmt.Sprintf("%s.tools.%d.type", param, i))
+				return NormalizedTool{}, apierr.InvalidRequest("stored namespace tools may only contain function tools", fmt.Sprintf("%s.tools.%d.type", param, i))
 			}
 			child.Namespace = tool.Name
 			tool.Children = append(tool.Children, child)
 		}
 	default:
-		return NormalizedTool{}, InvalidRequest("stored tool catalog contains unsupported tool type", param+".type")
+		return NormalizedTool{}, apierr.InvalidRequest("stored tool catalog contains unsupported tool type", param+".type")
 	}
 	return tool, nil
 }
@@ -576,14 +578,14 @@ func flattenedToolCount(tools []NormalizedTool) int {
 func validateLoadedToolLimits(tools []NormalizedTool) error {
 	for _, tool := range tools {
 		if len(tool.Description) > MaxLoadedDescriptionBytes {
-			return InvalidRequest("tool_search_output.tools description is too large", "input")
+			return apierr.InvalidRequest("tool_search_output.tools description is too large", "input")
 		}
 		if len(tool.Parameters) > MaxLoadedToolSchemaBytes || len(tool.Format) > MaxLoadedToolSchemaBytes {
-			return InvalidRequest("tool_search_output.tools schema is too large", "input")
+			return apierr.InvalidRequest("tool_search_output.tools schema is too large", "input")
 		}
 		if tool.Kind == ToolKindNamespace {
 			if len(tool.Children) > MaxLoadedToolCount {
-				return InvalidRequest("tool_search_output.tools namespace contains too many tools", "input")
+				return apierr.InvalidRequest("tool_search_output.tools namespace contains too many tools", "input")
 			}
 			if err := validateLoadedToolLimits(tool.Children); err != nil {
 				return err
@@ -595,7 +597,7 @@ func validateLoadedToolLimits(tools []NormalizedTool) error {
 
 func validateInstalledToolCount(tools []NormalizedTool, param string) error {
 	if flattenedToolCount(tools) > MaxInstalledToolCount {
-		return InvalidRequest("installed tool catalog contains too many tools", param)
+		return apierr.InvalidRequest("installed tool catalog contains too many tools", param)
 	}
 	return nil
 }
@@ -606,7 +608,7 @@ func validateStoredCatalogSize(c ToolCatalog, param string) error {
 		return err
 	}
 	if len(b) > MaxLoadedCatalogBytes {
-		return InvalidRequest("installed tool catalog is too large", param)
+		return apierr.InvalidRequest("installed tool catalog is too large", param)
 	}
 	return nil
 }

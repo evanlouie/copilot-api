@@ -3,6 +3,8 @@ package openai
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/evanlouie/copilot-api/internal/apierr"
 )
 
 // Explicit JSON null must never count as "the client sent this field".
@@ -297,8 +299,8 @@ func assertRejectedOnParam(t *testing.T, err error, strict bool, param string) {
 	if err == nil {
 		t.Fatalf("validation(strict=%t) succeeded, want rejection on %q", strict, param)
 	}
-	apiErr, ok := err.(*APIError)
-	if !ok || apiErr.Type != "invalid_request_error" || apiErr.Param != param {
+	apiErr, ok := err.(*apierr.Error)
+	if !ok || apiErr.Kind != apierr.KindInvalidInput || apiErr.Param != param {
 		t.Fatalf("validation(strict=%t) error = %#v, want invalid_request_error on %q", strict, err, param)
 	}
 }

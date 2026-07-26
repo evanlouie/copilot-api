@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/observability"
@@ -248,14 +249,14 @@ type statefulResponseGateway struct {
 
 func (g *statefulResponseGateway) GetResponse(_ context.Context, id string) (*openai.Response, error) {
 	if g.deleted || g.resp == nil || g.resp.ID != id {
-		return nil, openai.NotFound("response not found", "not_found")
+		return nil, apierr.NotFound("response not found", "not_found")
 	}
 	return g.resp, nil
 }
 
 func (g *statefulResponseGateway) DeleteResponse(_ context.Context, id string) error {
 	if g.deleted || g.resp == nil || g.resp.ID != id {
-		return openai.NotFound("response not found", "not_found")
+		return apierr.NotFound("response not found", "not_found")
 	}
 	g.deleted = true
 	return nil
@@ -1209,7 +1210,7 @@ func TestResponsesWebSocketEmitsFunctionCallEvents(t *testing.T) {
 }
 
 func TestResponsesWebSocketStreamErrorClosesTextItemAndFailsResponse(t *testing.T) {
-	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{text: "partial", errorAfterText: openai.Upstream("boom")})
+	conn, cleanup := newResponsesWebSocketConn(t, &websocketStreamGateway{text: "partial", errorAfterText: apierr.Upstream("boom")})
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1271,7 +1272,7 @@ func TestResponsesWebSocketRejectsConcurrentResponseCreate(t *testing.T) {
 }
 
 func TestResponsesWebSocketPreGenerationErrorsUseTopLevelError(t *testing.T) {
-	gw := &errorResponseGateway{err: openai.PreviousResponseNotFound("resp_missing")}
+	gw := &errorResponseGateway{err: apierr.PreviousResponseNotFound("resp_missing")}
 	conn, cleanup := newResponsesWebSocketConn(t, gw)
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1445,15 +1446,15 @@ func readUntilResponseCompleted(t *testing.T, ctx context.Context, conn *websock
 	}
 }
 
-func readOptionalWebSocketErrorEvent(ctx context.Context, conn *websocket.Conn) (openai.WebSocketErrorEvent, error) {
-	var ev openai.WebSocketErrorEvent
+func readOptionalWebSocketErrorEvent(ctx context.Context, conn *websocket.Conn) (WebSocketErrorEvent, error) {
+	var ev WebSocketErrorEvent
 	err := wsjson.Read(ctx, conn, &ev)
 	return ev, err
 }
 
-func readWebSocketErrorEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) openai.WebSocketErrorEvent {
+func readWebSocketErrorEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) WebSocketErrorEvent {
 	t.Helper()
-	var ev openai.WebSocketErrorEvent
+	var ev WebSocketErrorEvent
 	if err := wsjson.Read(ctx, conn, &ev); err != nil {
 		t.Fatal(err)
 	}

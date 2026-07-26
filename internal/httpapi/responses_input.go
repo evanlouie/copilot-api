@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
@@ -37,7 +38,7 @@ func parseResponsesInputOnce(raw json.RawMessage) (parsedResponsesInput, error) 
 	}
 	var items []openai.ResponseInputItem
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return parsedResponsesInput{}, openai.InvalidRequest("input must be a string or an array of response input items", "input")
+		return parsedResponsesInput{}, apierr.InvalidRequest("input must be a string or an array of response input items", "input")
 	}
 	parsed := parsedResponsesInput{}
 	if responsesInputHasToolOutputs(items) {
@@ -52,7 +53,7 @@ func parseResponsesInputOnce(raw json.RawMessage) (parsedResponsesInput, error) 
 				return parsedResponsesInput{}, err
 			}
 			if _, exists := parsed.outputs[item.CallID]; exists {
-				return parsedResponsesInput{}, openai.InvalidRequest("duplicate tool output call_id", fmt.Sprintf("input.%d.call_id", i))
+				return parsedResponsesInput{}, apierr.InvalidRequest("duplicate tool output call_id", fmt.Sprintf("input.%d.call_id", i))
 			}
 			parsed.outputs[item.CallID] = out
 			lastOutput = i
@@ -129,7 +130,7 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 			case "system", "developer":
 				text, err := item.Content.Text()
 				if err != nil {
-					return openai.PromptContent{}, "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
+					return openai.PromptContent{}, "", apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
 				}
 				if strings.TrimSpace(text) != "" {
 					instructions = append(instructions, responseRoleLabel(role)+":\n"+text)
@@ -137,19 +138,19 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 			case "user":
 				part, err := item.Content.Prompt()
 				if err != nil {
-					return openai.PromptContent{}, "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
+					return openai.PromptContent{}, "", apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
 				}
 				appendPromptPart(&prompt, &promptTexts, part, transcriptMode, &transcript, "User")
 			case "assistant":
 				text, err := item.Content.Text()
 				if err != nil {
-					return openai.PromptContent{}, "", openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
+					return openai.PromptContent{}, "", apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.content", i))
 				}
 				if strings.TrimSpace(text) != "" {
 					transcript = append(transcript, "Assistant:\n"+text)
 				}
 			default:
-				return openai.PromptContent{}, "", openai.InvalidRequest("unsupported response input message role", fmt.Sprintf("input.%d.role", i))
+				return openai.PromptContent{}, "", apierr.InvalidRequest("unsupported response input message role", fmt.Sprintf("input.%d.role", i))
 			}
 		case "reasoning", "item_reference":
 			// Reasoning items may appear in Codex history. Item references may appear
@@ -170,7 +171,7 @@ func parseResponsesTranscriptItems(items []openai.ResponseInputItem) (openai.Pro
 			}
 			transcript = append(transcript, "Assistant tool search call "+item.CallID+":\n"+arguments)
 		default:
-			return openai.PromptContent{}, "", openai.InvalidRequest("unsupported response input item type", fmt.Sprintf("input.%d.type", i))
+			return openai.PromptContent{}, "", apierr.InvalidRequest("unsupported response input item type", fmt.Sprintf("input.%d.type", i))
 		}
 	}
 	if len(transcript) > 0 {
@@ -208,7 +209,7 @@ func isResponsesToolOutput(typ string) bool {
 
 func parseToolOutputItem(item openai.ResponseInputItem, i int) (openai.ResponseToolOutput, error) {
 	if item.CallID == "" {
-		return openai.ResponseToolOutput{}, openai.InvalidRequest(item.Type+" items require call_id", fmt.Sprintf("input.%d.call_id", i))
+		return openai.ResponseToolOutput{}, apierr.InvalidRequest(item.Type+" items require call_id", fmt.Sprintf("input.%d.call_id", i))
 	}
 	kind := openai.ToolKindFunction
 	if item.Type == "custom_tool_call_output" {
@@ -219,7 +220,7 @@ func parseToolOutputItem(item openai.ResponseInputItem, i int) (openai.ResponseT
 	}
 	out, err := outputRawToString(item.Output)
 	if err != nil {
-		return openai.ResponseToolOutput{}, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
+		return openai.ResponseToolOutput{}, apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
 	}
 	if kind == openai.ToolKindToolSearch {
 		execution := item.Execution
@@ -227,14 +228,14 @@ func parseToolOutputItem(item openai.ResponseInputItem, i int) (openai.ResponseT
 			execution = "client"
 		}
 		if execution != "client" {
-			return openai.ResponseToolOutput{}, openai.InvalidRequest("tool_search_output execution must be client", fmt.Sprintf("input.%d.execution", i))
+			return openai.ResponseToolOutput{}, apierr.InvalidRequest("tool_search_output execution must be client", fmt.Sprintf("input.%d.execution", i))
 		}
 		normalizedTools, err := openai.NormalizeToolSearchOutputTools(item.Tools, fmt.Sprintf("input.%d.tools", i))
 		if err != nil {
 			return openai.ResponseToolOutput{}, err
 		}
 		if _, err := toolproxy.FlattenResponsesTools(normalizedTools); err != nil {
-			return openai.ResponseToolOutput{}, openai.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.tools", i))
+			return openai.ResponseToolOutput{}, apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.tools", i))
 		}
 		if len(item.Tools) > 0 && out == "" {
 			out = string(item.Tools)

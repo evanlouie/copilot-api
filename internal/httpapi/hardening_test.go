@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
@@ -35,8 +36,8 @@ func TestDecodeJSONAcceptsExactLimitAndRejectsOneByteOver(t *testing.T) {
 				t.Fatal(err)
 			}
 			if test.status != 0 {
-				var apiError *openai.APIError
-				if !errors.As(err, &apiError) || apiError.Status != test.status {
+				var apiError *apierr.Error
+				if !errors.As(err, &apiError) || httpStatus(apiError.Kind) != test.status {
 					t.Fatalf("error = %#v, want status %d", err, test.status)
 				}
 			}
@@ -134,7 +135,7 @@ func (g *scriptedChatStreamGateway) StreamChat(ctx context.Context, _ copilotgw.
 }
 
 func TestChatSynchronousStreamSetupFailurePreservesHTTPStatus(t *testing.T) {
-	server := New(config.Config{}, &scriptedChatStreamGateway{err: openai.NotFound("missing model", "model_not_found")}, slog.Default())
+	server := New(config.Config{}, &scriptedChatStreamGateway{err: apierr.NotFound("missing model", "model_not_found")}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"missing","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -178,7 +179,7 @@ func TestChatStreamPrematureClosureEmitsErrorAndDone(t *testing.T) {
 
 func TestChatStreamStopsAfterError(t *testing.T) {
 	result := &copilotgw.TurnResult{ID: "chatcmpl_late", Model: "gpt-5", FinishReason: "stop"}
-	gateway := &scriptedChatStreamGateway{events: []copilotgw.StreamEvent{{Kind: "error", Error: openai.Upstream("boom")}, {Kind: "result", Result: result}}}
+	gateway := &scriptedChatStreamGateway{events: []copilotgw.StreamEvent{{Kind: "error", Error: apierr.Upstream("boom")}, {Kind: "result", Result: result}}}
 	server := New(config.Config{}, gateway, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
@@ -211,7 +212,7 @@ func TestChatStreamClientCancellationDoesNotWriteTerminal(t *testing.T) {
 }
 
 func TestSynchronousStreamSetupFailurePreservesHTTPStatus(t *testing.T) {
-	server := New(config.Config{}, &errorResponseGateway{err: openai.NotFound("missing model", "model_not_found")}, slog.Default())
+	server := New(config.Config{}, &errorResponseGateway{err: apierr.NotFound("missing model", "model_not_found")}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"missing","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -301,7 +302,7 @@ func TestResponseStreamStopsAfterCompletedResponse(t *testing.T) {
 	response := &openai.Response{ID: "resp_done", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", Output: []openai.ResponseOutputItem{}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 2)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
-	channel <- copilotgw.ResponseStreamEvent{Kind: "error", Error: openai.Upstream("late")}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "error", Error: apierr.Upstream("late")}
 	close(channel)
 	writer := &captureResponseEventWriter{}
 	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
@@ -610,7 +611,7 @@ func TestAuthenticationFailureSamplerBoundsRepeatedLogs(t *testing.T) {
 }
 
 func TestUnknownWebSocketErrorsAreGeneric(t *testing.T) {
-	event := openai.NewWebSocketErrorEvent(errors.New("/secret/path"), "evt")
+	event := NewWebSocketErrorEvent(errors.New("/secret/path"), "evt")
 	if strings.Contains(event.Error.Message, "/secret/path") || event.Error.Message != "internal server error" {
 		t.Fatalf("websocket error leaked details: %#v", event)
 	}

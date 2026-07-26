@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/observability"
@@ -120,7 +121,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	models, err := s.gw.ListModels(r.Context())
 	if err != nil {
-		openai.WriteError(w, openai.Upstream(err.Error()))
+		WriteError(w, apierr.Upstream(err.Error()))
 		return
 	}
 	out := openai.ModelList{Object: openai.ObjectList, Data: openAIModels(models, openai.UnixNow())}

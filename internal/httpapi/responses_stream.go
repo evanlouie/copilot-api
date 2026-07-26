@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
@@ -17,7 +18,7 @@ type responseEventWriter interface {
 type sseResponseEventWriter struct {
 	server *Server
 	ctx    context.Context
-	writer *openai.SSEWriter
+	writer *SSEWriter
 }
 
 func (w sseResponseEventWriter) WriteResponseEvent(ev openai.ResponseStreamEvent) error {
@@ -162,11 +163,11 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 			return nil
 		}
 		if !strings.HasPrefix(finalText, streamed) {
-			return openai.Upstream("response stream terminal reasoning does not match streamed reasoning")
+			return apierr.Upstream("response stream terminal reasoning does not match streamed reasoning")
 		}
 		suffix := strings.TrimPrefix(finalText, streamed)
 		if int64(reasoningText.Len()+messageText.Len()+len(suffix)) > maxOutputBytes {
-			return openai.Upstream("response output exceeded stream size limit")
+			return apierr.Upstream("response output exceeded stream size limit")
 		}
 		idx := 0
 		summaryIdx := 0
@@ -316,7 +317,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 			if ctx.Err() == context.Canceled {
 				return responseStreamWriteResult{Err: context.Canceled, WriteFailed: true}
 			}
-			return writeFailure(openai.Timeout())
+			return writeFailure(apierr.Timeout())
 		case ev, ok := <-ch:
 			if !ok {
 				if final != nil {
@@ -326,9 +327,9 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					return responseStreamWriteResult{Err: context.Canceled, WriteFailed: true}
 				}
 				if ctx.Err() == context.DeadlineExceeded {
-					return writeFailure(openai.Timeout())
+					return writeFailure(apierr.Timeout())
 				}
-				return writeFailure(openai.Upstream("response stream ended before a terminal event"))
+				return writeFailure(apierr.Upstream("response stream ended before a terminal event"))
 			}
 			switch ev.Kind {
 			case "reasoning_delta":
@@ -351,7 +352,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				idx := 0
 				summaryIdx := 0
 				if int64(reasoningText.Len()+messageText.Len()+len(ev.Delta)) > maxOutputBytes {
-					return writeFailure(openai.Upstream("response output exceeded stream size limit"))
+					return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 				}
 				reasoningText.WriteString(ev.Delta)
 				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.reasoning_summary_text.delta", OutputIndex: &idx, SummaryIndex: &summaryIdx, ItemID: reasoningItemID, Delta: ev.Delta}); err != nil {
@@ -362,7 +363,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
 				}
 				if int64(reasoningText.Len()+messageText.Len()+len(ev.Delta)) > maxOutputBytes {
-					return writeFailure(openai.Upstream("response output exceeded stream size limit"))
+					return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 				}
 				msgIdx := messageOutputIndex
 				contentIdx := 0
@@ -386,7 +387,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 			case "response":
 				if ev.Response == nil {
-					return writeFailure(openai.Internal("response stream returned an empty response"))
+					return writeFailure(apierr.Internal("response stream returned an empty response"))
 				}
 				ev.Response = filterResponseReasoning(ev.Response, req.SuppressReasoning)
 				if err := reconcileStreamedReasoning(ev.Response); err != nil {
@@ -394,10 +395,10 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 				payloadBytes, sizeErr := responseOutputPayloadBytes(ev.Response)
 				if sizeErr != nil {
-					return writeFailure(openai.Upstream("failed to measure response output size"))
+					return writeFailure(apierr.Upstream("failed to measure response output size"))
 				}
 				if payloadBytes > maxOutputBytes {
-					return writeFailure(openai.Upstream("response output exceeded stream size limit"))
+					return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 				}
 				if err := finishReasoningItem(ev.Response, "completed"); err != nil {
 					return responseStreamWriteResult{Response: final, Err: err, WriteFailed: true}
@@ -411,11 +412,11 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					contentIdx := 0
 					if terminalText, ok := finalResponseMessageText(ev.Response); ok && terminalText != text {
 						if !strings.HasPrefix(terminalText, text) {
-							return writeFailure(openai.Upstream("response stream terminal text does not match streamed content"))
+							return writeFailure(apierr.Upstream("response stream terminal text does not match streamed content"))
 						}
 						suffix := strings.TrimPrefix(terminalText, text)
 						if int64(reasoningText.Len()+messageText.Len()+len(suffix)) > maxOutputBytes {
-							return writeFailure(openai.Upstream("response output exceeded stream size limit"))
+							return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 						}
 						if suffix != "" {
 							if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_text.delta", OutputIndex: &msgIdx, ContentIndex: &contentIdx, ItemID: messageID, Delta: suffix}); err != nil {

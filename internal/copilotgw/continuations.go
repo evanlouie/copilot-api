@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
@@ -25,7 +26,7 @@ func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, req ChatContinu
 		return g.continueChatToolCallsFromTranscript(ctx, req)
 	}
 	if batch.Kind != "chat" {
-		return nil, openai.InvalidRequest("tool_call_id does not belong to a Chat Completions pending batch", "messages")
+		return nil, apierr.InvalidRequest("tool_call_id does not belong to a Chat Completions pending batch", "messages")
 	}
 	if err := validateContinuationModel(req.Model, batch, "model"); err != nil {
 		return nil, err
@@ -37,7 +38,7 @@ func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, req ChatContinu
 			runner.watchContext(ctx)
 		}
 	}); err != nil {
-		return nil, openai.InvalidRequest(err.Error(), "messages")
+		return nil, apierr.InvalidRequest(err.Error(), "messages")
 	}
 	g.broker.Remove(batch)
 	g.forgetRunner(batch.ID)
@@ -48,7 +49,7 @@ func (g *RealGateway) ContinueChatToolCalls(ctx context.Context, req ChatContinu
 		}
 		turn, ok := final.Value.(*TurnResult)
 		if !ok {
-			return nil, openai.Internal("unexpected continuation result")
+			return nil, apierr.Internal("unexpected continuation result")
 		}
 		if turn.PendingBatchID != "" && runner != nil {
 			g.rememberRunner(turn.PendingBatchID, runner)
@@ -72,14 +73,14 @@ func (g *RealGateway) StreamContinueChatToolCalls(ctx context.Context, req ChatC
 		return g.streamContinueChatToolCallsFromTranscript(ctx, req)
 	}
 	if batch.Kind != "chat" {
-		return nil, openai.InvalidRequest("tool_call_id does not belong to a Chat Completions pending batch", "messages")
+		return nil, apierr.InvalidRequest("tool_call_id does not belong to a Chat Completions pending batch", "messages")
 	}
 	if err := validateContinuationModel(req.Model, batch, "model"); err != nil {
 		return nil, err
 	}
 	runner := g.runnerForBatch(batch.ID)
 	if runner == nil {
-		batch.Cancel(openai.InvalidRequest("pending tool_call_id is not attached to a live streamable turn", "messages"))
+		batch.Cancel(apierr.InvalidRequest("pending tool_call_id is not attached to a live streamable turn", "messages"))
 		g.broker.Remove(batch)
 		g.forgetRunner(batch.ID)
 		return g.streamContinueChatToolCallsFromTranscript(ctx, req)
@@ -98,7 +99,7 @@ func (g *RealGateway) StreamContinueChatToolCalls(ctx context.Context, req ChatC
 		})
 	}); err != nil {
 		close(ch)
-		return nil, openai.InvalidRequest(err.Error(), "messages")
+		return nil, apierr.InvalidRequest(err.Error(), "messages")
 	}
 	g.broker.Remove(batch)
 	g.forgetRunner(batch.ID)
@@ -124,7 +125,7 @@ func (g *RealGateway) streamContinueChatToolCallsFromTranscript(ctx context.Cont
 
 func chatRequestFromContinuation(req ChatContinuationRequest) (ChatRequest, error) {
 	if len(req.Messages) == 0 {
-		return ChatRequest{}, openai.InvalidRequest("unknown or expired tool_call_id", "messages")
+		return ChatRequest{}, apierr.InvalidRequest("unknown or expired tool_call_id", "messages")
 	}
 	// The transcript already ends with the tool result messages, which hydration
 	// replays as tool-execution events in the synthetic session. The synthetic
@@ -155,7 +156,7 @@ func (g *RealGateway) rememberRunner(batchID string, runner *turnRunner) {
 }
 func validateContinuationModel(model string, batch *toolproxy.Batch, param string) error {
 	if batch.Model != "" && model != batch.Model {
-		return openai.InvalidRequest("model does not match pending tool-call batch", param)
+		return apierr.InvalidRequest("model does not match pending tool-call batch", param)
 	}
 	return nil
 }
@@ -170,7 +171,7 @@ func functionOutputsWithContinuationInput(outputs map[string]string, input opena
 		return outputs, nil
 	}
 	if len(input.Images) > 0 {
-		return nil, openai.InvalidRequest("image input cannot be combined with function_call_output continuation input", "input")
+		return nil, apierr.InvalidRequest("image input cannot be combined with function_call_output continuation input", "input")
 	}
 	ids := make([]string, 0, len(outputs))
 	for id := range outputs {
@@ -227,17 +228,17 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		previousResponseID = batch.ResponseID
 	}
 	if batch.Kind != "response" {
-		return nil, openai.InvalidRequest("function_call_output call_id does not belong to a Responses pending batch", "input")
+		return nil, apierr.InvalidRequest("function_call_output call_id does not belong to a Responses pending batch", "input")
 	}
 	if err := validateContinuationModel(req.Model, batch, "model"); err != nil {
 		return nil, err
 	}
 	if batch.ResponseID != "" && previousResponseID != batch.ResponseID {
-		return nil, openai.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
+		return nil, apierr.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
 	}
 	previousRecord, err := g.store.LoadResponseForContinuation(previousResponseID)
 	if err != nil {
-		return nil, openai.PreviousResponseNotFound(previousResponseID)
+		return nil, apierr.PreviousResponseNotFound(previousResponseID)
 	}
 	installBoundary, err := validateResponseToolOutputsForBatch(batch, activeOutputs)
 	if err != nil {
@@ -266,7 +267,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 			runner.watchContext(ctx)
 		}
 	}); err != nil {
-		return nil, openai.InvalidRequest(err.Error(), "input")
+		return nil, apierr.InvalidRequest(err.Error(), "input")
 	}
 	g.broker.Remove(batch)
 	g.forgetRunner(batch.ID)
@@ -277,7 +278,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		}
 		turn, ok := final.Value.(*TurnResult)
 		if !ok {
-			return nil, openai.Internal("unexpected continuation result")
+			return nil, apierr.Internal("unexpected continuation result")
 		}
 		if turn.PendingBatchID != "" && runner != nil {
 			g.rememberRunner(turn.PendingBatchID, runner)
@@ -293,7 +294,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
 		record.InstalledToolCatalog = catalogDTO
 		if err := g.store.SaveResponse(record); err != nil {
-			return nil, openai.Internal("failed to persist response")
+			return nil, apierr.Internal("failed to persist response")
 		}
 		return &ResponseResult{Response: resp}, nil
 	case <-ctx.Done():
@@ -369,7 +370,7 @@ func (g *RealGateway) responseContinuationBatch(outputs map[string]openai.Respon
 		if errors.Is(subsetErr, toolproxy.ErrNotFound) {
 			return nil, nil, err
 		}
-		return nil, nil, openai.InvalidRequest(subsetErr.Error(), "input")
+		return nil, nil, apierr.InvalidRequest(subsetErr.Error(), "input")
 	}
 	active := make(map[string]openai.ResponseToolOutput, len(matched))
 	for _, id := range matched {
@@ -406,11 +407,11 @@ func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseReq
 			fallback.Instructions = req.FunctionOutputFallbackInstructions
 			return fallback, nil
 		}
-		return ResponseRequest{}, openai.InvalidRequest("previous_response_id is required when function_call_output is no longer attached to a live pending batch", "previous_response_id")
+		return ResponseRequest{}, apierr.InvalidRequest("previous_response_id is required when function_call_output is no longer attached to a live pending batch", "previous_response_id")
 	}
 	previousRecord, err := g.store.LoadResponseForContinuation(req.PreviousResponseID)
 	if err != nil {
-		return ResponseRequest{}, openai.PreviousResponseNotFound(req.PreviousResponseID)
+		return ResponseRequest{}, apierr.PreviousResponseNotFound(req.PreviousResponseID)
 	}
 	activeOutputs, err := activeResponseToolOutputsFromRecord(previousRecord, req.ToolOutputs)
 	if err != nil {

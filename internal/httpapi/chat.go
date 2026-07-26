@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
 )
@@ -14,28 +15,28 @@ import (
 func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req openai.ChatCompletionRequest
 	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &req); err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	selector, err := openai.ParseModelSelector(req.Model)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	reasoningEffort, err := openai.MergeReasoningEffort(selector, req.ReasoningEffort, "reasoning_effort")
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	req.Model = selector.Model
 	req.ReasoningEffort = reasoningEffort
 	if err := openai.ValidateChatRequest(&req, s.cfg.StrictCompat); err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	instructions, messages, err := openai.FoldChatInstructions(req.Messages)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
@@ -45,7 +46,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.logGenerationStarted(r, "chat.completions", req.Model, req.ReasoningEffort, "", false, true)
 		outputs, err := trailingToolOutputs(messages)
 		if err != nil {
-			openai.WriteError(w, err)
+			WriteError(w, err)
 			return
 		}
 		contReq := copilotgw.ChatContinuationRequest{Model: req.Model, Instructions: instructions, Messages: messages, Outputs: outputs, Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), ReasoningEffort: req.ReasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
@@ -55,7 +56,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		turn, err := s.gw.ContinueChatToolCalls(ctx, contReq)
 		if err != nil {
-			openai.WriteError(w, err)
+			WriteError(w, err)
 			return
 		}
 		turn.ID = openai.NewID("chatcmpl_")
@@ -64,21 +65,21 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(messages) == 0 {
-		openai.WriteError(w, openai.InvalidRequest("messages is required", "messages"))
+		WriteError(w, apierr.InvalidRequest("messages is required", "messages"))
 		return
 	}
 	last := messages[len(messages)-1]
 	if last.Role != "user" && last.Role != "assistant" {
-		openai.WriteError(w, openai.InvalidRequest("Chat Completions requests must end with a user message, assistant prefill, or tool continuation", "messages"))
+		WriteError(w, apierr.InvalidRequest("Chat Completions requests must end with a user message, assistant prefill, or tool continuation", "messages"))
 		return
 	}
 	if last.Role == "assistant" && len(last.ToolCalls) > 0 {
-		openai.WriteError(w, openai.InvalidRequest("assistant tool calls require following tool messages", "messages"))
+		WriteError(w, apierr.InvalidRequest("assistant tool calls require following tool messages", "messages"))
 		return
 	}
 	resolvedEffort, resolved, err := s.resolveGenerationReasoningEffort(ctx, req.Model, req.ReasoningEffort)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	s.logGenerationStarted(r, "chat.completions", req.Model, req.ReasoningEffort, resolvedEffort, resolved, false)
@@ -95,7 +96,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	turn, err := s.gw.Chat(ctx, chatReq)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.chatCompletionFromTurn(turn))
@@ -120,12 +121,12 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 	// status and standard JSON error envelope.
 	ch, err := start(ctx)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
-	writer, ok := openai.NewSSEWriter(w)
+	writer, ok := NewSSEWriter(w)
 	if !ok {
-		openai.WriteError(w, openai.Internal("streaming unsupported by ResponseWriter"))
+		WriteError(w, apierr.Internal("streaming unsupported by ResponseWriter"))
 		return
 	}
 	created := openai.UnixNow()
@@ -146,7 +147,7 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
-				writeFailure(openai.Timeout())
+				writeFailure(apierr.Timeout())
 			}
 			return
 		case ev, ok := <-ch:
@@ -155,9 +156,9 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 					return
 				}
 				if ctx.Err() == context.DeadlineExceeded {
-					writeFailure(openai.Timeout())
+					writeFailure(apierr.Timeout())
 				} else {
-					writeFailure(openai.Upstream("chat stream ended before a terminal event"))
+					writeFailure(apierr.Upstream("chat stream ended before a terminal event"))
 				}
 				return
 			}
@@ -175,13 +176,13 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 				streamedText.WriteString(ev.Delta)
 			case "result":
 				if ev.Result == nil {
-					writeFailure(openai.Internal("chat stream returned an empty result"))
+					writeFailure(apierr.Internal("chat stream returned an empty result"))
 					return
 				}
 				streamedReason := streamedReasoning.String()
 				if ev.Result.Reasoning != streamedReason {
 					if !strings.HasPrefix(ev.Result.Reasoning, streamedReason) {
-						writeFailure(openai.Upstream("chat stream terminal reasoning does not match streamed reasoning"))
+						writeFailure(apierr.Upstream("chat stream terminal reasoning does not match streamed reasoning"))
 						return
 					}
 					remainingReasoning := strings.TrimPrefix(ev.Result.Reasoning, streamedReason)
@@ -194,7 +195,7 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 				streamed := streamedText.String()
 				if ev.Result.Text != streamed {
 					if !strings.HasPrefix(ev.Result.Text, streamed) {
-						writeFailure(openai.Upstream("chat stream terminal text does not match streamed content"))
+						writeFailure(apierr.Upstream("chat stream terminal text does not match streamed content"))
 						return
 					}
 					remaining := strings.TrimPrefix(ev.Result.Text, streamed)
@@ -216,7 +217,7 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 		}
 	}
 }
-func (s *Server) writeChatReasoningDelta(ctx context.Context, writer *openai.SSEWriter, id string, created int64, model, delta string, includeUsage bool) error {
+func (s *Server) writeChatReasoningDelta(ctx context.Context, writer *SSEWriter, id string, created int64, model, delta string, includeUsage bool) error {
 	if delta == "" {
 		return nil
 	}
@@ -234,7 +235,7 @@ func (s *Server) writeChatReasoningDelta(ctx context.Context, writer *openai.SSE
 	}
 	return s.writeSSEData(ctx, writer, "chat.reasoning_delta", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: chunkDelta}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "reasoning", delta)...)
 }
-func (s *Server) writeChatTerminalWithID(ctx context.Context, writer *openai.SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) error {
+func (s *Server) writeChatTerminalWithID(ctx context.Context, writer *SSEWriter, id string, created int64, model string, turn *copilotgw.TurnResult, includeUsage bool) error {
 	finish := turn.FinishReason
 	if details := s.chatReasoningDetails(turn); len(details) > 0 {
 		// The plaintext reasoning was already streamed as deltas; this terminal
@@ -333,11 +334,11 @@ func trailingToolOutputs(messages []openai.ChatMessage) (map[string]string, erro
 			break
 		}
 		if _, dup := outputs[messages[i].ToolCallID]; dup {
-			return nil, openai.InvalidRequest("duplicate tool_call_id in tool outputs", fmt.Sprintf("messages.%d.tool_call_id", i))
+			return nil, apierr.InvalidRequest("duplicate tool_call_id in tool outputs", fmt.Sprintf("messages.%d.tool_call_id", i))
 		}
 		out, err := messages[i].Content.ToolOutput()
 		if err != nil {
-			return nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
+			return nil, apierr.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 		}
 		outputs[messages[i].ToolCallID] = out
 	}

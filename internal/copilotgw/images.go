@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 
 	copilot "github.com/github/copilot-sdk/go"
@@ -183,14 +184,14 @@ func (g *RealGateway) resolvePromptWithImageBudget(ctx context.Context, model st
 		return resolvedPrompt{}, err
 	}
 	if !modelInfo.VisionKnown || !modelInfo.SupportsVision {
-		return resolvedPrompt{}, openai.InvalidRequest("model does not support image inputs: "+model, param)
+		return resolvedPrompt{}, apierr.InvalidRequest("model does not support image inputs: "+model, param)
 	}
 	if budget == nil {
 		budget = newImageRequestBudget()
 	}
 	budget.configure(modelInfo)
 	if budget.maxImages > 0 && int64(len(prompt.Images)) > budget.remainingImages {
-		return resolvedPrompt{}, openai.InvalidRequest(fmt.Sprintf("model supports at most %d image inputs per request", budget.maxImages), param)
+		return resolvedPrompt{}, apierr.InvalidRequest(fmt.Sprintf("model supports at most %d image inputs per request", budget.maxImages), param)
 	}
 	if budget.maxImages > 0 {
 		budget.remainingImages -= int64(len(prompt.Images))
@@ -213,33 +214,33 @@ type resolvedImageAttachment struct {
 func resolveImageAttachment(ctx context.Context, image openai.ImageInput, index int, limits *VisionLimits, param string) (resolvedImageAttachment, error) {
 	raw := strings.TrimSpace(image.URL)
 	if raw == "" {
-		return resolvedImageAttachment{}, openai.InvalidRequest("image_url is required", param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("image_url is required", param)
 	}
 	if strings.HasPrefix(strings.ToLower(raw), "data:") {
 		return dataURLAttachment(raw, index, limits, param)
 	}
 	u, err := url.Parse(raw)
 	if err != nil || !u.IsAbs() {
-		return resolvedImageAttachment{}, openai.InvalidRequest("image_url must be an absolute URL or data URL", param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("image_url must be an absolute URL or data URL", param)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
 		if err := validateRemoteImageURL(u); err != nil {
-			return resolvedImageAttachment{}, openai.InvalidRequest(err.Error(), param)
+			return resolvedImageAttachment{}, apierr.InvalidRequest(err.Error(), param)
 		}
 		return remoteImageAttachment(ctx, u, index, limits, param)
 	default:
-		return resolvedImageAttachment{}, openai.InvalidRequest("image_url scheme must be http, https, or data", param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("image_url scheme must be http, https, or data", param)
 	}
 }
 
 func dataURLAttachment(raw string, index int, limits *VisionLimits, param string) (resolvedImageAttachment, error) {
 	mediaType, data, err := parseImageDataURL(raw, imageByteLimit(limits))
 	if err != nil {
-		return resolvedImageAttachment{}, openai.InvalidRequest(err.Error(), param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest(err.Error(), param)
 	}
 	if !mediaTypeAllowed(mediaType, limits) {
-		return resolvedImageAttachment{}, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
 	}
 	displayName := imageDisplayName(index, mediaType, "")
 	return resolvedImageAttachment{attachment: copilot.AttachmentBlob{Data: &data, MIMEType: mediaType, DisplayName: &displayName}}, nil
@@ -248,33 +249,33 @@ func dataURLAttachment(raw string, index int, limits *VisionLimits, param string
 func remoteImageAttachment(ctx context.Context, u *url.URL, index int, limits *VisionLimits, param string) (resolvedImageAttachment, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return resolvedImageAttachment{}, openai.InvalidRequest("invalid image_url", param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("invalid image_url", param)
 	}
 	resp, err := imageHTTPClient.Do(req)
 	if err != nil {
-		return resolvedImageAttachment{}, openai.InvalidRequest("failed to fetch image_url", param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("failed to fetch image_url", param)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resolvedImageAttachment{}, openai.InvalidRequest(fmt.Sprintf("image_url returned HTTP %d", resp.StatusCode), param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest(fmt.Sprintf("image_url returned HTTP %d", resp.StatusCode), param)
 	}
 	limit := imageByteLimit(limits)
 	if limit > 0 && resp.ContentLength > limit {
-		return resolvedImageAttachment{}, openai.InvalidRequest(imageSizeLimitMessage("image_url", limit), param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest(imageSizeLimitMessage("image_url", limit), param)
 	}
 	body, err := readLimited(resp.Body, limit)
 	if err != nil {
-		return resolvedImageAttachment{}, openai.InvalidRequest(err.Error(), param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest(err.Error(), param)
 	}
 	if len(body) == 0 {
-		return resolvedImageAttachment{}, openai.InvalidRequest("image_url returned an empty image", param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("image_url returned an empty image", param)
 	}
 	mediaType := imageMediaType(resp.Header.Get("Content-Type"), body)
 	if mediaType == "" {
-		return resolvedImageAttachment{}, openai.InvalidRequest("image_url did not return a supported image MIME type", param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("image_url did not return a supported image MIME type", param)
 	}
 	if !mediaTypeAllowed(mediaType, limits) {
-		return resolvedImageAttachment{}, openai.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
+		return resolvedImageAttachment{}, apierr.InvalidRequest("image MIME type is not supported by the selected model: "+mediaType, param)
 	}
 	data := base64.StdEncoding.EncodeToString(body)
 	displayName := imageDisplayName(index, mediaType, path.Base(u.Path))
@@ -437,11 +438,11 @@ func compactBase64(s string) string {
 
 func (g *RealGateway) findModel(ctx context.Context, id string) (Model, error) {
 	if id == "" {
-		return Model{}, openai.InvalidRequest("model is required", "model")
+		return Model{}, apierr.InvalidRequest("model is required", "model")
 	}
 	models, err := g.refreshModels(ctx, false)
 	if err != nil {
-		return Model{}, openai.Upstream(err.Error())
+		return Model{}, apierr.Upstream(err.Error())
 	}
 	if m, ok := findModel(models, id); ok {
 		return m, nil
@@ -449,13 +450,13 @@ func (g *RealGateway) findModel(ctx context.Context, id string) (Model, error) {
 	if g.shouldForceModelRefresh() {
 		models, err = g.refreshModels(ctx, true)
 		if err != nil {
-			return Model{}, openai.Upstream(err.Error())
+			return Model{}, apierr.Upstream(err.Error())
 		}
 		if m, ok := findModel(models, id); ok {
 			return m, nil
 		}
 	}
-	return Model{}, openai.NotFound("model not found: "+id, "model_not_found")
+	return Model{}, apierr.NotFound("model not found: "+id, "model_not_found")
 }
 
 func findModel(models []Model, id string) (Model, bool) {

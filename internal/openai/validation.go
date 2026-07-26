@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/evanlouie/copilot-api/internal/apierr"
 )
 
 // Request validation follows a single policy on both surfaces:
@@ -84,10 +86,10 @@ var strictOnlyResponseFields = []unsupportedField{
 
 func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 	if req.Model == "" {
-		return InvalidRequest("model is required", "model")
+		return apierr.InvalidRequest("model is required", "model")
 	}
 	if len(req.Messages) == 0 {
-		return InvalidRequest("messages is required", "messages")
+		return apierr.InvalidRequest("messages is required", "messages")
 	}
 	// The shape of response_format decides which error the client gets: a
 	// malformed object or an undocumented type is a typo, while json_object and
@@ -121,16 +123,16 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 		switch msg.Role {
 		case "system", "developer", "user", "assistant", "tool":
 		default:
-			return InvalidRequest(fmt.Sprintf("unsupported message role %q", msg.Role), fmt.Sprintf("messages.%d.role", i))
+			return apierr.InvalidRequest(fmt.Sprintf("unsupported message role %q", msg.Role), fmt.Sprintf("messages.%d.role", i))
 		}
 		if msg.Role != "assistant" && len(msg.ToolCalls) > 0 {
-			return InvalidRequest("tool_calls are only valid on assistant messages", fmt.Sprintf("messages.%d.tool_calls", i))
+			return apierr.InvalidRequest("tool_calls are only valid on assistant messages", fmt.Sprintf("messages.%d.tool_calls", i))
 		}
 		var err error
 		switch msg.Role {
 		case "tool":
 			if msg.ToolCallID == "" {
-				return InvalidRequest("tool messages require tool_call_id", fmt.Sprintf("messages.%d.tool_call_id", i))
+				return apierr.InvalidRequest("tool messages require tool_call_id", fmt.Sprintf("messages.%d.tool_call_id", i))
 			}
 			// Tool results are data, not prose: LangChain's ToolMessage and MCP
 			// bridges routinely carry a JSON object or array, so they get their own
@@ -142,7 +144,7 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 			_, err = msg.Text()
 		}
 		if err != nil {
-			return InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
+			return apierr.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 		}
 	}
 	return nil
@@ -150,11 +152,11 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 
 func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 	if req.Model == "" {
-		return InvalidRequest("model is required", "model")
+		return apierr.InvalidRequest("model is required", "model")
 	}
 	if len(req.Input) == 0 || string(req.Input) == "null" {
 		if req.PreviousResponseID == "" {
-			return InvalidRequest("input is required", "input")
+			return apierr.InvalidRequest("input is required", "input")
 		}
 	}
 	if err := validateUnsupportedFields(req.Raw, alwaysRejectResponseFields); err != nil {
@@ -211,11 +213,11 @@ func validateResponsesInclude(raw json.RawMessage) error {
 	}
 	var values []string
 	if err := json.Unmarshal(raw, &values); err != nil {
-		return InvalidRequest("include must be an array of strings", "include")
+		return apierr.InvalidRequest("include must be an array of strings", "include")
 	}
 	for _, value := range values {
 		if _, ok := knownResponsesIncludeValues[value]; !ok {
-			return InvalidRequest("unknown include value", "include")
+			return apierr.InvalidRequest("unknown include value", "include")
 		}
 	}
 	return nil
@@ -227,7 +229,7 @@ func validateResponsesInclude(raw json.RawMessage) error {
 // accepted, surfaced through RequestedMaxOutputTokens, and logged at debug.
 func validateMaxOutputTokens(value *int, param string) error {
 	if value != nil && *value < 1 {
-		return InvalidRequest(param+" must be a positive integer", param)
+		return apierr.InvalidRequest(param+" must be a positive integer", param)
 	}
 	return nil
 }
@@ -239,7 +241,7 @@ func validateResponsesMaxOutputTokens(raw map[string]json.RawMessage) error {
 	}
 	var tokens int
 	if err := json.Unmarshal(value, &tokens); err != nil || tokens < 1 {
-		return InvalidRequest("max_output_tokens must be a positive integer", "max_output_tokens")
+		return apierr.InvalidRequest("max_output_tokens must be a positive integer", "max_output_tokens")
 	}
 	return nil
 }
@@ -284,22 +286,22 @@ func validateResponsesReasoning(req *ResponsesRequest) error {
 		switch name {
 		case "effort", "summary":
 		default:
-			return InvalidRequest("unsupported reasoning field", "reasoning."+name)
+			return apierr.InvalidRequest("unsupported reasoning field", "reasoning."+name)
 		}
 	}
 	if raw, ok := fields["effort"]; ok && string(raw) != "null" {
 		var effort string
 		if err := json.Unmarshal(raw, &effort); err != nil || effort == "" {
-			return InvalidRequest("reasoning.effort must be a string", "reasoning.effort")
+			return apierr.InvalidRequest("reasoning.effort must be a string", "reasoning.effort")
 		}
 		if req.ReasoningEffort != "" && NormalizeReasoningEffort(req.ReasoningEffort) != NormalizeReasoningEffort(effort) {
-			return InvalidRequest("reasoning.effort conflicts with reasoning_effort", "reasoning.effort")
+			return apierr.InvalidRequest("reasoning.effort conflicts with reasoning_effort", "reasoning.effort")
 		}
 	}
 	if raw, ok := fields["summary"]; ok && string(raw) != "null" {
 		var summary string
 		if err := json.Unmarshal(raw, &summary); err != nil {
-			return InvalidRequest("reasoning.summary must be a string", "reasoning.summary")
+			return apierr.InvalidRequest("reasoning.summary must be a string", "reasoning.summary")
 		}
 	}
 	return nil
@@ -317,13 +319,13 @@ func validateResponsesText(raw json.RawMessage) error {
 		switch name {
 		case "verbosity", "format":
 		default:
-			return InvalidRequest("unsupported text field", "text."+name)
+			return apierr.InvalidRequest("unsupported text field", "text."+name)
 		}
 	}
 	if raw, ok := fields["verbosity"]; ok && string(raw) != "null" {
 		var verbosity string
 		if err := json.Unmarshal(raw, &verbosity); err != nil || verbosity == "" {
-			return InvalidRequest("text.verbosity must be a string", "text.verbosity")
+			return apierr.InvalidRequest("text.verbosity must be a string", "text.verbosity")
 		}
 	}
 	if raw, ok := fields["format"]; ok && string(raw) != "null" {
@@ -344,7 +346,7 @@ func validateResponsesTextFormat(raw json.RawMessage) error {
 		return err
 	}
 	if formatType != outputFormatText {
-		return InvalidRequest(structuredOutputMessage("text.format"), "text.format")
+		return apierr.InvalidRequest(structuredOutputMessage("text.format"), "text.format")
 	}
 	return nil
 }
@@ -363,13 +365,13 @@ func outputFormatType(raw json.RawMessage, param string) (string, error) {
 	}
 	var formatType string
 	if err := json.Unmarshal(fields["type"], &formatType); err != nil || formatType == "" {
-		return "", InvalidRequest(param+".type must be a string", param+".type")
+		return "", apierr.InvalidRequest(param+".type must be a string", param+".type")
 	}
 	switch formatType {
 	case outputFormatText, "json_object", "json_schema":
 		return formatType, nil
 	default:
-		return "", InvalidRequest("unknown "+param+".type", param+".type")
+		return "", apierr.InvalidRequest("unknown "+param+".type", param+".type")
 	}
 }
 
@@ -384,7 +386,7 @@ func structuredOutputMessage(param string) string {
 func rawObject(raw json.RawMessage, param string) (map[string]json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return nil, InvalidRequest(param+" must be an object", param)
+		return nil, apierr.InvalidRequest(param+" must be an object", param)
 	}
 	return fields, nil
 }
@@ -420,7 +422,7 @@ func validateUnsupportedFields(raw map[string]json.RawMessage, fields []unsuppor
 		if field.allow != nil && field.allow(value) {
 			continue
 		}
-		return InvalidRequest(field.message, field.name)
+		return apierr.InvalidRequest(field.message, field.name)
 	}
 	return nil
 }
@@ -441,20 +443,20 @@ func validateTools(tools []Tool, allowUnsupported bool) error {
 			if allowUnsupported {
 				continue
 			}
-			return InvalidRequest("only function tools are supported", fmt.Sprintf("tools.%d.type", i))
+			return apierr.InvalidRequest("only function tools are supported", fmt.Sprintf("tools.%d.type", i))
 		}
 		fn := tool.Function
 		if !functionNameRE.MatchString(fn.Name) {
-			return InvalidRequest("function tool name must match ^[A-Za-z0-9_-]{1,64}$", fmt.Sprintf("tools.%d.function.name", i))
+			return apierr.InvalidRequest("function tool name must match ^[A-Za-z0-9_-]{1,64}$", fmt.Sprintf("tools.%d.function.name", i))
 		}
 		if _, ok := seen[fn.Name]; ok {
-			return InvalidRequest("duplicate function tool name", fmt.Sprintf("tools.%d.function.name", i))
+			return apierr.InvalidRequest("duplicate function tool name", fmt.Sprintf("tools.%d.function.name", i))
 		}
 		seen[fn.Name] = struct{}{}
 		if len(fn.Parameters) > 0 {
 			var js any
 			if err := json.Unmarshal(fn.Parameters, &js); err != nil {
-				return InvalidRequest("function parameters must be valid JSON Schema", fmt.Sprintf("tools.%d.function.parameters", i))
+				return apierr.InvalidRequest("function parameters must be valid JSON Schema", fmt.Sprintf("tools.%d.function.parameters", i))
 			}
 		}
 	}
@@ -501,7 +503,7 @@ func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 		case "auto", "none", "required":
 			return ToolChoice{Kind: s}, nil
 		default:
-			return ToolChoice{}, InvalidRequest("tool_choice must be auto, none, required, or a tool object", "tool_choice")
+			return ToolChoice{}, apierr.InvalidRequest("tool_choice must be auto, none, required, or a tool object", "tool_choice")
 		}
 	}
 	var obj struct {
@@ -512,7 +514,7 @@ func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 		} `json:"function"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return ToolChoice{}, InvalidRequest("tool_choice must be auto, none, required, or a tool object", "tool_choice")
+		return ToolChoice{}, apierr.InvalidRequest("tool_choice must be auto, none, required, or a tool object", "tool_choice")
 	}
 	switch obj.Type {
 	case "function", "custom":
@@ -523,13 +525,13 @@ func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 			name = obj.Function.Name
 		}
 		if name == "" {
-			return ToolChoice{}, InvalidRequest("forced tool_choice requires a tool name", "tool_choice")
+			return ToolChoice{}, apierr.InvalidRequest("forced tool_choice requires a tool name", "tool_choice")
 		}
 		return ToolChoice{Kind: obj.Type, Name: name}, nil
 	case "allowed_tools":
 		return ToolChoice{Kind: obj.Type}, nil
 	default:
-		return ToolChoice{}, InvalidRequest("unsupported tool_choice", "tool_choice")
+		return ToolChoice{}, apierr.InvalidRequest("unsupported tool_choice", "tool_choice")
 	}
 }
 
@@ -605,7 +607,7 @@ func FoldChatInstructions(messages []ChatMessage) (string, []ChatMessage, error)
 		}
 		text, err := msg.Text()
 		if err != nil {
-			return "", nil, InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
+			return "", nil, apierr.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 		}
 		if strings.TrimSpace(text) == "" {
 			continue

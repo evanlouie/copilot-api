@@ -3,6 +3,7 @@ package copilotgw
 import (
 	"context"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
@@ -78,7 +79,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 			prepared.pinReleases = append(prepared.pinReleases, g.store.PinResponse(req.PreviousResponseID))
 			record, loadErr := g.store.LoadResponseForContinuation(req.PreviousResponseID)
 			if loadErr != nil {
-				return nil, openai.PreviousResponseNotFound(req.PreviousResponseID)
+				return nil, apierr.PreviousResponseNotFound(req.PreviousResponseID)
 			}
 			prepared.pinReleases = append(prepared.pinReleases, g.store.PinSession(record.SDKSessionID))
 			previousRecord = &record
@@ -89,7 +90,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 		}
 		prepared.rt, err = toolproxy.NewResponseRequestTools(g.broker, prepared.catalog.Flatten(), req.ToolChoiceNone)
 		if err != nil {
-			return nil, openai.InvalidRequest(err.Error(), "tools")
+			return nil, apierr.InvalidRequest(err.Error(), "tools")
 		}
 		if previousRecord != nil {
 			prepared.sessionID = previousRecord.SDKSessionID
@@ -112,12 +113,12 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 			prepared.session, err = g.createSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
 		}
 		if err != nil {
-			return nil, openai.Upstream(err.Error())
+			return nil, apierr.Upstream(err.Error())
 		}
 	}
 
 	if prepared.session == nil {
-		return nil, openai.Upstream("copilot SDK returned nil session")
+		return nil, apierr.Upstream("copilot SDK returned nil session")
 	}
 	if !promptResolved {
 		prepared.prompt, err = g.resolvePromptWithImageBudget(ctx, req.Model, req.Input, "input", prepared.imageBudget)

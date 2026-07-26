@@ -36,7 +36,7 @@ func (s *Server) chatChunkAttrs(ctx context.Context, chunkKind, delta string) []
 	return attrs
 }
 
-func (s *Server) writeSSEData(ctx context.Context, writer *openai.SSEWriter, label string, v any, attrs ...any) error {
+func (s *Server) writeSSEData(ctx context.Context, writer *SSEWriter, label string, v any, attrs ...any) error {
 	if !s.debugEnabled(ctx) {
 		return writer.Data(v)
 	}
@@ -50,7 +50,7 @@ func (s *Server) writeSSEData(ctx context.Context, writer *openai.SSEWriter, lab
 	return err
 }
 
-func (s *Server) writeSSEDone(ctx context.Context, writer *openai.SSEWriter, attrs ...any) error {
+func (s *Server) writeSSEDone(ctx context.Context, writer *SSEWriter, attrs ...any) error {
 	if !s.debugEnabled(ctx) {
 		return writer.Done()
 	}
@@ -60,7 +60,7 @@ func (s *Server) writeSSEDone(ctx context.Context, writer *openai.SSEWriter, att
 	return err
 }
 
-func (s *Server) writeSSEEvent(ctx context.Context, writer *openai.SSEWriter, event string, v any, attrs ...any) error {
+func (s *Server) writeSSEEvent(ctx context.Context, writer *SSEWriter, event string, v any, attrs ...any) error {
 	if !s.debugEnabled(ctx) {
 		return writer.Event(event, v)
 	}

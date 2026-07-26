@@ -30,7 +30,7 @@ func TestWriteSSEDataContentGating(t *testing.T) {
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			s := &Server{cfg: config.Config{LogContent: tc.logContent}, log: logger}
-			writer, ok := openai.NewSSEWriter(httptest.NewRecorder())
+			writer, ok := NewSSEWriter(httptest.NewRecorder())
 			if !ok {
 				t.Fatal("NewSSEWriter returned not ok")
 			}
@@ -72,7 +72,7 @@ func TestWriteSSEDataSkipsLoggingWhenDebugOff(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	s := &Server{cfg: config.Config{}, log: logger}
 	rec := httptest.NewRecorder()
-	writer, ok := openai.NewSSEWriter(rec)
+	writer, ok := NewSSEWriter(rec)
 	if !ok {
 		t.Fatal("NewSSEWriter returned not ok")
 	}

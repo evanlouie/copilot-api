@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
 )
@@ -12,14 +13,14 @@ import (
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	var req openai.ResponsesRequest
 	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &req); err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 	gwReq, logFields, err := s.prepareResponseRequest(ctx, &req, openai.NewID("resp_"))
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	s.logGenerationStarted(r, "responses", req.Model, logFields.reasoningEffort, logFields.resolvedEffort, logFields.resolved, logFields.continuation)
@@ -29,7 +30,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.gw.CreateResponse(ctx, gwReq)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, filterResponseReasoning(res.Response, gwReq.SuppressReasoning))
@@ -168,12 +169,12 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	// Do not commit SSE headers until gateway preflight succeeds.
 	ch, err := s.gw.StreamResponse(ctx, req)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
-	writer, ok := openai.NewSSEWriter(w)
+	writer, ok := NewSSEWriter(w)
 	if !ok {
-		openai.WriteError(w, openai.Internal("streaming unsupported by ResponseWriter"))
+		WriteError(w, apierr.Internal("streaming unsupported by ResponseWriter"))
 		return
 	}
 	responseWriter := newResponseStreamEncoder(sseResponseEventWriter{server: s, ctx: ctx, writer: writer})
@@ -227,12 +228,12 @@ func streamedMessageItem(resp *openai.Response, id, text string, insertIndex int
 func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")
 	if id == "" || strings.Contains(id, "/") {
-		openai.WriteError(w, openai.NotFound("response not found", "not_found"))
+		WriteError(w, apierr.NotFound("response not found", "not_found"))
 		return
 	}
 	resp, err := s.gw.GetResponse(r.Context(), id)
 	if err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, filterResponseReasoning(resp, !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled()))
@@ -240,11 +241,11 @@ func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteResponse(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")
 	if id == "" || strings.Contains(id, "/") {
-		openai.WriteError(w, openai.NotFound("response not found", "not_found"))
+		WriteError(w, apierr.NotFound("response not found", "not_found"))
 		return
 	}
 	if err := s.gw.DeleteResponse(r.Context(), id); err != nil {
-		openai.WriteError(w, err)
+		WriteError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "object": "response.deleted", "deleted": true})

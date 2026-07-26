@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
@@ -38,7 +39,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if _, err := prepared.session.Send(ctx, copilot.MessageOptions{Prompt: prepared.prompt.Text, Attachments: prepared.prompt.Attachments}); err != nil {
 		runner.failSend(prepared.events, err)
 		_, _ = runner.waitInitial(ctx)
-		return nil, openai.Upstream(err.Error())
+		return nil, apierr.Upstream(err.Error())
 	}
 	turn, err := runner.waitInitial(ctx)
 	if err != nil {
@@ -55,7 +56,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 	record.LoadedToolEvents = req.LoadedToolEvents
 	if err := g.store.SaveResponse(record); err != nil {
-		return nil, openai.Internal("failed to persist response")
+		return nil, apierr.Internal("failed to persist response")
 	}
 	return &ResponseResult{Response: resp}, nil
 }
@@ -79,17 +80,17 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 			previousResponseID = batch.ResponseID
 		}
 		if batch.Kind != "response" {
-			return nil, openai.InvalidRequest("function_call_output call_id does not belong to a Responses pending batch", "input")
+			return nil, apierr.InvalidRequest("function_call_output call_id does not belong to a Responses pending batch", "input")
 		}
 		if err := validateContinuationModel(req.Model, batch, "model"); err != nil {
 			return nil, err
 		}
 		if batch.ResponseID != "" && previousResponseID != batch.ResponseID {
-			return nil, openai.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
+			return nil, apierr.InvalidRequest("function_call_output call_id does not belong to previous_response_id", "input")
 		}
 		previousRecord, err := g.store.LoadResponseForContinuation(previousResponseID)
 		if err != nil {
-			return nil, openai.PreviousResponseNotFound(previousResponseID)
+			return nil, apierr.PreviousResponseNotFound(previousResponseID)
 		}
 		installBoundary, err := validateResponseToolOutputsForBatch(batch, activeOutputs)
 		if err != nil {
@@ -104,7 +105,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		runner := g.runnerForBatch(batch.ID)
 		if runner == nil {
-			batch.Cancel(openai.InvalidRequest("pending function_call_output is not attached to a live streamable turn", "input"))
+			batch.Cancel(apierr.InvalidRequest("pending function_call_output is not attached to a live streamable turn", "input"))
 			g.broker.Remove(batch)
 			g.forgetRunner(batch.ID)
 			return g.streamToolResponseFromRecord(ctx, req)
@@ -134,13 +135,13 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 				record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
 				record.InstalledToolCatalog = catalogDTO
 				if err := g.store.SaveResponse(record); err != nil {
-					return openai.Internal("failed to persist response")
+					return apierr.Internal("failed to persist response")
 				}
 				return nil
 			})
 		}); err != nil {
 			close(ch)
-			return nil, openai.InvalidRequest(err.Error(), "input")
+			return nil, apierr.InvalidRequest(err.Error(), "input")
 		}
 		g.broker.Remove(batch)
 		g.forgetRunner(batch.ID)
@@ -170,7 +171,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 		record.LoadedToolEvents = req.LoadedToolEvents
 		if err := g.store.SaveResponse(record); err != nil {
-			return openai.Internal("failed to persist response")
+			return apierr.Internal("failed to persist response")
 		}
 		return nil
 	})
@@ -322,9 +323,9 @@ func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Respo
 	record, err := g.store.LoadResponse(id)
 	if err != nil {
 		if errors.Is(err, sessionstore.ErrNotFound) {
-			return nil, openai.NotFound("response not found", "not_found")
+			return nil, apierr.NotFound("response not found", "not_found")
 		}
-		return nil, openai.Internal("failed to load response")
+		return nil, apierr.Internal("failed to load response")
 	}
 	// `output` is required and non-nullable on the Responses wire, so a record
 	// that never produced items (a tombstone, or a v0 record) still has to
@@ -342,9 +343,9 @@ func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Respo
 func (g *RealGateway) DeleteResponse(ctx context.Context, id string) error {
 	if err := g.store.DeleteResponse(id); err != nil {
 		if errors.Is(err, sessionstore.ErrNotFound) {
-			return openai.NotFound("response not found", "not_found")
+			return apierr.NotFound("response not found", "not_found")
 		}
-		return openai.Internal("failed to delete response")
+		return apierr.Internal("failed to delete response")
 	}
 	return nil
 }

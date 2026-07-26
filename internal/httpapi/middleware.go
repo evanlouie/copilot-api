@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/observability"
-	"github.com/evanlouie/copilot-api/internal/openai"
 )
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
@@ -30,16 +30,16 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 	if err := dec.Decode(dst); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return openai.RequestTooLarge()
+			return apierr.RequestTooLarge()
 		}
-		return openai.InvalidRequest("invalid JSON request body: "+err.Error(), "body")
+		return apierr.InvalidRequest("invalid JSON request body: "+err.Error(), "body")
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return openai.RequestTooLarge()
+			return apierr.RequestTooLarge()
 		}
-		return openai.InvalidRequest("request body must contain a single JSON object", "body")
+		return apierr.InvalidRequest("request body must contain a single JSON object", "body")
 	}
 	return nil
 }
@@ -69,7 +69,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				observability.Logger(r.Context(), s.log).Warn("authentication failed", attrs...)
 			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="copilot-api"`)
-			openai.WriteError(w, openai.Unauthorized("invalid bearer token"))
+			WriteError(w, apierr.Unauthorized("invalid bearer token"))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -447,10 +447,10 @@ func recoverMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 // writePanicFailure reports a recovered panic using whatever the response state
 // still allows.
 func writePanicFailure(logger *slog.Logger, w http.ResponseWriter) {
-	failure := openai.Internal("internal server error")
+	failure := apierr.Internal("internal server error")
 	committed, ok := w.(committedResponseWriter)
 	if !ok || !committed.Committed() {
-		openai.WriteError(w, failure)
+		WriteError(w, failure)
 		return
 	}
 	// The status line is already on the wire: WriteError's header work would be a
@@ -462,15 +462,4 @@ func writePanicFailure(logger *slog.Logger, w http.ResponseWriter) {
 		return
 	}
 	fail(failure)
-}
-func asAPIError(err error) *openai.APIError {
-	var api *openai.APIError
-	if errors.As(err, &api) {
-		return api
-	}
-	return openai.Internal("internal server error")
-}
-func errorObject(err error) openai.ErrorObject {
-	api := asAPIError(err)
-	return openai.ErrorObject{Message: api.Message, Type: api.Type, Param: api.Param, Code: api.Code}
 }
