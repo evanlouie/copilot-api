@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/github/copilot-sdk/go v1.0.6
 	github.com/google/uuid v1.6.0
+	go.uber.org/goleak v1.3.0
 )
 
 require (

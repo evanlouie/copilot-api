@@ -12,7 +12,50 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
+	"go.uber.org/goleak"
 )
+
+// A client that vanishes without a close handshake - a dropped network, a
+// killed client, anything that produces a RST instead of a close frame - used
+// to leave the read loop spinning forever. wsjson.Read failed instantly with
+// net.ErrClosed on a connection coder/websocket had already closed, the loop
+// wrote an error frame that also failed, and then read again, at full speed,
+// for the life of the process. The handler never returned, so the connection's
+// warm session was never disconnected and its retention pins were never
+// released.
+//
+// goleak is the assertion because the goroutine was the symptom: nothing the
+// client can observe distinguishes a handler that exited from one that is
+// still spinning.
+func TestWebSocketReadLoopEndsWhenTheClientVanishesWithoutAClose(t *testing.T) {
+	ignore := goleak.IgnoreCurrent()
+	gateway := &websocketStreamGateway{text: "ok"}
+	hts := httptest.NewServer(New(config.Config{}, gateway, slog.Default()).Handler())
+	defer hts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hts.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Drive one full response first, so the handler is parked in the read loop
+	// with connection state to release rather than mid-handshake.
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if resp := readUntilResponseCompleted(t, ctx, conn); resp == nil || resp.Status != "completed" {
+		t.Fatalf("response = %#v, want completed", resp)
+	}
+	// CloseNow drops the TCP connection without sending a close frame, which is
+	// what a client that dies rather than disconnects looks like on the wire.
+	if err := conn.CloseNow(); err != nil {
+		t.Fatal(err)
+	}
+	// Close returns without waiting for hijacked connections, so the handler
+	// this test is about is still whatever it was: exited, or spinning.
+	hts.Close()
+	goleak.VerifyNone(t, ignore)
+}
 
 // blockedProducerGateway starts a producer that emits nothing and only returns
 // when its context is cancelled. It is the shape of a real in-flight Copilot
