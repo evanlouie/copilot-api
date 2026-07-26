@@ -130,7 +130,13 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 		return
 	}
 	created := openai.UnixNow()
+	// Headers are already committed, so every exit below this point is an HTTP
+	// 200 no matter how the turn ends. Default to "abandoned" and let the
+	// terminal paths overwrite it: the write-error returns scattered through the
+	// loop are exactly the client-went-away case, and they have no other tell.
+	defer markStreamAbandoned(r)
 	writeFailure := func(streamErr error) {
+		s.recordStreamOutcome(ctx, r, "chat.completions", streamOutcomeFailed, streamErr)
 		if s.writeSSEData(ctx, writer, "chat.error", openai.ErrorEnvelope{Error: errorObject(streamErr)}, "stream_kind", "chat", "chunk_kind", "error") == nil {
 			_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
 		}
@@ -203,6 +209,7 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 					return
 				}
 				_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
+				s.recordStreamOutcome(ctx, r, "chat.completions", streamOutcomeCompleted, nil)
 				return
 			case "error":
 				writeFailure(ev.Error)

@@ -106,6 +106,8 @@ type requestLogMetadata struct {
 	reasoningEffort         string
 	resolvedReasoningEffort string
 	continuation            bool
+	streamOutcome           string
+	streamError             string
 }
 
 type requestLogFields struct {
@@ -114,6 +116,8 @@ type requestLogFields struct {
 	ReasoningEffort         string
 	ResolvedReasoningEffort string
 	Continuation            bool
+	StreamOutcome           string
+	StreamError             string
 }
 
 type requestLogMetadataKey struct{}
@@ -182,6 +186,12 @@ func requestLoggingMiddleware(log *slog.Logger, logContent bool, next http.Handl
 		if fields.Continuation {
 			attrs = append(attrs, "continuation", true)
 		}
+		if fields.StreamOutcome != "" {
+			attrs = append(attrs, "stream_outcome", fields.StreamOutcome)
+		}
+		if fields.StreamError != "" {
+			attrs = append(attrs, "stream_error", fields.StreamError)
+		}
 		if ua := boundedUserAgent(r.UserAgent()); ua != "" {
 			attrs = append(attrs, "user_agent", ua)
 		}
@@ -203,6 +213,14 @@ func requestLoggingMiddleware(log *slog.Logger, logContent bool, next http.Handl
 		case recorder.status >= 500:
 			logger.Error("request completed", attrs...)
 		case recorder.status >= 400:
+			logger.Warn("request completed", attrs...)
+		// A stream that fails after its headers are committed is legitimately a
+		// 200: the status line is frozen and the failure is reported in-band. The
+		// severity of the access record is not frozen, though, and leaving it at
+		// info is what made an upstream failure storm look like healthy traffic.
+		case fields.StreamOutcome == streamOutcomeFailed:
+			logger.Error("request completed", attrs...)
+		case fields.StreamOutcome == streamOutcomeAbandoned:
 			logger.Warn("request completed", attrs...)
 		default:
 			logger.Info("request completed", attrs...)
@@ -287,6 +305,82 @@ func (m *requestLogMetadata) Fields() requestLogFields {
 		ReasoningEffort:         m.reasoningEffort,
 		ResolvedReasoningEffort: m.resolvedReasoningEffort,
 		Continuation:            m.continuation,
+		StreamOutcome:           m.streamOutcome,
+		StreamError:             m.streamError,
+	}
+}
+
+// How a committed stream ended. Once SSE headers are on the wire the HTTP
+// status is frozen at 200 and the failure has to be reported in-band, so this
+// is the only thing that distinguishes a healthy turn from an upstream failure
+// in the access log.
+const (
+	// streamOutcomeCompleted: the terminal frame was written.
+	streamOutcomeCompleted = "completed"
+	// streamOutcomeFailed: the turn failed and the failure was reported in-band.
+	streamOutcomeFailed = "failed"
+	// streamOutcomeAbandoned: writing stopped without a terminal frame, almost
+	// always because the client went away mid-stream.
+	streamOutcomeAbandoned = "abandoned"
+)
+
+func (m *requestLogMetadata) SetStreamOutcome(outcome string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.streamOutcome = outcome
+	if err != nil {
+		m.streamError = err.Error()
+	} else {
+		m.streamError = ""
+	}
+}
+
+func (m *requestLogMetadata) SetStreamOutcomeIfUnset(outcome string, err error) {
+	m.mu.Lock()
+	unset := m.streamOutcome == ""
+	m.mu.Unlock()
+	if unset {
+		m.SetStreamOutcome(outcome, err)
+	}
+}
+
+func requestLogMetadataFrom(r *http.Request) *requestLogMetadata {
+	meta, ok := r.Context().Value(requestLogMetadataKey{}).(*requestLogMetadata)
+	if !ok {
+		return nil
+	}
+	return meta
+}
+
+// recordStreamOutcome puts the terminal outcome of a committed stream on the
+// access line and emits a dedicated record for it. Severity follows the
+// outcome, not the (frozen) HTTP status.
+func (s *Server) recordStreamOutcome(ctx context.Context, r *http.Request, endpoint, outcome string, streamErr error) {
+	if meta := requestLogMetadataFrom(r); meta != nil {
+		meta.SetStreamOutcome(outcome, streamErr)
+	}
+	attrs := []any{"endpoint", endpoint, "stream_outcome", outcome}
+	if streamErr != nil {
+		attrs = append(attrs, "stream_error", streamErr.Error())
+	}
+	logger := observability.Logger(ctx, s.log)
+	switch outcome {
+	case streamOutcomeFailed:
+		logger.Error("stream ended", attrs...)
+	case streamOutcomeAbandoned:
+		logger.Warn("stream ended", attrs...)
+	default:
+		logger.Debug("stream ended", attrs...)
+	}
+}
+
+// markStreamAbandoned is the fallback for the write-error return paths, which
+// stop mid-stream without a terminal frame. It records nothing when an outcome
+// is already known and emits no record of its own: an access line that says
+// "abandoned" is the whole signal.
+func markStreamAbandoned(r *http.Request) {
+	if meta := requestLogMetadataFrom(r); meta != nil {
+		meta.SetStreamOutcomeIfUnset(streamOutcomeAbandoned, nil)
 	}
 }
 

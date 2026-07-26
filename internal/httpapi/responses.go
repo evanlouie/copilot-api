@@ -216,11 +216,23 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 	// Owning the encoder here keeps sequence numbers continuous if a panic
 	// forces the terminal response.failed frame below.
 	setStreamFailureWriter(w, func(failure error) {
+		s.recordStreamOutcome(ctx, r, "responses", streamOutcomeFailed, failure)
 		if writeResponseFailedEvent(responseWriter, req, failure, nil, "") == nil {
 			_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 		}
 	})
 	result := writeResponseStreamEvents(ctx, responseWriter, req, s.cfg.MaxTurnOutputBytes, s.suppressReasoning(), ch)
+	// The status line was committed before any of this could fail, so the access
+	// log's only way to tell an upstream failure storm from healthy traffic is
+	// the outcome recorded here.
+	switch {
+	case result.Err == nil:
+		s.recordStreamOutcome(ctx, r, "responses", streamOutcomeCompleted, nil)
+	case result.WriteFailed:
+		s.recordStreamOutcome(ctx, r, "responses", streamOutcomeAbandoned, result.Err)
+	default:
+		s.recordStreamOutcome(ctx, r, "responses", streamOutcomeFailed, result.Err)
+	}
 	if !result.WriteFailed {
 		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 	}
