@@ -566,7 +566,7 @@ func TestNewResponseUsageAlwaysEmitsRequiredMembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(b), `{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":12}`; got != want {
+	if got, want := string(b), `{"input_tokens":0,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":12}`; got != want {
 		t.Fatalf("usage JSON = %s, want %s", got, want)
 	}
 	if usage := NewResponseUsage(nil); usage != nil {

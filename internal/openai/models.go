@@ -63,10 +63,11 @@ type Model struct {
 // Producers must therefore decide all-or-nothing: emit nil, or emit an object
 // with every counter set. See copilotgw.usageFromSDK for the gate.
 type Usage struct {
-	PromptTokens            int64         `json:"prompt_tokens"`
-	CompletionTokens        int64         `json:"completion_tokens"`
-	TotalTokens             int64         `json:"total_tokens"`
-	CompletionTokensDetails *TokenDetails `json:"completion_tokens_details,omitempty"`
+	PromptTokens            int64               `json:"prompt_tokens"`
+	CompletionTokens        int64               `json:"completion_tokens"`
+	TotalTokens             int64               `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokenDetails `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *TokenDetails       `json:"completion_tokens_details,omitempty"`
 }
 
 // TokenDetails stays optional: unlike its Responses counterpart,
@@ -74,6 +75,20 @@ type Usage struct {
 // and reasoning tokens are genuinely absent for non-reasoning models.
 type TokenDetails struct {
 	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
+}
+
+// PromptTokenDetails is Chat's prompt_tokens_details. Only cached_tokens is
+// modelled: OpenAI also declares audio_tokens there, which this proxy has no
+// source for and therefore does not claim a value for.
+type PromptTokenDetails struct {
+	CachedTokens *int64 `json:"cached_tokens,omitempty"`
+
+	// CacheWriteTokens never reaches the Chat wire - Chat has no such member -
+	// but the Responses schema requires input_tokens_details.cache_write_tokens,
+	// and *Usage is the carrier every producer fills before either surface maps
+	// from it. Keeping it here rather than inventing a parallel usage type is
+	// the smaller lie; json:"-" is what makes it inert for Chat.
+	CacheWriteTokens *int64 `json:"-"`
 }
 
 // ResponseUsage is the Responses usage object. The Responses schema declares
@@ -89,7 +104,12 @@ type ResponseUsage struct {
 }
 
 type ResponseInputTokensDetails struct {
-	CachedTokens int64 `json:"cached_tokens"`
+	// Both members are required by the Responses schema - see
+	// openai-python's types/responses/response_usage.py, where InputTokensDetails
+	// declares cache_write_tokens and cached_tokens as plain ints - so both are
+	// always emitted.
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	CachedTokens     int64 `json:"cached_tokens"`
 }
 
 type ResponseOutputTokensDetails struct {
@@ -104,14 +124,36 @@ func NewResponseUsage(usage *Usage) *ResponseUsage {
 		return nil
 	}
 	out := &ResponseUsage{InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens}
-	if out.TotalTokens == 0 {
-		// A zero total next to non-zero counters means the source never carried
-		// one, not that the turn consumed nothing; derive it rather than ship a
-		// total that contradicts its own addends.
-		out.TotalTokens = out.InputTokens + out.OutputTokens
-	}
 	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens != nil {
 		out.OutputTokensDetails.ReasoningTokens = *usage.CompletionTokensDetails.ReasoningTokens
 	}
+	if d := usage.PromptTokensDetails; d != nil {
+		if d.CachedTokens != nil {
+			out.InputTokensDetails.CachedTokens = *d.CachedTokens
+		}
+		if d.CacheWriteTokens != nil {
+			out.InputTokensDetails.CacheWriteTokens = *d.CacheWriteTokens
+		}
+	}
+	out.Normalize()
 	return out
+}
+
+// Normalize repairs a usage object whose total contradicts its own addends.
+//
+// It exists for records read back from disk. Producers derive the total, but a
+// record written by an older build - when the counters were pointers with
+// omitempty - decodes its absent fields as 0, so a stored
+// {"input_tokens":11} comes back as input_tokens 11 next to total_tokens 0.
+// That is not "unreported", it is arithmetically false, and it is exactly the
+// null-arithmetic class of breakage the required-integer contract exists to
+// prevent. A zero total beside a non-zero counter can only mean the source
+// never carried one.
+func (u *ResponseUsage) Normalize() {
+	if u == nil {
+		return
+	}
+	if u.TotalTokens == 0 {
+		u.TotalTokens = u.InputTokens + u.OutputTokens
+	}
 }

@@ -1128,6 +1128,15 @@ func usageFromSDK(d *copilot.AssistantUsageData) *openai.Usage {
 		v := *d.ReasoningTokens
 		usage.CompletionTokensDetails = &openai.TokenDetails{ReasoningTokens: &v}
 	}
+	// Prompt-cache accounting. The SDK reports both halves and this proxy used
+	// to drop them, which mattered once the counters stopped being optional:
+	// input_tokens_details is now always on the wire, so omitting the source
+	// turned "unknown" into a positive claim of zero cache reuse on every turn.
+	// Clients act on it - Codex maps cached_tokens straight into its cost
+	// display - so a hardcoded 0 is a wrong number, not a missing one.
+	if d.CacheReadTokens != nil || d.CacheWriteTokens != nil {
+		usage.PromptTokensDetails = &openai.PromptTokenDetails{CachedTokens: d.CacheReadTokens, CacheWriteTokens: d.CacheWriteTokens}
+	}
 	return usage
 }
 

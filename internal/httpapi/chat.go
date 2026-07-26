@@ -261,7 +261,15 @@ func (s *Server) writeChatTerminalWithID(ctx context.Context, writer *SSEWriter,
 	if err := s.writeSSEData(ctx, writer, "chat.finish", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{}, FinishReason: &finish}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "finish", "finish_reason", finish); err != nil {
 		return err
 	}
-	if includeUsage {
+	// The terminal usage chunk exists only to carry usage: every other chunk
+	// under stream_options.include_usage renders "usage": null by design, and
+	// this is the one that is supposed to be populated. Emitting it with a null
+	// payload would hand the client the exact null-arithmetic footgun that
+	// making the counters required integers was meant to close, so when the
+	// upstream reported no usage at all this chunk is omitted instead. The
+	// preceding finish chunk already carried finish_reason, and [DONE] still
+	// terminates the stream.
+	if includeUsage && turn.Usage != nil {
 		if err := s.writeSSEData(ctx, writer, "chat.usage", openai.ChatCompletionChunk{ID: id, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{}, Usage: turn.Usage, IncludeUsage: true}, "stream_kind", "chat", "chunk_kind", "usage"); err != nil {
 			return err
 		}

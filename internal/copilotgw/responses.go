@@ -336,6 +336,11 @@ func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Respo
 		}
 		return nil, apierr.Internal("failed to load response")
 	}
+	// A record written before the counters became required integers stored them
+	// as pointers with omitempty, so its absent fields decode as 0 and a stored
+	// {"input_tokens":11} reads back as 11 input tokens against a 0 total. Repair
+	// that on the way out rather than serving arithmetic that contradicts itself.
+	record.Usage.Normalize()
 	// `output` is required and non-nullable on the Responses wire, so a record
 	// that never produced items (a tombstone, or a v0 record) still has to
 	// serialize as `[]` rather than `null`.
