@@ -35,6 +35,9 @@ type RealGateway struct {
 	modelsFetcher func(context.Context) ([]Model, error)
 	pending       *pendingRunnerRegistry
 	active        *activeRunnerRegistry
+	// warm tracks warm Responses sessions, which own a live SDK session and
+	// retention pins but have no runner for active to see.
+	warm *warmSessionRegistry
 }
 
 func NewReal(cfg config.Config, store *sessionstore.Store, log *slog.Logger) *RealGateway {
@@ -43,7 +46,7 @@ func NewReal(cfg config.Config, store *sessionstore.Store, log *slog.Logger) *Re
 	}
 	fs := sessionfs.NewManager(cfg.DataDir)
 	opts := newRealClientOptions(cfg)
-	return &RealGateway{cfg: cfg, log: log, client: copilot.NewClient(opts), fs: fs, store: store, broker: toolproxy.NewBroker(cfg.ToolCallTTL), modelCache: newModelCache(cfg.ModelsCacheTTL), pending: newPendingRunnerRegistry(), active: newActiveRunnerRegistry()}
+	return &RealGateway{cfg: cfg, log: log, client: copilot.NewClient(opts), fs: fs, store: store, broker: toolproxy.NewBroker(cfg.ToolCallTTL), modelCache: newModelCache(cfg.ModelsCacheTTL), pending: newPendingRunnerRegistry(), active: newActiveRunnerRegistry(), warm: newWarmSessionRegistry()}
 }
 func newRealClientOptions(cfg config.Config) *copilot.ClientOptions {
 	return &copilot.ClientOptions{
@@ -80,9 +83,28 @@ func (g *RealGateway) Start(ctx context.Context) error {
 	}
 	return nil
 }
+
+// trackWarmSession hands a warm Responses session to the gateway's shutdown
+// accounting and reports whether the gateway accepted ownership. A false result
+// means Stop has already snapshotted the registry, so the caller must tear the
+// session down itself instead of handing it to a client.
+func (g *RealGateway) trackWarmSession(w *WarmResponseSession) bool {
+	if g == nil || w == nil {
+		return false
+	}
+	w.attachRegistry(g.warm)
+	return g.warm.add(w)
+}
+
 func (g *RealGateway) Stop() error {
 	active := g.active.closeAndSnapshot()
 	pending := g.pending.drain()
+	// Warm sessions have no runner to abort and await; disconnecting each one
+	// releases its retention pins and drops its SDK session before the client is
+	// stopped below.
+	for _, warm := range g.warm.closeAndSnapshot() {
+		warm.Disconnect()
+	}
 	runners := make([]*turnRunner, 0, len(active)+len(pending))
 	seen := map[*turnRunner]struct{}{}
 	for _, runner := range append(active, pending...) {

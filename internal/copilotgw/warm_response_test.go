@@ -2,12 +2,140 @@ package copilotgw
 
 import (
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	copilot "github.com/github/copilot-sdk/go"
 )
+
+// TestStopDisconnectsWarmSessions is the regression for a warm session escaping
+// gateway shutdown accounting. A WarmResponseSession owns a live SDK session and
+// retention pins but has no turnRunner, so before the gateway tracked it Stop
+// walked only the runner registries and left the SDK session connected with its
+// pins still held.
+func TestStopDisconnectsWarmSessions(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
+	var releases atomic.Int32
+	warm := &WarmResponseSession{
+		responseID:  "resp_warm",
+		sessionID:   "resp_sdk_warm",
+		model:       "gpt-5",
+		pinReleases: []func(){func() { releases.Add(1) }},
+	}
+	if !gw.trackWarmSession(warm) {
+		t.Fatal("gateway refused to track a warm session before Stop")
+	}
+
+	if err := gw.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !warm.isDisconnected() {
+		t.Fatal("Stop left the warm SDK session connected")
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("warm retention pin releases = %d, want exactly 1 by the end of Stop", got)
+	}
+}
+
+// TestTrackWarmSessionAfterStopIsRejected covers the register-after-close race:
+// once Stop has taken its snapshot nothing will ever drain the registry again,
+// so registration must fail loudly rather than accept a session that would never
+// be cleaned up.
+func TestTrackWarmSessionAfterStopIsRejected(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
+	if err := gw.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	var releases atomic.Int32
+	warm := &WarmResponseSession{responseID: "resp_late", pinReleases: []func(){func() { releases.Add(1) }}}
+	if gw.trackWarmSession(warm) {
+		t.Fatal("a warm session registered after Stop; nothing would ever tear it down")
+	}
+	// Registration was rejected, so the caller still owns the teardown.
+	warm.Disconnect()
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("caller teardown released %d pins, want 1", got)
+	}
+}
+
+// TestWarmSessionUseDeregistersFromGatewayShutdown pins the ownership handoff:
+// use transfers the SDK session to a turnRunner, which the active registry
+// already accounts for, so Stop must not disconnect it a second time.
+func TestWarmSessionUseDeregistersFromGatewayShutdown(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
+	var releases atomic.Int32
+	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", pinReleases: []func(){func() { releases.Add(1) }}}
+	if !gw.trackWarmSession(warm) {
+		t.Fatal("gateway refused to track a warm session")
+	}
+	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm"}
+	used, ok := warm.use(&req)
+	if !ok {
+		t.Fatal("warm session was not used")
+	}
+	if len(used.pinReleases) != 1 {
+		t.Fatalf("use transferred %d pin releases, want 1", len(used.pinReleases))
+	}
+	if gw.warm.tracked(warm) {
+		t.Fatal("use left the warm session registered for gateway shutdown")
+	}
+	if err := gw.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if got := releases.Load(); got != 0 {
+		t.Fatalf("Stop released %d pins the turn now owns, want 0", got)
+	}
+}
+
+// TestWarmSessionDisconnectIsIdempotentUnderConcurrentStop interleaves a client
+// disconnect with gateway shutdown, which is the exact race the disconnected
+// flag exists to make safe: pins must be released exactly once.
+func TestWarmSessionDisconnectIsIdempotentUnderConcurrentStop(t *testing.T) {
+	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
+	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
+	var releases atomic.Int32
+	warm := &WarmResponseSession{responseID: "resp_warm", pinReleases: []func(){func() { releases.Add(1) }}}
+	if !gw.trackWarmSession(warm) {
+		t.Fatal("gateway refused to track a warm session")
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		warm.Disconnect()
+	}()
+	var stopErr error
+	go func() {
+		defer wg.Done()
+		<-start
+		stopErr = gw.Stop()
+	}()
+	close(start)
+	wg.Wait()
+
+	if stopErr != nil {
+		t.Fatal(stopErr)
+	}
+	if !warm.isDisconnected() {
+		t.Fatal("warm session survived a concurrent client disconnect and gateway stop")
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("warm retention pin releases = %d, want exactly 1", got)
+	}
+}
 
 func TestWarmResponseSessionUseInheritsWarmRequestState(t *testing.T) {
 	warm := &WarmResponseSession{

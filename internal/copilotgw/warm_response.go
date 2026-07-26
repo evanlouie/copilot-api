@@ -32,6 +32,31 @@ type WarmResponseSession struct {
 	rt              *toolproxy.RequestTools
 	events          *sessionEventSink
 	disconnected    bool
+	// registry is the gateway registry that owns this session's shutdown. Both
+	// paths that hand ownership away - Disconnect and use - deregister from it, so
+	// gateway Stop never sees a session it no longer owns.
+	registry *warmSessionRegistry
+}
+
+// attachRegistry records which gateway registry owns this session's shutdown.
+func (w *WarmResponseSession) attachRegistry(registry *warmSessionRegistry) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.registry = registry
+	w.mu.Unlock()
+}
+
+// isDisconnected reports whether this session's SDK session and retention pins
+// have already been handed away or torn down.
+func (w *WarmResponseSession) isDisconnected() bool {
+	if w == nil {
+		return true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.disconnected
 }
 
 func (w *WarmResponseSession) ResponseID() string {
@@ -43,6 +68,10 @@ func (w *WarmResponseSession) ResponseID() string {
 	return w.responseID
 }
 
+// Disconnect tears the warm session down: it releases the retention pins the
+// session owns and drops its SDK session. It is idempotent, which is what makes
+// a client disconnect racing gateway shutdown safe - whichever wins flips
+// disconnected under the mutex and the loser returns without touching anything.
 func (w *WarmResponseSession) Disconnect() {
 	if w == nil {
 		return
@@ -55,9 +84,14 @@ func (w *WarmResponseSession) Disconnect() {
 	w.disconnected = true
 	session := w.session
 	pinReleases := w.pinReleases
+	registry := w.registry
 	w.imageBudget = nil
 	w.pinReleases = nil
+	w.registry = nil
 	w.mu.Unlock()
+	// Ownership ends here, so the gateway must stop counting this session before
+	// anything else. remove is a no-op when Stop already snapshotted it.
+	registry.remove(w)
 	releaseAll(pinReleases)
 	if session != nil {
 		_ = session.Disconnect()
@@ -110,9 +144,16 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (warmResponseUse, bool) 
 		previous: &w.responseID, prompt: w.input, imageBudget: w.imageBudget,
 		pinReleases: w.pinReleases,
 	}
+	registry := w.registry
 	w.imageBudget = nil
 	w.pinReleases = nil
+	w.registry = nil
+	// The SDK session, its pins and its events now belong to the caller's turn
+	// runner, which activeRunnerRegistry accounts for. Marking the session
+	// disconnected keeps a racing gateway Stop from disconnecting it a second
+	// time; deregistering keeps Stop from seeing it at all.
 	w.disconnected = true
+	registry.remove(w)
 	return used, true
 }
 
@@ -244,6 +285,14 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		return nil, apierr.Internal("failed to persist response")
 	}
 	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: prompt, imageBudget: imageBudget, pinReleases: pinReleases, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	// The session now owns the pins, so the deferred release must not fire; from
+	// here on teardown goes through warm.Disconnect.
 	keepPins = true
+	if !g.trackWarmSession(warm) {
+		// Stop already snapshotted the registry, so nothing would ever drain this
+		// session. Tear it down here instead of handing a leak to the client.
+		warm.Disconnect()
+		return nil, apierr.Upstream("gateway is shutting down")
+	}
 	return &WarmResponseResult{Response: resp, WarmSession: warm}, nil
 }
