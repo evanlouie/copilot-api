@@ -49,27 +49,90 @@ func (w *webSocketJSONWriter) writeContext() (context.Context, context.CancelFun
 	return context.WithTimeout(parent, webSocketWriteTimeout)
 }
 
-func (w *webSocketJSONWriter) write(v any) error {
+func (w *webSocketJSONWriter) write(v any) error { return w.writeReleasing(v, nil) }
+
+// releaseThenWrite is the ordering every frame writer here shares: hand a
+// connection-level slot back under the write mutex, then put the frame on the
+// wire. Releasing there rather than after the write lets a caller free the slot
+// at the exact moment the client can first observe the frame, while a frame that
+// depends on the released slot still cannot overtake this one.
+func (w *webSocketJSONWriter) releaseThenWrite(release func(), write func(context.Context) error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if release != nil {
+		release()
+	}
 	ctx, cancel := w.writeContext()
 	defer cancel()
-	return wsjson.Write(ctx, w.conn, v)
+	return write(ctx)
+}
+
+func (w *webSocketJSONWriter) writeReleasing(v any, release func()) error {
+	return w.releaseThenWrite(release, func(ctx context.Context) error {
+		return wsjson.Write(ctx, w.conn, v)
+	})
 }
 
 // writePayload writes already-encoded JSON, which is what wsjson.Write does
 // after marshaling. Encoding above the transport lets the WebSocket share the
 // SSE stream's event logging.
 func (w *webSocketJSONWriter) writePayload(payload []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	ctx, cancel := w.writeContext()
-	defer cancel()
-	return w.conn.Write(ctx, websocket.MessageText, payload)
+	return w.writePayloadReleasing(payload, nil)
+}
+
+func (w *webSocketJSONWriter) writePayloadReleasing(payload []byte, release func()) error {
+	return w.releaseThenWrite(release, func(ctx context.Context) error {
+		return w.conn.Write(ctx, websocket.MessageText, payload)
+	})
+}
+
+// framePayloadWriter is the part of the connection writer a response's event
+// transport needs: put one encoded frame on the wire, optionally handing a slot
+// back under the same lock that orders frames.
+type framePayloadWriter interface {
+	name() string
+	writePayload(payload []byte) error
+	writePayloadReleasing(payload []byte, release func()) error
+}
+
+// responseSlotTransport writes one response's events and frees the connection's
+// single response slot as part of putting that response's terminal frame on the
+// wire.
+//
+// The slot has to be free no later than the moment the client can observe the
+// terminal event, because sending the next response.create the instant
+// response.completed arrives is the obvious and correct client behaviour.
+// Releasing it from the handler goroutine's deferred finish - after the frame is
+// already on the wire - answers that client with "only one response.create may
+// be active per WebSocket connection", which is a spurious error rather than a
+// flaky test.
+//
+// The release runs under the writer's mutex, so the next response's frames still
+// cannot overtake this one even if that client raced ahead.
+type responseSlotTransport struct {
+	writer  framePayloadWriter
+	release func()
+}
+
+func (t *responseSlotTransport) name() string { return t.writer.name() }
+
+func (t *responseSlotTransport) writeResponseEventPayload(ev openai.ResponseStreamEvent, payload []byte) error {
+	if isTerminalResponseEventType(ev.Type) {
+		return t.writer.writePayloadReleasing(payload, t.release)
+	}
+	return t.writer.writePayload(payload)
 }
 
 func (w *webSocketJSONWriter) writeError(err error, eventID string) error {
 	return w.write(NewWebSocketErrorEvent(err, eventID))
+}
+
+// writeErrorReleasing ends a response with an error envelope and frees the
+// connection's response slot in the same place responseSlotTransport frees it
+// for a terminal event: an error is just as final, and a client is just as
+// entitled to retry the instant it sees one.
+func (w *webSocketJSONWriter) writeErrorReleasing(err error, eventID string, release func()) error {
+	return w.writeReleasing(NewWebSocketErrorEvent(err, eventID), release)
 }
 
 type responsesWebSocketState struct {
@@ -120,11 +183,20 @@ func (s *responsesWebSocketState) tryStart() bool {
 	return true
 }
 
-func (s *responsesWebSocketState) finish() {
+// endActive frees the connection's single response slot. It is idempotent and
+// deliberately separate from finish: the slot has to be free by the time the
+// client can observe the response's terminal frame, whereas the wait group must
+// stay held until the handler goroutine has actually returned and can no longer
+// install anything into the state.
+func (s *responsesWebSocketState) endActive() {
 	s.mu.Lock()
 	s.active = false
 	s.lastSeen = time.Now()
 	s.mu.Unlock()
+}
+
+func (s *responsesWebSocketState) finish() {
+	s.endActive()
 	s.wg.Done()
 }
 
@@ -445,9 +517,16 @@ func keepResponsesWebSocketAlive(ctx, writeCtx context.Context, conn *websocket.
 }
 
 func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.Request, writer *webSocketJSONWriter, state *responsesWebSocketState, closeWith func(websocket.StatusCode, string), fields map[string]json.RawMessage) {
+	// Every way this response can end - a terminal event, an error envelope, or
+	// the deferred finish for the paths that write neither - frees the
+	// connection's response slot no later than the frame that tells the client the
+	// response is over.
+	fail := func(err error, eventID string) {
+		_ = writer.writeErrorReleasing(err, eventID, state.endActive)
+	}
 	req, eventID, generate, err := decodeWebSocketResponseCreateFields(fields)
 	if err != nil {
-		_ = writer.writeError(err, eventID)
+		fail(err, eventID)
 		return
 	}
 	if !generate && (len(req.Input) == 0 || string(req.Input) == "null") {
@@ -455,9 +534,10 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 	}
 	ctx, cancel := requestContext(parent, s.cfg.RequestTimeout)
 	defer cancel()
+	events := newLoggedResponseEventWriter(s, ctx, &responseSlotTransport{writer: writer, release: state.endActive})
 	gwReq, logFields, err := s.prepareResponseRequest(ctx, &req, openai.NewID("resp_"))
 	if err != nil {
-		_ = writer.writeError(err, eventID)
+		fail(err, eventID)
 		return
 	}
 	if !generate {
@@ -465,17 +545,26 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 		s.logGenerationStarted(r, "responses.websocket", req.Model, logFields.reasoningEffort, logFields.resolvedEffort, logFields.resolved, logFields.continuation)
 		res, err := s.gw.WarmResponse(ctx, gwReq)
 		if err != nil {
-			_ = writer.writeError(err, eventID)
 			state.evict(gwReq.PreviousResponseID)
+			fail(err, eventID)
 			return
 		}
-		if err := writeWarmResponseEvents(newLoggedResponseEventWriter(s, ctx, writer), res.Response); err != nil {
-			closeWith(websocket.StatusGoingAway, "response stream closed")
-			res.WarmSession.Disconnect()
-			return
-		}
+		// Install before the terminal frame, not after it. Writing that frame is
+		// what frees the response slot, so the next response.create - which a
+		// client is entitled to send the instant it sees response.completed - has
+		// to find this warm session already in place or it would resume the SDK
+		// session the slow way and strand this one.
 		state.remember(res.Response)
 		state.replaceWarm(res.WarmSession)
+		if err := writeWarmResponseEvents(events, res.Response); err != nil {
+			closeWith(websocket.StatusGoingAway, "response stream closed")
+			// Tear down what is still ours. If the terminal frame is the one that
+			// failed, the slot is already free and the next response.create may have
+			// taken this session; then replaceWarm finds nothing and disconnects
+			// nothing, which is right - it belongs to that request now.
+			state.replaceWarm(nil)
+			return
+		}
 		return
 	}
 	gwReq.WarmSession = state.takeWarm(gwReq.PreviousResponseID)
@@ -485,11 +574,11 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 		if gwReq.WarmSession != nil {
 			gwReq.WarmSession.Disconnect()
 		}
-		_ = writer.writeError(err, eventID)
 		state.evict(gwReq.PreviousResponseID)
+		fail(err, eventID)
 		return
 	}
-	result := writeResponseStreamEvents(ctx, newLoggedResponseEventWriter(s, ctx, writer), gwReq, s.cfg.MaxTurnOutputBytes, s.suppressReasoning(), ch)
+	result := writeResponseStreamEvents(ctx, events, gwReq, s.cfg.MaxTurnOutputBytes, s.suppressReasoning(), ch)
 	if result.Err != nil {
 		state.evict(gwReq.PreviousResponseID)
 		if result.WriteFailed {
@@ -498,7 +587,7 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 			return
 		}
 		if !result.FailureWritten {
-			_ = writer.writeError(result.Err, eventID)
+			fail(result.Err, eventID)
 		}
 		return
 	}

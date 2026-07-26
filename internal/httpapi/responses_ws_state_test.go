@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"testing"
 
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
+	"github.com/evanlouie/copilot-api/internal/openai"
 )
 
 // A response.create that finishes while the connection is being torn down can
@@ -82,4 +84,107 @@ func TestWebSocketStateStoresAndReplacesWarmSessionsWhileOpen(t *testing.T) {
 	if !second.Disconnected() {
 		t.Fatal("close left the stored warm session connected")
 	}
+}
+
+// slotProbeWriter is the connection writer as far as responseSlotTransport can
+// tell, and records for every frame whether the connection's response slot was
+// already free at the moment that frame went out. That is the only thing the
+// protocol actually requires: a client sends its next response.create the
+// instant it reads response.completed, so the slot must be free no later than
+// the frame it reads.
+type slotProbeWriter struct {
+	state  *responsesWebSocketState
+	frames []slotProbeFrame
+}
+
+type slotProbeFrame struct {
+	payload  string
+	slotFree bool
+}
+
+func (w *slotProbeWriter) name() string { return "probe" }
+
+func (w *slotProbeWriter) writePayload(payload []byte) error {
+	w.record(payload)
+	return nil
+}
+
+func (w *slotProbeWriter) writePayloadReleasing(payload []byte, release func()) error {
+	if release != nil {
+		release()
+	}
+	w.record(payload)
+	return nil
+}
+
+func (w *slotProbeWriter) record(payload []byte) {
+	w.state.mu.Lock()
+	free := !w.state.active
+	w.state.mu.Unlock()
+	w.frames = append(w.frames, slotProbeFrame{payload: string(payload), slotFree: free})
+}
+
+// state.finish() is deferred, so it runs after the terminal frame is already on
+// the wire. A client that sends the next response.create the moment it sees
+// response.completed - the obvious, correct behaviour - was therefore answered
+// with "only one response.create may be active per WebSocket connection".
+// Freeing the slot as part of writing the terminal frame closes that window.
+func TestWebSocketResponseSlotIsFreeByTheTerminalFrame(t *testing.T) {
+	t.Parallel()
+	for _, terminal := range []string{"response.completed", "response.failed", "response.incomplete"} {
+		t.Run(terminal, func(t *testing.T) {
+			t.Parallel()
+			state := &responsesWebSocketState{}
+			if !state.tryStart() {
+				t.Fatal("tryStart refused the first response.create")
+			}
+			probe := &slotProbeWriter{state: state}
+			transport := &responseSlotTransport{writer: probe, release: state.endActive}
+
+			for _, eventType := range []string{"response.created", "response.in_progress", terminal} {
+				if err := transport.writeResponseEventPayload(openai.ResponseStreamEvent{Type: eventType}, []byte(eventType)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if len(probe.frames) != 3 {
+				t.Fatalf("frames = %#v, want three", probe.frames)
+			}
+			for _, frame := range probe.frames[:2] {
+				if frame.slotFree {
+					t.Fatalf("the slot was already free while %s was being written; a second response.create would have been accepted mid-response", frame.payload)
+				}
+			}
+			if !probe.frames[2].slotFree {
+				t.Fatalf("the slot was still held while %s was being written; a client that replies to it immediately gets a spurious rejection", probe.frames[2].payload)
+			}
+			state.finish()
+		})
+	}
+}
+
+// An error envelope ends a response just as finally as a terminal event, so the
+// slot has to be free before that frame goes out too. Both writers share this
+// ordering helper.
+func TestWebSocketWriterReleasesBeforeTheFrameGoesOut(t *testing.T) {
+	t.Parallel()
+	state := &responsesWebSocketState{}
+	if !state.tryStart() {
+		t.Fatal("tryStart refused the first response.create")
+	}
+	writer := &webSocketJSONWriter{}
+	slotFreeAtWrite := false
+	err := writer.releaseThenWrite(state.endActive, func(context.Context) error {
+		state.mu.Lock()
+		slotFreeAtWrite = !state.active
+		state.mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slotFreeAtWrite {
+		t.Fatal("the frame was written while the slot was still held; a client replying to it immediately gets a spurious rejection")
+	}
+	state.finish()
 }

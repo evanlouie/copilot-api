@@ -65,9 +65,20 @@ type foldingResponseEventWriter struct {
 	response *openai.Response
 }
 
-func (w *foldingResponseEventWriter) WriteResponseEvent(ev openai.ResponseStreamEvent) error {
-	switch ev.Type {
+// isTerminalResponseEventType reports whether an event ends a response's stream.
+// Every transport needs the same answer: the non-streaming body folds to the
+// response such an event carries, and the WebSocket frees its response slot as
+// it writes one.
+func isTerminalResponseEventType(eventType string) bool {
+	switch eventType {
 	case "response.completed", "response.failed", "response.incomplete":
+		return true
+	}
+	return false
+}
+
+func (w *foldingResponseEventWriter) WriteResponseEvent(ev openai.ResponseStreamEvent) error {
+	if isTerminalResponseEventType(ev.Type) {
 		w.response = ev.Response
 	}
 	return nil
