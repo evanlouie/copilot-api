@@ -68,6 +68,9 @@ func (b *Broker) Register(batch *Batch) {
 	if !batch.isOpen() {
 		return
 	}
+	// Snapshot before taking b.mu: the batch's call map is guarded by batch.mu,
+	// which SDK tool handlers write to concurrently with expiry-driven removal.
+	ids := batch.callIDs()
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -76,7 +79,7 @@ func (b *Broker) Register(batch *Batch) {
 	}
 	defer b.mu.Unlock()
 	b.batches[batch.ID] = batch
-	for id := range batch.Calls {
+	for _, id := range ids {
 		b.byCall[id] = batch
 	}
 }
@@ -140,11 +143,17 @@ func (b *Broker) findByCallIDs(ids []string, requireAll bool) (*Batch, []string,
 }
 
 func (b *Broker) Remove(batch *Batch) {
+	ids := batch.callIDs()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.batches, batch.ID)
-	for id := range batch.Calls {
-		delete(b.byCall, id)
+	for _, id := range ids {
+		// Only drop lookup entries this batch still owns. A later batch may have
+		// re-registered the same id, and orphaning its entry would strand a live
+		// batch that continuations can no longer find.
+		if b.byCall[id] == batch {
+			delete(b.byCall, id)
+		}
 	}
 }
 
@@ -521,7 +530,7 @@ type Batch struct {
 	ResponseID  string
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
-	Calls       map[string]*Call
+	calls       map[string]*Call
 	Done        <-chan TurnFinalResult
 	abort       func()
 	ctx         context.Context
@@ -539,13 +548,30 @@ func newBatch(ttl time.Duration, responseID string, kind string, model string, d
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, Model: model, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), Calls: map[string]*Call{}, Done: done, abort: abort, ctx: ctx, cancel: cancel}
+	return &Batch{ID: "batch_" + uuid.NewString(), Kind: kind, Model: model, ResponseID: responseID, CreatedAt: now, ExpiresAt: now.Add(ttl), calls: map[string]*Call{}, Done: done, abort: abort, ctx: ctx, cancel: cancel}
 }
 
 func (b *Batch) isOpen() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return !b.expired && !b.completed
+}
+
+// callIDs snapshots the batch's call ids under batch.mu. The call map is only
+// ever safe to read while that mutex is held, and SDK tool handlers keep adding
+// to it until the batch closes, so every caller outside this file's locked
+// sections must iterate a snapshot instead of the live map.
+//
+// Callers must not already hold Broker.mu: findByCallIDs takes batch.mu while
+// holding the broker mutex, so the broker mutex always precedes batch.mu.
+func (b *Batch) callIDs() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ids := make([]string, 0, len(b.calls))
+	for id := range b.calls {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func (b *Batch) Context() context.Context {
@@ -607,7 +633,7 @@ func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.Raw
 	if meta.ResponseKind == "" {
 		meta.ResponseKind = openai.ToolKindFunction
 	}
-	if call, ok := b.Calls[openaiID]; ok {
+	if call, ok := b.calls[openaiID]; ok {
 		if len(call.ArgumentsJSON) == 0 && len(args) > 0 {
 			call.ArgumentsJSON = append(call.ArgumentsJSON[:0], args...)
 		}
@@ -620,7 +646,7 @@ func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.Raw
 	if call.Execution == "" && call.Kind == openai.ToolKindToolSearch {
 		call.Execution = "client"
 	}
-	b.Calls[openaiID] = call
+	b.calls[openaiID] = call
 	return call
 }
 
@@ -651,8 +677,8 @@ func (b *Batch) closeBatch(err error, runAbort bool) {
 	if b.timer != nil {
 		b.timer.Stop()
 	}
-	calls := make([]*Call, 0, len(b.Calls))
-	for _, call := range b.Calls {
+	calls := make([]*Call, 0, len(b.calls))
+	for _, call := range b.calls {
 		calls = append(calls, call)
 	}
 	abort := b.abort
@@ -714,13 +740,13 @@ func (b *Batch) CompleteToolOutputsWithSetup(outputs map[string]openai.ResponseT
 		b.mu.Unlock()
 		return fmt.Errorf("pending tool-call batch is already completed")
 	}
-	if len(outputs) != len(b.Calls) {
+	if len(outputs) != len(b.calls) {
 		b.mu.Unlock()
-		return fmt.Errorf("expected exactly one output for each of %d pending tool calls", len(b.Calls))
+		return fmt.Errorf("expected exactly one output for each of %d pending tool calls", len(b.calls))
 	}
-	calls := make([]*Call, 0, len(b.Calls))
+	calls := make([]*Call, 0, len(b.calls))
 	for id, output := range outputs {
-		call := b.Calls[id]
+		call := b.calls[id]
 		if call == nil {
 			b.mu.Unlock()
 			return fmt.Errorf("unknown tool_call_id %q", id)
@@ -753,8 +779,8 @@ func (b *Batch) CompleteToolOutputsWithSetup(outputs map[string]openai.ResponseT
 func (b *Batch) ToolCalls() []openai.ChatToolCall {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make([]openai.ChatToolCall, 0, len(b.Calls))
-	for _, call := range b.Calls {
+	out := make([]openai.ChatToolCall, 0, len(b.calls))
+	for _, call := range b.calls {
 		out = append(out, call.ChatToolCall())
 	}
 	return out
@@ -763,8 +789,8 @@ func (b *Batch) ToolCalls() []openai.ChatToolCall {
 func (b *Batch) CapturedCalls() []CapturedCall {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make([]CapturedCall, 0, len(b.Calls))
-	for _, call := range b.Calls {
+	out := make([]CapturedCall, 0, len(b.calls))
+	for _, call := range b.calls {
 		out = append(out, call.Captured())
 	}
 	return out
@@ -773,7 +799,7 @@ func (b *Batch) CapturedCalls() []CapturedCall {
 func (b *Batch) CapturedCall(callID string) (CapturedCall, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	call := b.Calls[callID]
+	call := b.calls[callID]
 	if call == nil {
 		return CapturedCall{}, false
 	}

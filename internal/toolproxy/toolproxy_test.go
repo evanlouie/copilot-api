@@ -86,7 +86,11 @@ func TestCaptureRequestsUsesPublicToolName(t *testing.T) {
 	if got := calls[0].ResponseName; got != "get-weather" {
 		t.Fatalf("tool call name = %q, want public name", got)
 	}
-	if got := batch.Calls["call_1"].PublicName; got != "get-weather" {
+	captured, ok := batch.CapturedCall("call_1")
+	if !ok {
+		t.Fatal("batch is missing call_1")
+	}
+	if got := captured.ResponseName; got != "get-weather" {
 		t.Fatalf("batch public name = %q, want get-weather", got)
 	}
 }
@@ -244,7 +248,7 @@ func TestCompletionAfterDeadlineRunsAllExpiryCleanup(t *testing.T) {
 	hooked := make(chan struct{}, 1)
 	batch := &Batch{
 		ExpiresAt: time.Now().Add(-time.Second),
-		Calls:     map[string]*Call{"call_1": call},
+		calls:     map[string]*Call{"call_1": call},
 		ctx:       ctx,
 		cancel:    cancel,
 		abort:     func() { aborted <- struct{}{} },
