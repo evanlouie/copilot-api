@@ -120,6 +120,92 @@ func TestReserveStreamingCallDeclinesAnIDTheBatchAlreadyPublished(t *testing.T) 
 	}
 }
 
+// The claim a batch has on a tool-call id has to end when the batch does.
+//
+// rt.batch is never cleared at a turn boundary, only replaced by the next
+// CaptureRequests, so a guard that ignored the batch's state would still see
+// turn one's completed batch holding "call_1" on turn two and decline. On a
+// backend that restarts its counter every turn - the very behaviour the guard
+// exists for - that silently switches streaming off for the whole rest of the
+// tool loop.
+func TestStreamingResumesOnTheNextTurnWhenTheBackendRecyclesCallIDs(t *testing.T) {
+	t.Parallel()
+	broker := NewBroker(time.Minute)
+	defer broker.CancelAll(context.Canceled)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn one: the model streams fragments for "call_1", then requests it.
+	firstReserved, ok := rt.ReserveStreamingCall("call_1", "lookup", false)
+	if !ok {
+		t.Fatal("ReserveStreamingCall declined the first turn's call")
+	}
+	firstBatch, firstCalls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{"q":"alpha"}`)}}, "resp_1", "response", "gpt-test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstCalls) != 1 || firstCalls[0].CallID != firstReserved.CallID {
+		t.Fatalf("turn one captured %#v, want the reserved id %q", firstCalls, firstReserved.CallID)
+	}
+
+	// The client answers, which closes the batch and ends the turn.
+	if err := firstBatch.Complete(map[string]string{firstCalls[0].CallID: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	if firstBatch.isOpen() {
+		t.Fatal("batch is still open after Complete; the rest of this test proves nothing")
+	}
+
+	// Turn two: the backend restarts its counter and reuses "call_1".
+	secondReserved, ok := rt.ReserveStreamingCall("call_1", "lookup", false)
+	if !ok {
+		t.Fatal("ReserveStreamingCall declined the second turn; a closed batch still claimed the recycled id")
+	}
+	if secondReserved.CallID == firstReserved.CallID {
+		t.Fatalf("second turn reused the first turn's client-visible id %q", firstReserved.CallID)
+	}
+	_, secondCalls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{"q":"beta"}`)}}, "resp_1", "response", "gpt-test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondCalls) != 1 || secondCalls[0].CallID != secondReserved.CallID {
+		t.Fatalf("turn two captured %#v, want the second reservation %q", secondCalls, secondReserved.CallID)
+	}
+}
+
+// A namespaced Responses function tool has to be announced under its namespace,
+// because the terminal item carries one and the two describe the same item.
+func TestReserveStreamingCallCarriesTheToolNamespace(t *testing.T) {
+	t.Parallel()
+	broker := NewBroker(time.Minute)
+	defer broker.CancelAll(context.Canceled)
+	rt, err := NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindNamespace, Name: "repo", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}},
+	}, openai.ToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// AvailableTools spells names for the SDK's toolset with a kind prefix; the
+	// tool requests the model emits use the plain SDK name.
+	sdkName := rt.Tools()[0].Name
+	reserved, ok := rt.ReserveStreamingCall("sdk_1", sdkName, false)
+	if !ok {
+		t.Fatalf("ReserveStreamingCall declined namespaced tool %q", sdkName)
+	}
+	if reserved.Namespace != "repo" {
+		t.Fatalf("reserved = %#v, want namespace repo", reserved)
+	}
+	_, calls, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "sdk_1", Name: sdkName, Arguments: json.RawMessage(`{}`)}}, "resp_1", "response", "gpt-test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].Namespace != reserved.Namespace {
+		t.Fatalf("captured %#v, want the namespace the reservation announced (%q)", calls, reserved.Namespace)
+	}
+}
+
 // A repeat request for a call the batch already holds must not swallow the
 // reservation: the SDK announces a tool request and separately invokes the
 // handler for the same call, and only the first of those mints.
