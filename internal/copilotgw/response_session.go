@@ -2,6 +2,7 @@ package copilotgw
 
 import (
 	"context"
+	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
@@ -116,6 +117,12 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 					prepared.prompt = responseContinuationFollowUp(prepared.prompt)
 					prepared.session, err = g.resumeSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
 				}
+			} else {
+				// The resumed session is the one the previous record names, so it holds
+				// everything that record's turn actually sent - and nothing it only
+				// buffered. Replaying pending input here is what makes a warm
+				// (generate:false) response survive a dropped WebSocket or a restart.
+				prepared.prompt = combineResolvedPrompts(pendingInputPrompt(*previousRecord), prepared.prompt)
 			}
 		} else {
 			prepared.sessionID = "resp_sdk_" + uuid.NewString()
@@ -142,6 +149,29 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 	}
 	keepPins = true
 	return prepared, nil
+}
+
+// pendingInputPrompt returns the input a record buffered without ever sending it
+// to its SDK session, which only a warm (generate:false) response produces.
+//
+// Only text survives. The warm session's resolvedPrompt also carries fetched
+// image attachments, and those are held in memory alone; a client that warms
+// with images and then loses its WebSocket keeps the text and re-fetches nothing.
+//
+// The flag is never cleared once consumed. It records a durable fact about the
+// record's own SDK session - "this input was buffered, not sent as its own turn"
+// - and clearing it would mean writing the store back before the send that
+// consumes it has succeeded, which would drop the input on a failed turn. The
+// only way to consume it twice is for a client to branch from the same warm
+// response id more than once, and branching already resumes the single shared
+// SDK session rather than forking it, so that path is approximate either way.
+// Repeating a warmed prompt on a re-branch is a much smaller wrong than silently
+// dropping input the client was told had been accepted.
+func pendingInputPrompt(record sessionstore.ResponseRecord) resolvedPrompt {
+	if !record.InputPending || strings.TrimSpace(record.InputText) == "" {
+		return resolvedPrompt{}
+	}
+	return resolvedPrompt{Text: record.InputText}
 }
 
 func combineResolvedPrompts(previous, current resolvedPrompt) resolvedPrompt {

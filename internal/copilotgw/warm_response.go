@@ -279,6 +279,11 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: warmResponseCreatedAt(req), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
 	record := recordFromResponse(resp, sessionID, retained)
 	record.InputText = incrementalInput
+	// The whole point of generate:false is that this input is primed, not sent:
+	// it lives in warm.input and reaches the SDK only when a later request
+	// generates. Recording that it is still undelivered is what lets a resume
+	// replay it after the client's WebSocket drops or this process restarts.
+	record.InputPending = true
 	record.InstalledToolCatalog = catalog.StoredDTO()
 	if err := g.store.SaveResponse(record); err != nil {
 		_ = session.Disconnect()

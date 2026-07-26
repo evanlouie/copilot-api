@@ -315,17 +315,27 @@ const ResponseRecordVersion = 3
 // pins the on-disk bytes instead, so any openai change that moves the persisted
 // format fails with a diff.
 type ResponseRecord struct {
-	Version              int                                 `json:"version"`
-	ID                   string                              `json:"id"`
-	SDKSessionID         string                              `json:"sdk_session_id"`
-	Model                string                              `json:"model"`
-	Instructions         string                              `json:"instructions,omitempty"`
-	CreatedAt            time.Time                           `json:"created_at"`
-	UpdatedAt            time.Time                           `json:"updated_at"`
-	Status               string                              `json:"status"`
-	Stored               bool                                `json:"stored"`
-	Deleted              bool                                `json:"deleted"`
-	InputText            string                              `json:"input_text,omitempty"`
+	Version      int       `json:"version"`
+	ID           string    `json:"id"`
+	SDKSessionID string    `json:"sdk_session_id"`
+	Model        string    `json:"model"`
+	Instructions string    `json:"instructions,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Status       string    `json:"status"`
+	Stored       bool      `json:"stored"`
+	Deleted      bool      `json:"deleted"`
+	InputText    string    `json:"input_text,omitempty"`
+	// InputPending marks input this record buffered without ever sending it to
+	// SDKSessionID. It is written by a warm (generate:false) response, whose whole
+	// job is to prime a session and hold the input back until a later request
+	// generates. Every other record's input has already been delivered to its SDK
+	// session by the turn that produced it, so the default of false means
+	// "already delivered" and pre-v3 records need no migration.
+	//
+	// A resume of SDKSessionID must replay pending input; a resume of delivered
+	// input must not, or the model sees the same turn twice.
+	InputPending         bool                                `json:"input_pending,omitempty"`
 	Output               []openai.ResponseOutputItem         `json:"output"`
 	OutputText           string                              `json:"output_text"`
 	Usage                *openai.ResponseUsage               `json:"usage,omitempty"`

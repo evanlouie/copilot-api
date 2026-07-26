@@ -273,3 +273,33 @@ func TestWarmResponseSessionUseRejectsMismatchedInstructions(t *testing.T) {
 		t.Fatal("warm session used despite mismatched instructions")
 	}
 }
+
+// TestPendingWarmInputSurvivesResume covers the durable half of warming: a warm
+// response buffers its input in memory only, so if the client's WebSocket drops
+// before it generates, the resumed SDK session has never seen that input. The
+// record marks it undelivered so the resume replays it ahead of the new turn.
+func TestPendingWarmInputSurvivesResume(t *testing.T) {
+	record := sessionstore.ResponseRecord{ID: "resp_warm", InputText: "Warm context", InputPending: true}
+	combined := combineResolvedPrompts(pendingInputPrompt(record), resolvedPrompt{Text: "Current turn"})
+	if combined.Text != "Warm context\n\nCurrent turn" {
+		t.Fatalf("resumed prompt = %q, want the warmed input ahead of the current turn", combined.Text)
+	}
+}
+
+// TestDeliveredInputIsNotReplayedOnResume is the other half: every non-warm
+// record's input already reached its SDK session, so resuming must not send it
+// again. Records written before input_pending existed decode as false and so
+// take this path.
+func TestDeliveredInputIsNotReplayedOnResume(t *testing.T) {
+	for name, record := range map[string]sessionstore.ResponseRecord{
+		"delivered":     {ID: "resp_prev", InputText: "Already sent"},
+		"pending blank": {ID: "resp_warm", InputText: "   ", InputPending: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			combined := combineResolvedPrompts(pendingInputPrompt(record), resolvedPrompt{Text: "Current turn"})
+			if combined.Text != "Current turn" {
+				t.Fatalf("resumed prompt = %q, want only the current turn", combined.Text)
+			}
+		})
+	}
+}
