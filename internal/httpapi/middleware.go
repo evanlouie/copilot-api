@@ -415,10 +415,19 @@ func (w *loggingResponseWriter) StreamFailure() func(error) { return w.streamFai
 // setStreamFailureWriter records how to terminate an already-committed stream.
 // Streaming handlers call it once their SSE writer exists, so a panic unwinding
 // past the point where an HTTP error response is still possible can still be
-// reported to the client.
+// reported to the client. It unwraps, because the handler is handed whatever
+// middleware sits between it and the recorder.
 func setStreamFailureWriter(w http.ResponseWriter, fail func(error)) {
-	if recorder, ok := w.(*loggingResponseWriter); ok {
-		recorder.streamFailure = fail
+	for {
+		if recorder, ok := w.(*loggingResponseWriter); ok {
+			recorder.streamFailure = fail
+			return
+		}
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = unwrapper.Unwrap()
 	}
 }
 

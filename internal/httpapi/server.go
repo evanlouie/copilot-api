@@ -33,7 +33,9 @@ func New(cfg config.Config, gw copilotgw.HTTPGateway, log *slog.Logger) *Server 
 	return s
 }
 func (s *Server) Handler() http.Handler {
-	var h http.Handler = s.mux
+	// jsonMuxErrors sits directly on the mux so it only ever sees statuses the
+	// routing itself produced; the auth 401 above it already speaks JSON.
+	var h http.Handler = jsonMuxErrors(s.mux)
 	h = s.authMiddleware(h)
 	h = recoverMiddleware(s.log, h)
 	// Request logging wraps both auth and recovery so the access log records the
