@@ -31,6 +31,7 @@ target functionality is the only compatibility constraint that matters.
 - [Workstream E — Surface reduction](#workstream-e--surface-reduction)
 - [Workstream F — the decision](#workstream-f--the-decision)
 - [Round two — adversarial review](#round-two--adversarial-review)
+- [Round three — the live suite](#round-three--the-live-suite)
 - [Residual backlog](#residual-backlog)
 - [Definition of done](#definition-of-done)
 
@@ -675,6 +676,81 @@ One `-count=1` run left three behind.
 
 ---
 
+## Round three — the live suite
+
+Everything above was verified against unit tests and fakes. The Deno AI SDK
+suite — the only gate that pairs the **real** Vercel AI SDK parser with **real**
+Copilot upstream — is `ignore`d unless `COPILOT_API_AI_SDK_DENO_TESTS=1`, so CI
+had only ever run the one test asserting the suite is disabled. Running it
+against a live subscription reported **19 passed, 3 failed**.
+
+All three failed identically on `002cfc9`, so none was a regression from this
+work. The test file is byte-identical between the two, which made the comparison
+exact. They split two ways.
+
+> [!CAUTION]
+> **One was a real defect: the Responses WebSocket error frame omitted
+> `sequence_number`, fixed in `825e3dc`.** Every schema an OpenAI client matches
+> an `error` stream event with requires that field. Against `@ai-sdk/openai`
+> 4.0.20, whose chunk union is
+> `[nested-error, flat-error, {type: string}.loose()]`, both error branches fail
+> without it, the frame matches the catch-all, and the stream transform maps it
+> to `unknown_chunk` and **drops it**.
+>
+> Observed live: a client sending an unknown `previous_response_id` over the
+> WebSocket transport saw a clean, empty, _successful_ stream. The same request
+> over REST correctly returned `400 previous_response_not_found` — the proxy's
+> logic was right and only the frame's shape was wrong, which is precisely the
+> class of bug no amount of Go-side testing was going to find.
+
+The frame now carries the error **both flat and nested**, because OpenAI's own
+clients disagree about where to look and this proxy has to satisfy both:
+openai-dotnet reads `code`/`message`/`param` at the top level per the published
+`ResponseErrorEvent`,[^errorevent] while the live service emits
+`{"error": {...}}` — confirmed by an OpenAI maintainer as the service failing to
+honour its own contract[^dotnet881] — and openai-python's streaming reads
+`error.message` and works only against that nested shape.[^python2487]
+
+### The other two were the tests being wrong
+
+The two reasoning-effort cases asserted that a reasoning-capable model _emits_
+reasoning. That is not this proxy's contract and not a property a model owes
+anyone.
+
+> [!WARNING]
+> Measured against `claude-sonnet-5` at `effort=low`, the prompt they sent —
+> _"reply with one concise sentence about why 19 \* 37 = 703"_ — produced **zero
+> reasoning items and zero reasoning tokens on 3 of 3 runs**. The same model, at
+> the same effort, with _"What is 17\*24? Think it through."_ produced a
+> reasoning item every time. The proxy was forwarding the effort correctly and
+> faithfully reporting that the model chose not to think.
+
+`28f392d` rewrote them to assert the property the proxy _is_ answerable for:
+that whatever reasoning its own response carries is consumable by a real OpenAI
+client. A recording `fetch` captures the exact bytes returned for the very turn
+the SDK parsed, so ground truth and surface come from one response rather than
+two nondeterministic calls. Three claims are checked separately because they are
+not equally strong — text on the wire must reach the client (the sharp one), a
+textless item must survive as a reasoning part, and reported reasoning tokens
+must reach `usage` (weakest, since the SDK reads the same field). If upstream
+emitted nothing, the assertion is skipped rather than failed.
+
+> [!TIP]
+> **The rewrite was verified by fault injection, not by passing.** With the
+> proxy patched to write reasoning text under `"summary_text"` instead of
+> `"text"` — still on the wire, just under a key the SDK's parser does not read
+> — both tests fail. An earlier draft of the same check passed under that fault
+> and was discarded; "the assertion is green" and "the assertion can fail" are
+> different claims, and only the second one is worth anything.
+
+That round also fixed a latent bug in the old assertion: it read
+`usage.reasoningTokens`, but the AI SDK nests it under
+`usage.outputTokenDetails.reasoningTokens`, so that fallback was always `0`.
+
+Live suite after this round: **22 passed, 0 failed.**
+
+---
+
 ## Residual backlog
 
 What genuinely remains after both rounds. Nothing here is a correctness or
@@ -716,6 +792,11 @@ locally via `make ci`:
 - [x] `staticcheck@v0.7.0 ./...` — zero findings
 - [x] `deno fmt --check`, `deno check tests/ai-sdk-deno`,
       `deno task test:ai-sdk`
+
+The Deno suite is gated off by default, so that last line proves only that the
+suite is disabled. It was additionally run **against a live Copilot
+subscription** — 22 passed, 0 failed — which is what round three above records.
+Nothing else here has ever exercised real upstream.
 
 Three standards were carried forward from the review cycle. All three earned
 their place again:
@@ -771,3 +852,16 @@ their place again:
     `required`; a strict function schema that violates it is rejected with a 400
     at request time.
     <https://platform.openai.com/docs/guides/function-calling#strict-mode>
+
+[^errorevent]: OpenAI's `ResponseErrorEvent` carries `code`, `message`, `param`
+    and `sequence_number` at the top level.
+    <https://developers.openai.com/api/reference/resources/responses/streaming-events/>
+
+[^dotnet881]: An OpenAI maintainer confirming the service returns the nested
+    `{"error": {...}}` shape rather than the documented flat one, and calling it
+    a service-side contract violation.
+    <https://github.com/openai/openai-dotnet/issues/881>
+
+[^python2487]: `openai-python`'s streaming reads `data["error"]["message"]`, so
+    it only recognises the nested shape.
+    <https://github.com/openai/openai-python/issues/2487>
