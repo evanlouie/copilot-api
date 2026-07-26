@@ -1,15 +1,18 @@
 package toolproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 
@@ -190,7 +193,7 @@ func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*Req
 	tools = openai.SupportedTools(tools)
 	clientTools := make([]ClientTool, 0, len(tools))
 	for _, t := range tools {
-		params, err := schemaMap(t.Function.Parameters)
+		params, err := schemaMap(t.Function.Name, t.Function.Parameters)
 		if err != nil {
 			return nil, err
 		}
@@ -286,9 +289,9 @@ func clientToolFromNormalized(tool toolcatalog.NormalizedTool, namespace string)
 	case toolcatalog.ToolKindCustom:
 		params = customToolSchema(tool.Name)
 	case toolcatalog.ToolKindToolSearch:
-		params, err = schemaMap(tool.Parameters)
+		params, err = schemaMap(tool.Name, tool.Parameters)
 	default:
-		params, err = schemaMap(tool.Parameters)
+		params, err = schemaMap(tool.Name, tool.Parameters)
 	}
 	if err != nil {
 		return ClientTool{}, err
@@ -355,15 +358,45 @@ func descriptionWithCanonicalName(tool ClientTool) string {
 	return prefix + " " + tool.Description
 }
 
-func schemaMap(raw json.RawMessage) (map[string]any, error) {
+// schemaMap decodes a client-supplied JSON Schema so it can be handed to the
+// SDK, which re-encodes it for the model.
+//
+// UseNumber is load-bearing, not a micro-optimization. Without it every JSON
+// number in the schema becomes a float64 and is re-marshalled from that
+// float64, so {"maximum":1e21} reaches the model as 1e+21 and
+// {"enum":[9007199254740993]} as 9007199254740992. The model must see the
+// schema the client wrote. toolcatalog.CanonicalRawJSON decodes the same
+// documents the same way for the same reason.
+func schemaMap(toolName string, raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
 		return map[string]any{"type": "object", "properties": map[string]any{}}, nil
 	}
-	params := map[string]any{}
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, err
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var decoded any
+	if err := dec.Decode(&decoded); err != nil {
+		return nil, invalidToolSchema(toolName, "is not valid JSON: "+err.Error())
+	}
+	// Decoder.Decode, unlike json.Unmarshal, stops at the end of the first value.
+	// Reject anything after it so malformed input cannot be silently truncated.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, invalidToolSchema(toolName, "has trailing data after the JSON Schema object")
+	}
+	params, ok := decoded.(map[string]any)
+	if !ok {
+		// A raw encoding/json error ("json: cannot unmarshal bool into Go value of
+		// type map[string]interface {}") describes this proxy's internals, not the
+		// client's mistake, and would be classified as a server fault.
+		return nil, invalidToolSchema(toolName, "must be a JSON Schema object")
 	}
 	return params, nil
+}
+
+func invalidToolSchema(toolName, problem string) error {
+	if toolName == "" {
+		return apierr.InvalidRequest("tool parameters "+problem, "tools")
+	}
+	return apierr.InvalidRequest(fmt.Sprintf("tool %q parameters %s", toolName, problem), "tools")
 }
 
 func customToolSchema(name string) map[string]any {
