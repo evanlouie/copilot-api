@@ -226,7 +226,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 			releaseAll(pinReleases)
 		}
 	}()
-	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
+	resp := &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: warmResponseCreatedAt(req), Status: "completed", Model: req.Model, Instructions: req.Instructions, Output: []openai.ResponseOutputItem{}, OutputText: "", ParallelToolCalls: true, PreviousResponseID: previous, Store: req.Store, Error: nil, IncompleteDetails: nil}
 	record := recordFromResponse(resp, sessionID, retained)
 	record.InputText = incrementalInput
 	record.InstalledToolCatalog = catalog.StoredDTO()

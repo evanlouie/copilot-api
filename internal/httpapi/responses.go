@@ -34,7 +34,30 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, filterResponseReasoning(res.Response, gwReq.SuppressReasoning))
+	// The non-streaming body is the terminal event of the same sequence SSE and
+	// WebSocket serialize, folded back into a response. It is not an independent
+	// rendering of the gateway result.
+	folder := &foldingResponseEventWriter{}
+	result := foldResponseResult(ctx, folder, gwReq, s.cfg.MaxTurnOutputBytes, res)
+	if result.Err != nil {
+		WriteError(w, result.Err)
+		return
+	}
+	if folder.response == nil {
+		WriteError(w, apierr.Internal("response stream produced no terminal response"))
+		return
+	}
+	writeJSON(w, http.StatusOK, folder.response)
+}
+
+// foldResponseResult replays a non-streaming gateway result through the shared
+// Responses event sequence so the JSON body, the SSE stream and the WebSocket
+// stream all describe the turn the same way.
+func foldResponseResult(ctx context.Context, writer responseEventWriter, req copilotgw.ResponseRequest, maxOutputBytes int64, res *copilotgw.ResponseResult) responseStreamWriteResult {
+	ch := make(chan copilotgw.ResponseStreamEvent, 1)
+	ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: res.Response}
+	close(ch)
+	return writeResponseStreamEvents(ctx, writer, req, maxOutputBytes, ch)
 }
 
 type preparedResponseLogFields struct {
@@ -141,7 +164,10 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 	}
 	_, toolsSet := req.Raw["tools"]
 	gwReq := copilotgw.ResponseRequest{
-		ResponseID:                         responseID,
+		ResponseID: responseID,
+		// Stamp the creation time once, here, so response.created, the terminal
+		// response.completed and the stored record all report the same instant.
+		CreatedAt:                          openai.UnixNow(),
 		Model:                              req.Model,
 		Instructions:                       combineInstructions(req.Instructions, inputInstructions),
 		Input:                              input,
@@ -178,7 +204,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		WriteError(w, apierr.Internal("streaming unsupported by ResponseWriter"))
 		return
 	}
-	responseWriter := newResponseStreamEncoder(sseResponseEventWriter{server: s, ctx: ctx, writer: writer})
+	responseWriter := newResponseStreamEncoder(newLoggedResponseEventWriter(s, ctx, sseResponseEventTransport{writer: writer}))
 	// Owning the encoder here keeps sequence numbers continuous if a panic
 	// forces the terminal response.failed frame below.
 	setStreamFailureWriter(w, func(failure error) {
@@ -191,41 +217,6 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 	}
 }
-func streamedMessageItem(resp *openai.Response, id, text string, insertIndex int) (*openai.ResponseOutputItem, int) {
-	if resp == nil {
-		return nil, 0
-	}
-	if resp.OutputText == "" {
-		resp.OutputText = text
-	}
-	item := openai.ResponseOutputItem{ID: id, Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: resp.OutputText}}}
-	for i := range resp.Output {
-		if resp.Output[i].Type == "message" {
-			item = resp.Output[i]
-			item.ID = id
-			item.Status = "completed"
-			if len(item.Content) == 0 {
-				item.Content = []openai.ResponseText{{Type: "output_text", Text: resp.OutputText}}
-			}
-			resp.Output = append(resp.Output[:i], resp.Output[i+1:]...)
-			break
-		}
-	}
-	// Insert the message at the same output index used for the streamed
-	// output_item.added event so a leading reasoning item keeps index 0 and the
-	// message follows it.
-	if insertIndex < 0 {
-		insertIndex = 0
-	}
-	if insertIndex > len(resp.Output) {
-		insertIndex = len(resp.Output)
-	}
-	resp.Output = append(resp.Output, openai.ResponseOutputItem{})
-	copy(resp.Output[insertIndex+1:], resp.Output[insertIndex:])
-	resp.Output[insertIndex] = item
-	return &resp.Output[insertIndex], insertIndex
-}
-
 func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")
 	if id == "" || strings.Contains(id, "/") {

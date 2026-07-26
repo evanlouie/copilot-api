@@ -261,11 +261,18 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	if err != nil {
 		return nil, err
 	}
+	storeVisible := req.Store
+	if !req.StoreSet {
+		storeVisible = previousRecord.Stored
+	}
+	previous := previousResponseID
+	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: &previous, store: storeVisible, suppressReasoning: req.SuppressReasoning}
 	if err := batch.CompleteToolOutputsWithSetup(outputs, func() {
 		if runner != nil {
 			runner.setCurrentResponseID(req.ResponseID)
 			runner.attachToRequestContext()
 			runner.watchContext(ctx)
+			runner.setResponseParams(params)
 		}
 	}); err != nil {
 		return nil, apierr.InvalidRequest(err.Error(), "input")
@@ -284,12 +291,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		if turn.PendingBatchID != "" && runner != nil {
 			g.rememberRunner(turn.PendingBatchID, runner)
 		}
-		previous := previousResponseID
-		storeVisible := req.Store
-		if !req.StoreSet {
-			storeVisible = previousRecord.Stored
-		}
-		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
+		resp := responseForTurn(params, turn)
 		record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 		record.PendingBatchID = turn.PendingBatchID
 		record.ToolOutputs = toolcatalog.StoredToolOutputsFromMap(outputs)

@@ -114,7 +114,38 @@ type TurnResult struct {
 	FinishReason       string
 	RetainedPath       string
 	PendingBatchID     string
+	// MessageItemID and ReasoningItemID are the Responses output-item IDs for
+	// this turn. The runner assigns them once, before the first streamed delta
+	// carries them to the client, so the streamed events, the terminal response
+	// and the persisted record all name the same items.
+	MessageItemID   string
+	ReasoningItemID string
+	// Response is the single openai.Response built for this result. It is
+	// constructed exactly once (see turnRunner.buildTurnResponse) and shared by
+	// persistence, the streamed terminal event and the non-streaming JSON body.
+	Response *openai.Response
+
+	// itemOrder is the order in which this turn's output items were first
+	// announced on the response stream. It is the single source of truth for
+	// output_index: responseFromTurn arranges Response.Output to match, so a
+	// streamed item's index always equals its position in the stored record.
+	itemOrder []string
+	// responseBuilds counts how many openai.Response values were constructed
+	// from this result. Exactly one construction per turn is the invariant that
+	// keeps every transport and the store in agreement; tests assert on it.
+	responseBuilds int
 }
+
+// StreamedOutputItemOrder reports the order in which this turn's output items
+// were announced on the response stream. It exists for tests that assert the
+// streamed output_index matches the persisted output order.
+func (t *TurnResult) StreamedOutputItemOrder() []string {
+	return append([]string(nil), t.itemOrder...)
+}
+
+// ResponseBuilds reports how many openai.Response values were built from this
+// result. It must be exactly one for any turn that produced a response.
+func (t *TurnResult) ResponseBuilds() int { return t.responseBuilds }
 
 type StreamEvent struct {
 	Kind        string
@@ -125,7 +156,12 @@ type StreamEvent struct {
 }
 
 type ResponseRequest struct {
-	ResponseID                         string
+	ResponseID string
+	// CreatedAt is the response's creation time, stamped once when the request
+	// is prepared. Every frame that carries the response - response.created at
+	// the start of a stream, the terminal response.completed, and the stored
+	// record - uses it, so one response never reports two creation times.
+	CreatedAt                          int64
 	Model                              string
 	Instructions                       string
 	Input                              openai.PromptContent
@@ -161,10 +197,14 @@ type WarmResponseResult struct {
 }
 
 type ResponseStreamEvent struct {
-	Kind        string
-	Delta       string
-	ReasoningID string
-	Response    *openai.Response
-	Item        *openai.ResponseOutputItem
-	Error       error
+	Kind string
+	// ItemID is the Responses output-item ID the delta belongs to. The gateway
+	// is the only component that assigns output-item IDs, so the HTTP layer
+	// forwards this value rather than minting one of its own. It is required on
+	// "delta" and "reasoning_delta" events.
+	ItemID   string
+	Delta    string
+	Response *openai.Response
+	Item     *openai.ResponseOutputItem
+	Error    error
 }

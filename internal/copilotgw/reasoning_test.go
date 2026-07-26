@@ -44,7 +44,7 @@ func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 		ReasoningID:        "rid-7",
 		FinishReason:       "stop",
 	}
-	resp := responseFromTurn("resp_1", "claude-sonnet-4.6", "", nil, true, turn, false)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "claude-sonnet-4.6", store: true, suppressReasoning: false}, turn)
 	if len(resp.Output) != 2 {
 		t.Fatalf("output length = %d, want reasoning + message: %#v", len(resp.Output), resp.Output)
 	}
@@ -62,7 +62,7 @@ func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 
 func TestResponseFromTurnWithoutReasoningHasNoReasoningItem(t *testing.T) {
 	turn := &TurnResult{Text: "hi", FinishReason: "stop"}
-	resp := responseFromTurn("resp_1", "gpt-5", "", nil, true, turn, false)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true, suppressReasoning: false}, turn)
 	for _, item := range resp.Output {
 		if item.Type == "reasoning" {
 			t.Fatalf("unexpected reasoning item: %#v", resp.Output)
@@ -72,7 +72,7 @@ func TestResponseFromTurnWithoutReasoningHasNoReasoningItem(t *testing.T) {
 
 func TestResponseFromTurnSuppressesReasoningItem(t *testing.T) {
 	turn := &TurnResult{Text: "hi", Reasoning: "hidden", ReasoningEncrypted: "enc", FinishReason: "stop"}
-	resp := responseFromTurn("resp_1", "gpt-5", "", nil, true, turn, true)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true, suppressReasoning: true}, turn)
 	for _, item := range resp.Output {
 		if item.Type == "reasoning" {
 			t.Fatalf("reasoning item should be suppressed: %#v", resp.Output)
@@ -94,7 +94,7 @@ func TestResponseFromTurnReasoningPrecedesToolCalls(t *testing.T) {
 			Function: openai.ToolCallFunction{Name: "lookup", Arguments: `{"q":"x"}`},
 		}},
 	}
-	resp := responseFromTurn("resp_1", "claude-sonnet-4.6", "", nil, true, turn, false)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "claude-sonnet-4.6", store: true, suppressReasoning: false}, turn)
 	if len(resp.Output) != 2 || resp.Output[0].Type != "reasoning" || resp.Output[1].Type != "function_call" {
 		t.Fatalf("output = %#v, want reasoning then function_call", resp.Output)
 	}
@@ -162,7 +162,7 @@ func TestResponsesPersistReasoningItemRoundTrip(t *testing.T) {
 		ReasoningID:        "rid-7",
 		FinishReason:       "stop",
 	}
-	resp := responseFromTurn("resp_persist", "claude-sonnet-4.6", "", nil, true, turn, false)
+	resp := responseFromTurn(responseParams{id: "resp_persist", model: "claude-sonnet-4.6", store: true, suppressReasoning: false}, turn)
 	record := recordFromResponse(resp, "sdk-session", "")
 	if err := store.SaveResponse(record); err != nil {
 		t.Fatal(err)

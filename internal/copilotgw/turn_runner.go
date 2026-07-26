@@ -93,22 +93,34 @@ type turnRunner struct {
 	requestDetached   bool
 	requestGeneration uint64
 	responseStream    chan<- ResponseStreamEvent
-	responseMeta      *responseStreamMeta
-	onResult          func(*TurnResult) error
-	store             *sessionstore.Store
-	pinMu             sync.Mutex
-	pinReleases       []func()
-	pinsReleased      bool
+	responseDone      <-chan struct{}
+	responseParams    *responseParams
+	// messageItemID, reasoningItemID and itemOrder are this turn's output-item
+	// identity. The runner assigns each ID once, hands it to the client on the
+	// first delta that belongs to the item, and reuses it when it builds the
+	// terminal response - so no other layer ever has to invent one. They are
+	// per-turn state and are cleared at every turn boundary.
+	messageItemID   string
+	reasoningItemID string
+	itemOrder       []string
+	onResult        func(*TurnResult) error
+	store           *sessionstore.Store
+	pinMu           sync.Mutex
+	pinReleases     []func()
+	pinsReleased    bool
 }
 
-type responseStreamMeta struct {
-	responseID        string
+// responseParams is the request-scoped identity of the response a turn
+// produces. It is set before the turn can complete and is the only input
+// responseFromTurn takes besides the turn itself.
+type responseParams struct {
+	id                string
+	created           int64
 	model             string
 	instructions      string
 	previous          *string
 	store             bool
 	suppressReasoning bool
-	done              <-chan struct{}
 }
 
 func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session *copilot.Session, rt *toolproxy.RequestTools, events *sessionEventSink, retained string, kind string, responseID string) *turnRunner {
@@ -240,8 +252,8 @@ func (r *turnRunner) currentBatch() *toolproxy.Batch {
 func (r *turnRunner) currentResponseID() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.responseMeta != nil && r.responseMeta.responseID != "" {
-		return r.responseMeta.responseID
+	if r.responseParams != nil && r.responseParams.id != "" {
+		return r.responseParams.id
 	}
 	return r.responseID
 }
@@ -296,15 +308,75 @@ func (r *turnRunner) enableChatStream(ch chan<- StreamEvent, done <-chan struct{
 	r.chatDone = done
 }
 
-func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, responseID, model, instructions string, previous *string, store bool, suppressReasoning bool, done <-chan struct{}) {
+func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, done <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.responseStream = ch
 	if ch == nil {
-		r.responseMeta = nil
+		r.responseDone = nil
 		return
 	}
-	r.responseMeta = &responseStreamMeta{responseID: responseID, model: model, instructions: instructions, previous: previous, store: store, suppressReasoning: suppressReasoning, done: done}
+	r.responseDone = done
+}
+
+// setResponseParams records the request-scoped identity of the response the
+// next turn produces. Both the streaming and non-streaming Responses paths set
+// it, which is what lets the runner - and only the runner - build that
+// response.
+func (r *turnRunner) setResponseParams(params responseParams) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.responseParams = &params
+}
+
+// resetOutputItems clears the per-turn output-item identity at a turn boundary.
+// The runner loop is reused across a client-owned tool-call continuation, so a
+// continuation turn must not inherit the emitted turn's item IDs or ordering.
+func (r *turnRunner) resetOutputItems() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.messageItemID = ""
+	r.reasoningItemID = ""
+	r.itemOrder = nil
+}
+
+// announceItemLocked records that an output item has been published on the
+// response stream. The order of first announcement is the single source of
+// truth for output_index: responseFromTurn arranges the terminal output to
+// match it.
+func (r *turnRunner) announceItemLocked(id string) {
+	if id == "" || r.responseStream == nil {
+		return
+	}
+	for _, seen := range r.itemOrder {
+		if seen == id {
+			return
+		}
+	}
+	r.itemOrder = append(r.itemOrder, id)
+}
+
+// messageItemIDLocked assigns this turn's message output-item ID on first use.
+func (r *turnRunner) messageItemIDLocked() string {
+	if r.messageItemID == "" {
+		r.messageItemID = openai.NewID("msg_")
+	}
+	return r.messageItemID
+}
+
+// reasoningItemIDLocked assigns this turn's reasoning output-item ID on first
+// use, preferring the SDK reasoning block ID so the item is stable across a
+// resumed session. First assignment wins: a later block ID must not rename an
+// item the client has already seen.
+func (r *turnRunner) reasoningItemIDLocked(reasoningID string) string {
+	if r.reasoningItemID == "" {
+		if reasoningID != "" {
+			r.reasoningItemID = "rs_" + reasoningID
+		} else {
+			r.reasoningItemID = openai.NewID("rs_")
+		}
+	}
+	return r.reasoningItemID
 }
 
 // loop owns the runner's lifetime. It is the sole owner of every cleanup the
@@ -367,6 +439,7 @@ func (r *turnRunner) loop(g *RealGateway) {
 			case *copilot.AssistantTurnStartData:
 				reason.reset()
 				text.Reset()
+				r.resetOutputItems()
 				usage = nil
 				contentBytes = 0
 				reasoningStreamBytes = 0
@@ -468,13 +541,15 @@ func (r *turnRunner) loop(g *RealGateway) {
 					// continuation, so each tool turn must start a fresh reasoning
 					// block. Without this reset the next turn would inherit (or
 					// concatenate) this turn's reasoning when its own consolidated
-					// block is absent. The same applies to the assistant text: the
-					// continuation turn must not inherit the emitted turn's messages.
+					// block is absent. The same applies to the assistant text and to
+					// the turn's output-item identity: the continuation turn must not
+					// inherit the emitted turn's messages or item IDs.
 					text.Reset()
 					usage = nil
 					contentBytes = 0
 					reasoningStreamBytes = 0
 					reason.markToolBoundary()
+					r.resetOutputItems()
 					stats.reset()
 				} else {
 					text.WriteString(d.Content)
@@ -817,13 +892,18 @@ func (r *turnRunner) emitDelta(delta string) {
 	chatStream := r.chatStream
 	chatDone := r.chatDone
 	responseStream := r.responseStream
-	meta := r.responseMeta
+	responseDone := r.responseDone
+	var itemID string
+	if responseStream != nil {
+		itemID = r.messageItemIDLocked()
+		r.announceItemLocked(itemID)
+	}
 	r.mu.Unlock()
 	if chatStream != nil {
 		_ = sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "delta", Delta: delta})
 	}
 	if responseStream != nil {
-		sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "delta", Delta: delta})
+		sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "delta", ItemID: itemID, Delta: delta})
 	}
 }
 
@@ -835,13 +915,18 @@ func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {
 	chatStream := r.chatStream
 	chatDone := r.chatDone
 	responseStream := r.responseStream
-	meta := r.responseMeta
+	responseDone := r.responseDone
+	var itemID string
+	if responseStream != nil {
+		itemID = r.reasoningItemIDLocked(reasoningID)
+		r.announceItemLocked(itemID)
+	}
 	r.mu.Unlock()
 	if chatStream != nil {
 		_ = sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "reasoning_delta", Delta: delta, ReasoningID: reasoningID})
 	}
 	if responseStream != nil {
-		sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "reasoning_delta", Delta: delta, ReasoningID: reasoningID})
+		sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "reasoning_delta", ItemID: itemID, Delta: delta})
 	}
 }
 
@@ -850,6 +935,12 @@ func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {
 // that failure aborts the SDK session: no further events will ever arrive, so
 // the loop has to exit rather than wait for them.
 func (r *turnRunner) emitResult(res *TurnResult) (stop bool) {
+	// Stamp the turn's output-item identity and build its response before any
+	// consumer can observe the result. Persistence, the streamed terminal event
+	// and the non-streaming JSON body then all read TurnResult.Response, so a
+	// single construction serves every transport and the store.
+	r.stampOutputItems(res)
+	r.buildTurnResponse(res)
 	r.mu.Lock()
 	// Persistence behavior belongs to exactly one model turn. Taking and
 	// clearing it prevents a streamed tool-call turn's callback from being
@@ -868,12 +959,12 @@ func (r *turnRunner) emitResult(res *TurnResult) (stop bool) {
 	chatStream := r.chatStream
 	chatDone := r.chatDone
 	responseStream := r.responseStream
-	meta := r.responseMeta
+	responseDone := r.responseDone
 	if res.FinishReason == "tool_calls" {
 		r.chatStream = nil
 		r.chatDone = nil
 		r.responseStream = nil
-		r.responseMeta = nil
+		r.responseDone = nil
 	}
 	r.mu.Unlock()
 	if res.FinishReason == "tool_calls" {
@@ -890,30 +981,65 @@ func (r *turnRunner) emitResult(res *TurnResult) (stop bool) {
 		}
 	}
 	if responseStream != nil {
-		responseID := res.ID
-		model := r.model
-		instructions := ""
-		store := true
-		suppressReasoning := false
-		var previous *string
-		if meta != nil {
-			if meta.responseID != "" {
-				responseID = meta.responseID
-			}
-			if meta.model != "" {
-				model = meta.model
-			}
-			instructions = meta.instructions
-			previous = meta.previous
-			store = meta.store
-			suppressReasoning = meta.suppressReasoning
-		}
-		sent := sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "response", Response: responseFromTurn(responseID, model, instructions, previous, store, res, suppressReasoning)})
+		sent := sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "response", Response: res.Response})
 		if res.FinishReason == "tool_calls" && sent {
 			close(responseStream)
 		}
 	}
 	return false
+}
+
+// stampOutputItems copies this turn's output-item identity onto the result:
+// the IDs the client has already seen on streamed deltas, plus the order they
+// were announced in. It never mints an ID - a turn that streamed nothing gets
+// its IDs from responseFromTurn, and a chat turn never needs any.
+func (r *turnRunner) stampOutputItems(res *TurnResult) {
+	if res == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if res.MessageItemID == "" {
+		res.MessageItemID = r.messageItemID
+	}
+	if res.ReasoningItemID == "" {
+		res.ReasoningItemID = r.reasoningItemID
+	}
+	if res.itemOrder == nil {
+		res.itemOrder = append([]string(nil), r.itemOrder...)
+	}
+}
+
+// buildTurnResponse builds the turn's one and only openai.Response and caches
+// it on the result. It is the sole call site of responseFromTurn on the live
+// path; every consumer reads TurnResult.Response afterwards.
+func (r *turnRunner) buildTurnResponse(res *TurnResult) {
+	if res == nil || res.Response != nil {
+		return
+	}
+	r.mu.Lock()
+	params := r.responseParams
+	streaming := r.responseStream != nil
+	model := r.model
+	created := r.created
+	r.mu.Unlock()
+	if params == nil && !streaming {
+		return
+	}
+	p := responseParams{store: true}
+	if params != nil {
+		p = *params
+	}
+	if p.id == "" {
+		p.id = res.ID
+	}
+	if p.model == "" {
+		p.model = model
+	}
+	if p.created == 0 {
+		p.created = created
+	}
+	res.Response = responseFromTurn(p, res)
 }
 
 func (r *turnRunner) emitError(err error) {
@@ -922,11 +1048,11 @@ func (r *turnRunner) emitError(err error) {
 	chatStream := r.chatStream
 	chatDone := r.chatDone
 	responseStream := r.responseStream
-	meta := r.responseMeta
+	responseDone := r.responseDone
 	r.chatStream = nil
 	r.chatDone = nil
 	r.responseStream = nil
-	r.responseMeta = nil
+	r.responseDone = nil
 	r.mu.Unlock()
 	if chatStream != nil {
 		if sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "error", Error: err}) {
@@ -934,7 +1060,7 @@ func (r *turnRunner) emitError(err error) {
 		}
 	}
 	if responseStream != nil {
-		if sendResponseStreamEvent(responseStream, meta, ResponseStreamEvent{Kind: "error", Error: err}) {
+		if sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "error", Error: err}) {
 			close(responseStream)
 		}
 	}
@@ -963,15 +1089,15 @@ func sendChatStreamEvent(ch chan<- StreamEvent, done <-chan struct{}, ev StreamE
 	}
 }
 
-func sendResponseStreamEvent(ch chan<- ResponseStreamEvent, meta *responseStreamMeta, ev ResponseStreamEvent) bool {
-	if meta == nil || meta.done == nil {
+func sendResponseStreamEvent(ch chan<- ResponseStreamEvent, done <-chan struct{}, ev ResponseStreamEvent) bool {
+	if done == nil {
 		ch <- ev
 		return true
 	}
 	select {
 	case ch <- ev:
 		return true
-	case <-meta.done:
+	case <-done:
 		return false
 	}
 }
@@ -1012,7 +1138,7 @@ func (r *turnRunner) closeStreams() {
 	r.chatStream = nil
 	r.chatDone = nil
 	r.responseStream = nil
-	r.responseMeta = nil
+	r.responseDone = nil
 	r.mu.Unlock()
 	if chatStream != nil {
 		close(chatStream)
@@ -1072,12 +1198,35 @@ func chatToolCallsFromCaptured(calls []toolproxy.CapturedCall) []openai.ChatTool
 	return out
 }
 
-func responseFromTurn(id, model, instructions string, previous *string, store bool, turn *TurnResult, suppressReasoning bool) *openai.Response {
+// responseFromTurn builds the openai.Response for a turn result. It is the one
+// and only place a Responses payload is constructed from a turn: the streamed
+// terminal event, the persisted record and the non-streaming JSON body all
+// serialize the value it returns. Callers on the live path reach it through
+// turnRunner.buildTurnResponse, which caches the result on the turn so a second
+// construction cannot happen.
+//
+// Every identity decision is made here or upstream of here: the output-item IDs
+// come from the turn (assigned by the runner before the first streamed delta
+// carried them to the client), the creation timestamp is the runner's, and the
+// output order is the order the stream announced the items in.
+func responseFromTurn(p responseParams, turn *TurnResult) *openai.Response {
+	turn.responseBuilds++
+	id := p.id
 	if id == "" {
 		id = openai.NewID("resp_")
 	}
-	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: time.Now().Unix(), Status: "completed", Model: model, Instructions: instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: previous, Store: store, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
-	if !suppressReasoning {
+	// One response, one creation time: the request stamps it, the runner's own
+	// clock is the fallback for a turn built without one, and only a turn built
+	// outside both (tests, synthetic results) reads the clock here.
+	created := p.created
+	if created == 0 {
+		created = turn.Created
+	}
+	if created == 0 {
+		created = openai.UnixNow()
+	}
+	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: created, Status: "completed", Model: p.model, Instructions: p.instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: p.previous, Store: p.store, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
+	if !p.suppressReasoning {
 		if item, ok := reasoningOutputItem(turn); ok {
 			resp.Output = append(resp.Output, item)
 		}
@@ -1086,13 +1235,66 @@ func responseFromTurn(id, model, instructions string, previous *string, store bo
 	if len(calls) == 0 && len(turn.ToolCalls) > 0 {
 		calls = capturedFromChatToolCalls(turn.ToolCalls)
 	}
-	if turn.Text != "" || len(calls) == 0 {
-		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: openai.NewID("msg_"), Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}})
+	// A message item the stream already announced must exist in the terminal
+	// output even if the turn ended with empty text, or the client would be left
+	// holding an item that never lands in the stored record.
+	if turn.Text != "" || len(calls) == 0 || turn.streamedMessage() {
+		resp.Output = append(resp.Output, openai.ResponseOutputItem{ID: turn.messageOutputItemID(), Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: turn.Text}}})
 	}
 	for _, tc := range calls {
 		resp.Output = append(resp.Output, responseOutputItemFromCaptured(tc))
 	}
+	resp.Output = orderOutputItems(resp.Output, turn.itemOrder)
 	return resp
+}
+
+// responseForTurn returns the turn's single response. The runner builds it for
+// every turn whose response identity is known, so this only constructs one for
+// a continuation whose runner was already forgotten - never a second time for
+// the same turn.
+func responseForTurn(p responseParams, turn *TurnResult) *openai.Response {
+	if turn.Response != nil {
+		return turn.Response
+	}
+	turn.Response = responseFromTurn(p, turn)
+	return turn.Response
+}
+
+// warmResponseCreatedAt uses the creation time the request was stamped with, so
+// a warm response reports the same instant on the wire and in the store.
+func warmResponseCreatedAt(req ResponseRequest) int64 {
+	if req.CreatedAt != 0 {
+		return req.CreatedAt
+	}
+	return openai.UnixNow()
+}
+
+// orderOutputItems arranges output items in the order the response stream
+// announced them, keeping items that were never streamed in their natural
+// order behind the announced ones. This is what makes a streamed event's
+// output_index equal to the item's position in the stored response, instead of
+// relying on the incidental fact that reasoning happens to be built first.
+func orderOutputItems(items []openai.ResponseOutputItem, order []string) []openai.ResponseOutputItem {
+	if len(order) == 0 || len(items) < 2 {
+		return items
+	}
+	out := make([]openai.ResponseOutputItem, 0, len(items))
+	taken := make([]bool, len(items))
+	for _, id := range order {
+		for i, item := range items {
+			if !taken[i] && item.ID != "" && item.ID == id {
+				out = append(out, item)
+				taken[i] = true
+				break
+			}
+		}
+	}
+	for i, item := range items {
+		if !taken[i] {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func capturedFromChatToolCalls(calls []openai.ChatToolCall) []toolproxy.CapturedCall {
@@ -1132,13 +1334,42 @@ func responseOutputItemFromCaptured(tc toolproxy.CapturedCall) openai.ResponseOu
 
 func jsonRaw(s string) json.RawMessage { return json.RawMessage(s) }
 
-// reasoningItemID derives a stable Responses reasoning item ID from the SDK
-// reasoning block ID so streamed and final items agree.
-func reasoningItemID(turn *TurnResult) string {
-	if turn.ReasoningID != "" {
-		return "rs_" + turn.ReasoningID
+// messageOutputItemID returns the turn's message output-item ID, assigning one
+// on first use. The runner normally assigns it before the first streamed delta;
+// memoizing here keeps a turn built outside a runner stable too.
+func (t *TurnResult) messageOutputItemID() string {
+	if t.MessageItemID == "" {
+		t.MessageItemID = openai.NewID("msg_")
 	}
-	return openai.NewID("rs_")
+	return t.MessageItemID
+}
+
+// reasoningOutputItemID returns the turn's reasoning output-item ID, deriving a
+// stable ID from the SDK reasoning block ID when one is available so streamed
+// and final items agree.
+func (t *TurnResult) reasoningOutputItemID() string {
+	if t.ReasoningItemID == "" {
+		if t.ReasoningID != "" {
+			t.ReasoningItemID = "rs_" + t.ReasoningID
+		} else {
+			t.ReasoningItemID = openai.NewID("rs_")
+		}
+	}
+	return t.ReasoningItemID
+}
+
+// streamedMessage reports whether this turn already announced its message item
+// on the response stream.
+func (t *TurnResult) streamedMessage() bool {
+	if t.MessageItemID == "" {
+		return false
+	}
+	for _, id := range t.itemOrder {
+		if id == t.MessageItemID {
+			return true
+		}
+	}
+	return false
 }
 
 // reasoningOutputItem builds the Responses `reasoning` output item from a turn,
@@ -1148,7 +1379,7 @@ func reasoningOutputItem(turn *TurnResult) (openai.ResponseOutputItem, bool) {
 	if turn.Reasoning == "" && turn.ReasoningEncrypted == "" {
 		return openai.ResponseOutputItem{}, false
 	}
-	item := openai.ResponseOutputItem{ID: reasoningItemID(turn), Type: "reasoning", Status: "completed", EncryptedContent: turn.ReasoningEncrypted}
+	item := openai.ResponseOutputItem{ID: turn.reasoningOutputItemID(), Type: "reasoning", Status: "completed", EncryptedContent: turn.ReasoningEncrypted}
 	if turn.Reasoning != "" {
 		item.Summary = []openai.ResponseReasoningSummary{{Type: "summary_text", Text: turn.Reasoning}}
 	}

@@ -26,8 +26,10 @@ type webSocketJSONWriter struct {
 	mu   sync.Mutex
 }
 
-func (w *webSocketJSONWriter) WriteResponseEvent(ev openai.ResponseStreamEvent) error {
-	return w.write(ev)
+func (w *webSocketJSONWriter) name() string { return "websocket" }
+
+func (w *webSocketJSONWriter) writeResponseEventPayload(_ openai.ResponseStreamEvent, payload []byte) error {
+	return w.writePayload(payload)
 }
 
 func (w *webSocketJSONWriter) write(v any) error {
@@ -36,6 +38,17 @@ func (w *webSocketJSONWriter) write(v any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), webSocketWriteTimeout)
 	defer cancel()
 	return wsjson.Write(ctx, w.conn, v)
+}
+
+// writePayload writes already-encoded JSON, which is what wsjson.Write does
+// after marshaling. Encoding above the transport lets the WebSocket share the
+// SSE stream's event logging.
+func (w *webSocketJSONWriter) writePayload(payload []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), webSocketWriteTimeout)
+	defer cancel()
+	return w.conn.Write(ctx, websocket.MessageText, payload)
 }
 
 func (w *webSocketJSONWriter) writeError(err error, eventID string) error {
@@ -344,7 +357,7 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 			state.evict(gwReq.PreviousResponseID)
 			return
 		}
-		if err := writeWarmResponseEvents(writer, res.Response); err != nil {
+		if err := writeWarmResponseEvents(newLoggedResponseEventWriter(s, ctx, writer), res.Response); err != nil {
 			closeWith(websocket.StatusGoingAway, "response stream closed")
 			res.WarmSession.Disconnect()
 			return
@@ -364,7 +377,7 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 		state.evict(gwReq.PreviousResponseID)
 		return
 	}
-	result := writeResponseStreamEvents(ctx, writer, gwReq, s.cfg.MaxTurnOutputBytes, ch)
+	result := writeResponseStreamEvents(ctx, newLoggedResponseEventWriter(s, ctx, writer), gwReq, s.cfg.MaxTurnOutputBytes, ch)
 	if result.Err != nil {
 		state.evict(gwReq.PreviousResponseID)
 		if result.WriteFailed {

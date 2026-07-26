@@ -60,21 +60,6 @@ func (s *Server) writeSSEDone(ctx context.Context, writer *SSEWriter, attrs ...a
 	return err
 }
 
-func (s *Server) writeSSEEvent(ctx context.Context, writer *SSEWriter, event string, v any, attrs ...any) error {
-	if !s.debugEnabled(ctx) {
-		return writer.Event(event, v)
-	}
-	payload, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	start := time.Now()
-	err = writer.EventJSON(event, payload)
-	attrs = append([]any{"event", event}, attrs...)
-	s.debugSSEWrite(ctx, "sse event written", event, start, err, payload, attrs...)
-	return err
-}
-
 func (s *Server) debugSSEWrite(ctx context.Context, msg, label string, start time.Time, err error, payload []byte, attrs ...any) {
 	if !s.debugEnabled(ctx) {
 		return
@@ -114,6 +99,26 @@ func (s *Server) logChatStreamEvent(ctx context.Context, ev copilotgw.StreamEven
 		attrs = append(attrs, "error", ev.Error.Error())
 	}
 	s.debugStream(ctx, "chat stream event received", attrs...)
+}
+
+// debugResponseStreamEvent is the one debug log for a written Responses event,
+// shared by every transport so a WebSocket stream is exactly as observable as
+// an SSE one. Like the other stream logs it only includes the raw payload when
+// cfg.LogContent is enabled, since the payload carries model output.
+func (s *Server) debugResponseStreamEvent(ctx context.Context, transport string, ev openai.ResponseStreamEvent, payload []byte, start time.Time, err error) {
+	if !s.debugEnabled(ctx) {
+		return
+	}
+	attrs := []any{"transport", transport, "write_duration_ms", float64(time.Since(start).Microseconds()) / 1000.0}
+	if err != nil {
+		attrs = append(attrs, "error", err.Error())
+	}
+	attrs = append(attrs, "payload_bytes", len(payload))
+	if s.cfg.LogContent {
+		attrs = append(attrs, "payload_preview", observability.TruncateBytesForLog(payload, 240))
+	}
+	attrs = append(attrs, responseStreamEventAttrs(ev)...)
+	observability.Logger(ctx, s.log).Debug("responses stream event written", attrs...)
 }
 
 func streamDeltaAttrs(delta string) []any {

@@ -164,7 +164,7 @@ func TestStreamingResponseContinuationDefaultsMissingResponseID(t *testing.T) {
 	g := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	g.modelsFetcher = func(context.Context) ([]Model, error) { return []Model{{ID: "gpt-test"}}, nil }
 
-	previous := responseFromTurn("resp_prev", "gpt-test", "", nil, true, &TurnResult{Text: "need lookup", FinishReason: "tool_calls"}, false)
+	previous := responseFromTurn(responseParams{id: "resp_prev", model: "gpt-test", store: true}, &TurnResult{Text: "need lookup", FinishReason: "tool_calls"})
 	if err := store.SaveResponse(recordFromResponse(previous, "sdk-session", "")); err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalo
 		t.Fatal(err)
 	}
 	g := &RealGateway{store: store}
-	previous := responseFromTurn("resp_prev", "gpt-test", "", nil, true, &TurnResult{FinishReason: "tool_calls", ResponseToolCalls: []toolproxy.CapturedCall{{Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", ResponseName: "tool_search", Execution: "client"}}}, false)
+	previous := responseFromTurn(responseParams{id: "resp_prev", model: "gpt-test", store: true}, &TurnResult{FinishReason: "tool_calls", ResponseToolCalls: []toolproxy.CapturedCall{{Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", ResponseName: "tool_search", Execution: "client"}}})
 	catalog, err := toolcatalog.NewToolCatalog([]toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
 	if err != nil {
 		t.Fatal(err)

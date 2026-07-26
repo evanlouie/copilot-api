@@ -87,8 +87,8 @@ func (g *reasoningResponseStreamGateway) StreamResponse(_ context.Context, req c
 	ch := make(chan copilotgw.ResponseStreamEvent, 8)
 	go func() {
 		defer close(ch)
-		ch <- copilotgw.ResponseStreamEvent{Kind: "reasoning_delta", Delta: "thinking", ReasoningID: "rid-1"}
-		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "answer"}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "reasoning_delta", ItemID: "rs_rid-1", Delta: "thinking"}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_1", Delta: "answer"}
 		turn := &copilotgw.TurnResult{Text: "answer", Reasoning: "thinking", ReasoningID: "rid-1"}
 		resp := responseForReasoningTest(req, turn)
 		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: resp}
@@ -471,8 +471,8 @@ func (g *encryptedTextReasoningResponseStreamGateway) StreamResponse(_ context.C
 	ch := make(chan copilotgw.ResponseStreamEvent, 8)
 	go func() {
 		defer close(ch)
-		ch <- copilotgw.ResponseStreamEvent{Kind: "reasoning_delta", Delta: "thinking", ReasoningID: "rid-1"}
-		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "answer"}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "reasoning_delta", ItemID: "rs_rid-1", Delta: "thinking"}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_1", Delta: "answer"}
 		resp := responseForReasoningTest(req, &copilotgw.TurnResult{Text: "answer", Reasoning: "thinking", ReasoningID: "rid-1"})
 		resp.Output[0].EncryptedContent = "enc-blob"
 		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: resp}

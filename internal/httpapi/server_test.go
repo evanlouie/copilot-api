@@ -41,7 +41,7 @@ func (g *codexStreamGateway) StreamResponse(_ context.Context, req copilotgw.Res
 	ch := make(chan copilotgw.ResponseStreamEvent, 2)
 	go func() {
 		defer close(ch)
-		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "ok"}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_final", Delta: "ok"}
 		ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, OutputText: "ok", Output: []openai.ResponseOutputItem{{ID: "msg_final", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "ok"}}}}, ParallelToolCalls: true, Store: req.Store}}
 	}()
 	return ch, nil
@@ -91,7 +91,7 @@ func (g *websocketStreamGateway) StreamResponse(ctx context.Context, req copilot
 			ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{ID: req.ResponseID, Object: openai.ObjectResponse, CreatedAt: openai.UnixNow(), Status: "completed", Model: req.Model, Output: []openai.ResponseOutputItem{{ID: "fc_call_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "lookup", Arguments: `{"q":"alpha"}`}}, ParallelToolCalls: true, PreviousResponseID: previousResponsePtr(req.PreviousResponseID), Store: req.Store}}
 			return
 		}
-		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: text}
+		ch <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_final", Delta: text}
 		if errorAfterText != nil {
 			ch <- copilotgw.ResponseStreamEvent{Kind: "error", Error: errorAfterText}
 			return
@@ -1550,17 +1550,32 @@ func TestResponsesStreamAcceptsCodexRequestShape(t *testing.T) {
 	}
 }
 
-func TestStreamedMessageItemKeepsTextAtStableIndex(t *testing.T) {
-	resp := &openai.Response{Output: []openai.ResponseOutputItem{{ID: "fc_call_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "lookup", Arguments: `{}`}}}
-	item, idx := streamedMessageItem(resp, "msg_stream", "hello", 0)
-	if idx != 0 || item == nil || item.ID != "msg_stream" || item.Type != "message" {
-		t.Fatalf("streamedMessageItem = (%#v, %d), want message at index 0", item, idx)
+// TestOutputItemIndexerAssignsOneIndexPerItem pins the single source of truth
+// for output_index. An item keeps the index it was first announced at, and two
+// items can never share one - including in the [message, reasoning] ordering
+// that a late (encrypted-only) reasoning item produces, which is exactly the
+// case ad-hoc index arithmetic used to get wrong.
+func TestOutputItemIndexerAssignsOneIndexPerItem(t *testing.T) {
+	var index outputItemIndexer
+	if got := index.indexOf("msg_1"); got != 0 {
+		t.Fatalf("first announced item index = %d, want 0", got)
 	}
-	if len(resp.Output) != 2 || resp.Output[0].Type != "message" || resp.Output[1].Type != "function_call" {
-		t.Fatalf("unexpected output order: %#v", resp.Output)
+	if got := index.indexOf("rs_1"); got != 1 {
+		t.Fatalf("late reasoning item index = %d, want 1", got)
 	}
-	if resp.Output[1].CallID != "call_1" {
-		t.Fatalf("function call was not preserved: %#v", resp.Output[1])
+	if got := index.indexOf("msg_1"); got != 0 {
+		t.Fatalf("re-announced item index = %d, want the original 0", got)
+	}
+	if got := index.indexOf("fc_1"); got != 2 {
+		t.Fatalf("tool call item index = %d, want 2", got)
+	}
+	seen := map[int]string{}
+	for _, id := range []string{"msg_1", "rs_1", "fc_1"} {
+		idx := index.indexOf(id)
+		if other, ok := seen[idx]; ok {
+			t.Fatalf("items %q and %q both landed at output_index %d", other, id, idx)
+		}
+		seen[idx] = id
 	}
 }
 

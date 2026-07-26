@@ -220,7 +220,7 @@ func TestOnResultErrorTerminatesLoop(t *testing.T) {
 	runner, unpinned := newLoopTestRunner(events, time.Minute)
 	runner.rt = rt
 	stream := make(chan ResponseStreamEvent, 4)
-	runner.enableResponseStream(stream, "resp_1", "gpt-test", "", nil, true, false, nil)
+	runner.enableResponseStream(stream, nil)
 	runner.setOnResult(func(*TurnResult) error { return apierr.Internal("failed to persist response") })
 
 	go runner.loop(&RealGateway{})
@@ -341,9 +341,10 @@ func TestCurrentResponseIDUsesContinuationMetadata(t *testing.T) {
 	if got := r.currentResponseID(); got != "resp_nonstream_continuation" {
 		t.Fatalf("currentResponseID with non-stream continuation = %q, want resp_nonstream_continuation", got)
 	}
-	r.enableResponseStream(make(chan ResponseStreamEvent, 1), "resp_stream_continuation", "gpt-test", "", nil, true, false, nil)
+	r.setResponseParams(responseParams{id: "resp_stream_continuation", model: "gpt-test", store: true})
+	r.enableResponseStream(make(chan ResponseStreamEvent, 1), nil)
 	if got := r.currentResponseID(); got != "resp_stream_continuation" {
-		t.Fatalf("currentResponseID with stream meta = %q, want resp_stream_continuation", got)
+		t.Fatalf("currentResponseID with stream params = %q, want resp_stream_continuation", got)
 	}
 }
 
@@ -404,7 +405,7 @@ func TestTurnAccumulatesTextAcrossAssistantMessages(t *testing.T) {
 	runner, unpinned := newLoopTestRunner(events, time.Minute)
 	runner.rt = rt
 	stream := make(chan ResponseStreamEvent, 8)
-	runner.enableResponseStream(stream, "resp_1", "gpt-test", "", nil, true, false, nil)
+	runner.enableResponseStream(stream, nil)
 
 	go runner.loop(&RealGateway{})
 	events <- copilot.SessionEvent{Data: &copilot.AssistantTurnStartData{TurnID: "1"}}

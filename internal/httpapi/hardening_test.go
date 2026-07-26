@@ -235,11 +235,21 @@ func TestPrematureResponseStreamClosureEmitsFailure(t *testing.T) {
 	}
 }
 
+// TestResponseStreamReconcilesTerminalReasoningAfterSummaryDone covers a turn
+// whose consolidated reasoning extends what was streamed, after content already
+// closed the first summary part. The suffix is bracketed as a second summary
+// part on the wire, but the terminal item keeps the consolidated summary the
+// gateway built and persisted: rewriting it here would make the streamed
+// response disagree with the stored record, because persistence already
+// happened in the gateway.
 func TestResponseStreamReconcilesTerminalReasoningAfterSummaryDone(t *testing.T) {
-	response := &openai.Response{ID: "resp_reason_suffix", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", Output: []openai.ResponseOutputItem{{ID: "rs_suffix", Type: "reasoning", Status: "completed", Summary: []openai.ResponseReasoningSummary{{Type: "summary_text", Text: "thinking"}}}}}
+	response := &openai.Response{ID: "resp_reason_suffix", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "answer", Output: []openai.ResponseOutputItem{
+		{ID: "rs_suffix", Type: "reasoning", Status: "completed", Summary: []openai.ResponseReasoningSummary{{Type: "summary_text", Text: "thinking"}}},
+		{ID: "msg_suffix", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "answer"}}},
+	}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 3)
-	channel <- copilotgw.ResponseStreamEvent{Kind: "reasoning_delta", Delta: "think", ReasoningID: "suffix"}
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "answer"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "reasoning_delta", ItemID: "rs_suffix", Delta: "think"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_suffix", Delta: "answer"}
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
@@ -248,13 +258,20 @@ func TestResponseStreamReconcilesTerminalReasoningAfterSummaryDone(t *testing.T)
 		t.Fatal(result.Err)
 	}
 	var reasoning strings.Builder
+	summaryParts := map[int]struct{}{}
 	for _, event := range writer.events {
 		if event.Type == "response.reasoning_summary_text.delta" {
 			reasoning.WriteString(event.Delta)
 		}
+		if event.Type == "response.reasoning_summary_part.added" && event.SummaryIndex != nil {
+			summaryParts[*event.SummaryIndex] = struct{}{}
+		}
 	}
-	if reasoning.String() != "thinking" || len(result.Response.Output[0].Summary) != 2 {
-		t.Fatalf("reasoning=%q response=%#v", reasoning.String(), result.Response)
+	if reasoning.String() != "thinking" || len(summaryParts) != 2 {
+		t.Fatalf("reasoning=%q summary parts=%v", reasoning.String(), summaryParts)
+	}
+	if len(result.Response.Output[0].Summary) != 1 || result.Response.Output[0].Summary[0].Text != "thinking" {
+		t.Fatalf("terminal reasoning item was rewritten after persistence: %#v", result.Response.Output[0])
 	}
 }
 
@@ -262,7 +279,7 @@ func TestResponseStreamDeadlineClosesPartialItemsAndUsesTimeoutError(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	channel := make(chan copilotgw.ResponseStreamEvent, 1)
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "partial"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_timeout", Delta: "partial"}
 	writer := &captureResponseEventWriter{}
 	result := writeResponseStreamEvents(ctx, writer, copilotgw.ResponseRequest{ResponseID: "resp_timeout", Model: "gpt-5"}, 1024, channel)
 	if result.Err == nil || result.WriteFailed || !result.FailureWritten {
@@ -319,7 +336,7 @@ func TestResponseStreamStopsAfterCompletedResponse(t *testing.T) {
 func TestResponseStreamEmitsTerminalTextSuffix(t *testing.T) {
 	response := &openai.Response{ID: "resp_suffix", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "partial", Output: []openai.ResponseOutputItem{{ID: "msg_suffix", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "partial"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 2)
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "part"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_suffix", Delta: "part"}
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
@@ -346,8 +363,8 @@ func TestResponseStreamEmitsTerminalTextSuffix(t *testing.T) {
 func TestResponseStreamAcceptsMultiMessageTurnTerminalText(t *testing.T) {
 	response := &openai.Response{ID: "resp_multi", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "Alpha Beta", Output: []openai.ResponseOutputItem{{ID: "msg_multi", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "Alpha Beta"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 3)
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Alpha "}
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Beta"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_multi", Delta: "Alpha "}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_multi", Delta: "Beta"}
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
@@ -376,8 +393,8 @@ func TestResponseStreamAcceptsMultiMessageTurnTerminalText(t *testing.T) {
 func TestResponseStreamRejectsTerminalTextMissingStreamedContent(t *testing.T) {
 	response := &openai.Response{ID: "resp_dropped", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "Beta", Output: []openai.ResponseOutputItem{{ID: "msg_dropped", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "Beta"}}}}}
 	channel := make(chan copilotgw.ResponseStreamEvent, 3)
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Alpha "}
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "Beta"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_dropped", Delta: "Alpha "}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_dropped", Delta: "Beta"}
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
@@ -450,12 +467,14 @@ func TestTerminalOnlyResponseMessageHasCompleteLifecycle(t *testing.T) {
 
 func TestContentFirstTerminalReasoningHasCompleteLifecycle(t *testing.T) {
 	channel := make(chan copilotgw.ResponseStreamEvent, 2)
-	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "answer"}
+	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_1", Delta: "answer"}
+	// The gateway orders the terminal output the way the stream announced it, so
+	// a reasoning item that only materialised at the end follows the message.
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: &openai.Response{
 		ID: "resp_reasoning", Object: openai.ObjectResponse, Status: "completed", Model: "gpt-5", OutputText: "answer",
 		Output: []openai.ResponseOutputItem{
-			{ID: "rs_1", Type: "reasoning", Status: "completed", EncryptedContent: "encrypted"},
 			{ID: "msg_1", Type: "message", Status: "completed", Role: "assistant", Content: []openai.ResponseText{{Type: "output_text", Text: "answer"}}},
+			{ID: "rs_1", Type: "reasoning", Status: "completed", EncryptedContent: "encrypted"},
 		},
 	}}
 	close(channel)

@@ -34,6 +34,8 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	defer releaseSession()
 	defer releaseResponse()
 	runner := g.newTurnRunner(ctx, req.ResponseID, req.Model, prepared.session, prepared.rt, prepared.events, prepared.retained, "response", req.ResponseID)
+	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: prepared.previous, store: req.Store, suppressReasoning: req.SuppressReasoning}
+	runner.setResponseParams(params)
 	releaseAll(prepared.pinReleases)
 	prepared.pinReleases = nil
 	runner.watchContext(ctx)
@@ -49,7 +51,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	if turn.PendingBatchID != "" {
 		g.rememberRunner(turn.PendingBatchID, runner)
 	}
-	resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, turn, req.SuppressReasoning)
+	resp := responseForTurn(params, turn)
 	record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 	record.InputText = incrementalInput
 	record.PendingBatchID = turn.PendingBatchID
@@ -121,16 +123,18 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		}
 		previous := previousResponseID
 		ch := make(chan ResponseStreamEvent, 32)
+		params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: &previous, store: storeVisible, suppressReasoning: req.SuppressReasoning}
 		if err := batch.CompleteToolOutputsWithSetup(outputs, func() {
 			runner.setCurrentResponseID(req.ResponseID)
 			runner.attachToRequestContext()
 			runner.watchContext(ctx)
-			runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, req.SuppressReasoning, ctx.Done())
+			runner.setResponseParams(params)
+			runner.enableResponseStream(ch, ctx.Done())
 			runner.setOnResult(func(turn *TurnResult) error {
 				if turn.PendingBatchID != "" {
 					g.rememberRunner(turn.PendingBatchID, runner)
 				}
-				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
+				resp := responseForTurn(params, turn)
 				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 				record.PendingBatchID = turn.PendingBatchID
 				record.ToolOutputs = toolcatalog.StoredToolOutputsFromMap(outputs)
@@ -159,12 +163,14 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	releaseAll(prepared.pinReleases)
 	prepared.pinReleases = nil
 	runner.watchContext(ctx)
-	runner.enableResponseStream(ch, req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, req.SuppressReasoning, ctx.Done())
+	params := responseParams{id: req.ResponseID, created: req.CreatedAt, model: req.Model, instructions: req.Instructions, previous: prepared.previous, store: req.Store, suppressReasoning: req.SuppressReasoning}
+	runner.setResponseParams(params)
+	runner.enableResponseStream(ch, ctx.Done())
 	runner.setOnResult(func(turn *TurnResult) error {
 		if turn.PendingBatchID != "" {
 			g.rememberRunner(turn.PendingBatchID, runner)
 		}
-		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, prepared.previous, req.Store, turn, req.SuppressReasoning)
+		resp := responseForTurn(params, turn)
 		record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 		record.InputText = incrementalInput
 		record.PendingBatchID = turn.PendingBatchID
