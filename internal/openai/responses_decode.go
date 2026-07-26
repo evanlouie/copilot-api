@@ -53,11 +53,11 @@ func ResponsesRequestFromFields(fields map[string]json.RawMessage) (ResponsesReq
 		}
 	}
 	for _, name := range []string{"background", "max_output_tokens", "truncation", "temperature", "top_p", "include", "reasoning", "text", "metadata", "service_tier", "user"} {
-		if raw, ok := fields[name]; ok {
+		if raw, ok := fields[name]; ok && rawFieldPresent(raw) {
 			request.Raw[name] = raw
 		}
 	}
-	if _, ok := fields["tools"]; ok {
+	if raw, ok := fields["tools"]; ok && rawFieldPresent(raw) {
 		request.Raw["tools"] = json.RawMessage(`true`)
 	}
 	return request, nil

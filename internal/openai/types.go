@@ -618,9 +618,21 @@ func (r *ResponsesRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// rawFieldPresent reports whether a decoded JSON value counts as a field the
+// client actually supplied. An explicit JSON null is treated as absent: SDKs
+// such as openai-python serialize an explicit Python None (distinct from their
+// NOT_GIVEN sentinel) as `null`, and json.RawMessage captures that literal as a
+// 4-byte payload, so `null` must not trip the unsupported-field tables.
+//
+// The comparison stays at the byte level because these payloads can be large
+// and string(raw) would copy them.
+func rawFieldPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
 func presentRawFields(fields map[string]json.RawMessage) map[string]json.RawMessage {
 	for name, raw := range fields {
-		if len(raw) == 0 {
+		if !rawFieldPresent(raw) {
 			delete(fields, name)
 		}
 	}
