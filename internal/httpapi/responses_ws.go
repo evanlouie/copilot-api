@@ -23,7 +23,11 @@ const webSocketWriteTimeout = 30 * time.Second
 
 type webSocketJSONWriter struct {
 	conn *websocket.Conn
-	mu   sync.Mutex
+	// ctx is the connection's work context. Every frame is written under it, so
+	// a write to a black-holed peer stops as soon as the connection is torn down
+	// instead of holding mu for the full write timeout past that point.
+	ctx context.Context
+	mu  sync.Mutex
 }
 
 func (w *webSocketJSONWriter) name() string { return "websocket" }
@@ -32,10 +36,20 @@ func (w *webSocketJSONWriter) writeResponseEventPayload(_ openai.ResponseStreamE
 	return w.writePayload(payload)
 }
 
+// writeContext bounds a single frame write: the write timeout, but never past
+// the life of the connection the frame belongs to.
+func (w *webSocketJSONWriter) writeContext() (context.Context, context.CancelFunc) {
+	parent := w.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, webSocketWriteTimeout)
+}
+
 func (w *webSocketJSONWriter) write(v any) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), webSocketWriteTimeout)
+	ctx, cancel := w.writeContext()
 	defer cancel()
 	return wsjson.Write(ctx, w.conn, v)
 }
@@ -46,7 +60,7 @@ func (w *webSocketJSONWriter) write(v any) error {
 func (w *webSocketJSONWriter) writePayload(payload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), webSocketWriteTimeout)
+	ctx, cancel := w.writeContext()
 	defer cancel()
 	return w.conn.Write(ctx, websocket.MessageText, payload)
 }
@@ -194,14 +208,32 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		parent, cancelLifetime = context.WithTimeout(parent, s.cfg.WebSocketMaxLifetime)
 		defer cancelLifetime()
 	}
+	// connCtx bounds the work this connection starts: in-flight responses and
+	// the gateway producers behind them, the ping and idle watchdogs, and every
+	// frame written back.
+	//
+	// The read loop below deliberately does NOT read with it. coder/websocket
+	// tears the socket down the moment a read context is cancelled
+	// (context.AfterFunc -> Conn.close, see setupReadTimeout), so reading with
+	// connCtx would make cancelling work race the close frame and downgrade
+	// every graceful teardown to an abnormal closure. conn.Close is what wakes
+	// the read loop; connCtx.Err() is what tells it the teardown was ours.
 	connCtx, cancel := context.WithCancel(parent)
-	writer := &webSocketJSONWriter{conn: conn}
+	writer := &webSocketJSONWriter{conn: conn, ctx: connCtx}
 	state := &responsesWebSocketState{lastSeen: time.Now()}
 	var closeOnce sync.Once
 	closeWith := func(status websocket.StatusCode, reason string) {
 		closeOnce.Do(func() {
-			_ = conn.Close(status, reason)
+			// Cancel before closing. Cancellation is what actually releases the
+			// gateway producers, in-flight turns and watchdogs, and it cannot
+			// block; the close handshake is best-effort cleanup that spends up to
+			// 10s against an unresponsive peer (5s writing the close frame, 5s
+			// waiting for the reply, the latter behind the read mutex this
+			// connection's own read loop is holding). Nothing downstream of a
+			// closeWith call writes to the connection, so no caller depends on
+			// the frame being on the wire before the context dies.
 			cancel()
+			_ = conn.Close(status, reason)
 		})
 	}
 	if !s.registerWebSocket(conn, func() { closeWith(websocket.StatusGoingAway, "server shutting down") }) {
@@ -225,7 +257,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		var raw json.RawMessage
-		if err := wsjson.Read(connCtx, conn, &raw); err != nil {
+		if err := wsjson.Read(parent, conn, &raw); err != nil {
 			if errors.Is(err, websocket.ErrMessageTooBig) {
 				// The limit is enforced inside coder/websocket's message
 				// reader, and by the time the error surfaces the connection is
@@ -245,7 +277,11 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				closeWith(websocket.StatusMessageTooBig, fmt.Sprintf("websocket message exceeds the %d byte request body limit", readLimit))
 				break
 			}
-			if websocket.CloseStatus(err) != -1 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// connCtx.Err() covers every teardown this server initiated: closeWith
+			// cancels before it closes, so a read that fails with the connection
+			// already cancelled is our own shutdown surfacing as net.ErrClosed and
+			// must end the loop rather than be reported back to a dead peer.
+			if websocket.CloseStatus(err) != -1 || connCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				break
 			}
 			_ = writer.writeError(apierr.InvalidRequest("invalid JSON websocket message: "+err.Error(), "body"), "")
