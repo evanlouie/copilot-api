@@ -843,22 +843,6 @@ func TestResponsesRequestPassesConfiguredDefaultReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestStrictResponsesRejectsMCPProviderTool(t *testing.T) {
-	t.Parallel()
-	s := New(config.Config{StrictCompat: true}, &captureResponseGateway{}, slog.Default())
-	body := strings.NewReader(`{"model":"gpt-5","tools":[{"type":"mcp","server_label":"test-mcp","server_url":"https://example.invalid/mcp"}],"input":"hi"}`)
-	w := httptest.NewRecorder()
-
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "hosted or proxy-executed Responses tools are not supported") {
-		t.Fatalf("unexpected error body: %s", w.Body.String())
-	}
-}
-
 func TestResponsesRequestPassesPreviousResponseIDStoreAndFunctionOutputs(t *testing.T) {
 	t.Parallel()
 	gw := &captureResponseGateway{}
@@ -1883,11 +1867,10 @@ func TestUnhonoredControlsAreLoggedAtDebug(t *testing.T) {
 func TestHTTPRejectsStructuredOutputOnBothSurfaces(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		path   string
-		body   string
-		param  string
-		strict bool
+		name  string
+		path  string
+		body  string
+		param string
 	}{
 		{
 			name:  "chat json_schema",
@@ -1896,24 +1879,10 @@ func TestHTTPRejectsStructuredOutputOnBothSurfaces(t *testing.T) {
 			param: "response_format",
 		},
 		{
-			name:   "chat json_schema strict",
-			path:   "/v1/chat/completions",
-			body:   `{"model":"gpt-5","response_format":{"type":"json_schema","json_schema":{"name":"out","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`,
-			param:  "response_format",
-			strict: true,
-		},
-		{
 			name:  "responses json_schema",
 			path:  "/v1/responses",
 			body:  `{"model":"gpt-5","text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"input":"hi"}`,
 			param: "text.format",
-		},
-		{
-			name:   "responses json_schema strict",
-			path:   "/v1/responses",
-			body:   `{"model":"gpt-5","text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"input":"hi"}`,
-			param:  "text.format",
-			strict: true,
 		},
 		{
 			name:  "chat json_object",
@@ -1935,7 +1904,7 @@ func TestHTTPRejectsStructuredOutputOnBothSurfaces(t *testing.T) {
 			if tc.path == "/v1/responses" {
 				gw = &captureResponseGateway{}
 			}
-			s := New(config.Config{StrictCompat: tc.strict}, gw, slog.Default())
+			s := New(config.Config{}, gw, slog.Default())
 			w := httptest.NewRecorder()
 			s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
 

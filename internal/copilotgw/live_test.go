@@ -25,7 +25,6 @@ func TestLiveCopilotTextCompletion(t *testing.T) {
 		ConfigDir:      root + "/config",
 		ToolCallTTL:    time.Minute,
 		ModelsCacheTTL: time.Minute,
-		StrictCompat:   true,
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
 	store := sessionstore.New(cfg.DataDir, cfg.StateDir, cfg.CacheDir)

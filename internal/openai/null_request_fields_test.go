@@ -16,17 +16,23 @@ import (
 // chatFieldSamples pairs every validated chat field with a realistic non-null
 // value that must still be rejected once the field is genuinely present.
 var chatFieldSamples = map[string]string{
-	"audio":             `{"voice":"alloy","format":"mp3"}`,
-	"function_call":     `"auto"`,
-	"functions":         `[{"name":"lookup","parameters":{"type":"object"}}]`,
-	"logit_bias":        `{"1234":-100}`,
+	"audio":           `{"voice":"alloy","format":"mp3"}`,
+	"function_call":   `"auto"`,
+	"functions":       `[{"name":"lookup","parameters":{"type":"object"}}]`,
+	"logit_bias":      `{"1234":-100}`,
+	"modalities":      `["text"]`,
+	"prediction":      `{"type":"content","content":"draft"}`,
+	"response_format": `{"type":"json_object"}`,
+	"stop":            `["done"]`,
+	"n":               `2`,
+}
+
+// chatIgnoredFieldSamples is the counterpart for chat fields this proxy accepts
+// and cannot honour. They are never rejected, so what needs guarding is that an
+// explicit null still reads as absent rather than as a value.
+var chatIgnoredFieldSamples = map[string]string{
 	"logprobs":          `true`,
 	"top_logprobs":      `3`,
-	"modalities":        `["text"]`,
-	"prediction":        `{"type":"content","content":"draft"}`,
-	"response_format":   `{"type":"json_object"}`,
-	"stop":              `["done"]`,
-	"n":                 `2`,
 	"temperature":       `0.5`,
 	"top_p":             `0.9`,
 	"presence_penalty":  `0.1`,
@@ -37,12 +43,15 @@ var chatFieldSamples = map[string]string{
 	"user":              `"user-1"`,
 }
 
-// responsesFieldSamples is the Responses equivalent of chatFieldSamples. Values
-// for strict-only fields are deliberately well-formed so that strict mode is
-// rejecting on presence rather than on content.
+// responsesFieldSamples is the Responses equivalent of chatFieldSamples.
 var responsesFieldSamples = map[string]string{
-	"background":   `true`,
-	"truncation":   `"auto"`,
+	"background": `true`,
+	"truncation": `"auto"`,
+}
+
+// responsesIgnoredFieldSamples is the Responses equivalent of
+// chatIgnoredFieldSamples.
+var responsesIgnoredFieldSamples = map[string]string{
 	"temperature":  `0.5`,
 	"top_p":        `0.9`,
 	"include":      `["reasoning.encrypted_content"]`,
@@ -79,7 +88,7 @@ func TestRawFieldPresentTreatsNullAsAbsent(t *testing.T) {
 
 func TestChatNullFieldsAreTreatedAsAbsent(t *testing.T) {
 	t.Parallel()
-	requireSampleCoverage(t, chatFieldSamples, alwaysRejectChatFields, strictOnlyChatFields)
+	requireSampleCoverage(t, chatFieldSamples, alwaysRejectChatFields)
 	for _, field := range alwaysRejectChatFields {
 		t.Run("always_reject/"+field.name, func(t *testing.T) {
 			t.Parallel()
@@ -87,34 +96,28 @@ func TestChatNullFieldsAreTreatedAsAbsent(t *testing.T) {
 			if _, present := req.Raw[field.name]; present {
 				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
 			}
-			assertChatAccepted(t, req, false)
-			assertChatAccepted(t, req, true)
+			assertChatAccepted(t, req)
 
 			value := decodeChatRequest(t, chatBody(field.name, chatFieldSamples[field.name]))
-			assertChatRejected(t, value, false, field.name)
-			assertChatRejected(t, value, true, field.name)
+			assertChatRejected(t, value, field.name)
 		})
 	}
-	for _, field := range strictOnlyChatFields {
-		t.Run("strict_only/"+field.name, func(t *testing.T) {
+	for name, sample := range chatIgnoredFieldSamples {
+		t.Run("ignored/"+name, func(t *testing.T) {
 			t.Parallel()
-			req := decodeChatRequest(t, chatBody(field.name, `null`))
-			if _, present := req.Raw[field.name]; present {
-				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
+			req := decodeChatRequest(t, chatBody(name, `null`))
+			if _, present := req.Raw[name]; present {
+				t.Fatalf("explicit null left %q in the presence map: %#v", name, req.Raw)
 			}
-			assertChatAccepted(t, req, false)
-			assertChatAccepted(t, req, true)
-
-			value := decodeChatRequest(t, chatBody(field.name, chatFieldSamples[field.name]))
-			assertChatAccepted(t, value, false)
-			assertChatRejected(t, value, true, field.name)
+			assertChatAccepted(t, req)
+			assertChatAccepted(t, decodeChatRequest(t, chatBody(name, sample)))
 		})
 	}
 }
 
 func TestResponsesNullFieldsAreTreatedAsAbsent(t *testing.T) {
 	t.Parallel()
-	requireSampleCoverage(t, responsesFieldSamples, alwaysRejectResponseFields, strictOnlyResponseFields)
+	requireSampleCoverage(t, responsesFieldSamples, alwaysRejectResponseFields)
 	for _, field := range alwaysRejectResponseFields {
 		t.Run("always_reject/"+field.name, func(t *testing.T) {
 			t.Parallel()
@@ -122,27 +125,21 @@ func TestResponsesNullFieldsAreTreatedAsAbsent(t *testing.T) {
 			if _, present := req.Raw[field.name]; present {
 				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
 			}
-			assertResponsesAccepted(t, req, false)
-			assertResponsesAccepted(t, req, true)
+			assertResponsesAccepted(t, req)
 
 			value := decodeResponsesRequest(t, responsesBody(field.name, responsesFieldSamples[field.name]))
-			assertResponsesRejected(t, value, false, field.name)
-			assertResponsesRejected(t, value, true, field.name)
+			assertResponsesRejected(t, value, field.name)
 		})
 	}
-	for _, field := range strictOnlyResponseFields {
-		t.Run("strict_only/"+field.name, func(t *testing.T) {
+	for name, sample := range responsesIgnoredFieldSamples {
+		t.Run("ignored/"+name, func(t *testing.T) {
 			t.Parallel()
-			req := decodeResponsesRequest(t, responsesBody(field.name, `null`))
-			if _, present := req.Raw[field.name]; present {
-				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
+			req := decodeResponsesRequest(t, responsesBody(name, `null`))
+			if _, present := req.Raw[name]; present {
+				t.Fatalf("explicit null left %q in the presence map: %#v", name, req.Raw)
 			}
-			assertResponsesAccepted(t, req, false)
-			assertResponsesAccepted(t, req, true)
-
-			value := decodeResponsesRequest(t, responsesBody(field.name, responsesFieldSamples[field.name]))
-			assertResponsesAccepted(t, value, false)
-			assertResponsesRejected(t, value, true, field.name)
+			assertResponsesAccepted(t, req)
+			assertResponsesAccepted(t, decodeResponsesRequest(t, responsesBody(name, sample)))
 		})
 	}
 }
@@ -161,8 +158,7 @@ func TestChatNullFieldsFromOpenAIPythonExplicitNone(t *testing.T) {
 	if _, ok := req.RequestedMaxOutputTokens(); ok {
 		t.Fatal(`{"max_tokens":null} reported a requested output cap`)
 	}
-	assertChatAccepted(t, req, false)
-	assertChatAccepted(t, req, true)
+	assertChatAccepted(t, req)
 }
 
 // max_tokens and max_completion_tokens are accepted rather than rejected, so
@@ -194,9 +190,9 @@ func TestChatNullNNeverReachesIsOne(t *testing.T) {
 	if isOne(json.RawMessage(`null`)) {
 		t.Fatal("isOne(null) = true; the null sub-case must be handled by presence filtering")
 	}
-	assertChatAccepted(t, decodeChatRequest(t, chatBody("n", `null`)), false)
-	assertChatAccepted(t, decodeChatRequest(t, chatBody("n", `1`)), false)
-	assertChatRejected(t, decodeChatRequest(t, chatBody("n", `2`)), false, "n")
+	assertChatAccepted(t, decodeChatRequest(t, chatBody("n", `null`)))
+	assertChatAccepted(t, decodeChatRequest(t, chatBody("n", `1`)))
+	assertChatRejected(t, decodeChatRequest(t, chatBody("n", `2`)), "n")
 }
 
 // TestNullPresenceDerivedBooleansAreUnset guards the presence-derived booleans
@@ -220,8 +216,7 @@ func TestNullPresenceDerivedBooleansAreUnset(t *testing.T) {
 	if req.ParallelToolCalls != nil {
 		t.Fatalf(`{"parallel_tool_calls":null} decoded to %v, want nil`, *req.ParallelToolCalls)
 	}
-	assertResponsesAccepted(t, req, false)
-	assertResponsesAccepted(t, req, true)
+	assertResponsesAccepted(t, req)
 
 	// An empty array is still an explicit "no tools" and must stay distinguishable.
 	set := decodeResponsesRequest(t, `{"model":"gpt-5","input":"hi","tools":[],"store":false}`)
@@ -253,7 +248,7 @@ func TestResponsesFieldDecoderMatchesJSONDecoderOnNull(t *testing.T) {
 	if len(fromJSON.Raw) != 0 || len(fromFields.Raw) != 0 {
 		t.Fatalf("null-only request produced presence entries: json %#v fields %#v", fromJSON.Raw, fromFields.Raw)
 	}
-	assertResponsesAccepted(t, &fromFields, true)
+	assertResponsesAccepted(t, &fromFields)
 }
 
 func chatBody(field, value string) string {
@@ -282,38 +277,38 @@ func decodeResponsesRequest(t *testing.T, body string) *ResponsesRequest {
 	return &req
 }
 
-func assertChatAccepted(t *testing.T, req *ChatCompletionRequest, strict bool) {
+func assertChatAccepted(t *testing.T, req *ChatCompletionRequest) {
 	t.Helper()
-	if err := ValidateChatRequest(req, strict); err != nil {
-		t.Fatalf("ValidateChatRequest(strict=%t) = %v, want accepted", strict, err)
+	if err := ValidateChatRequest(req); err != nil {
+		t.Fatalf("ValidateChatRequest() = %v, want accepted", err)
 	}
 }
 
-func assertChatRejected(t *testing.T, req *ChatCompletionRequest, strict bool, param string) {
+func assertChatRejected(t *testing.T, req *ChatCompletionRequest, param string) {
 	t.Helper()
-	assertRejectedOnParam(t, ValidateChatRequest(req, strict), strict, param)
+	assertRejectedOnParam(t, ValidateChatRequest(req), param)
 }
 
-func assertResponsesAccepted(t *testing.T, req *ResponsesRequest, strict bool) {
+func assertResponsesAccepted(t *testing.T, req *ResponsesRequest) {
 	t.Helper()
-	if err := ValidateResponsesRequest(req, strict); err != nil {
-		t.Fatalf("ValidateResponsesRequest(strict=%t) = %v, want accepted", strict, err)
+	if err := ValidateResponsesRequest(req); err != nil {
+		t.Fatalf("ValidateResponsesRequest() = %v, want accepted", err)
 	}
 }
 
-func assertResponsesRejected(t *testing.T, req *ResponsesRequest, strict bool, param string) {
+func assertResponsesRejected(t *testing.T, req *ResponsesRequest, param string) {
 	t.Helper()
-	assertRejectedOnParam(t, ValidateResponsesRequest(req, strict), strict, param)
+	assertRejectedOnParam(t, ValidateResponsesRequest(req), param)
 }
 
-func assertRejectedOnParam(t *testing.T, err error, strict bool, param string) {
+func assertRejectedOnParam(t *testing.T, err error, param string) {
 	t.Helper()
 	if err == nil {
-		t.Fatalf("validation(strict=%t) succeeded, want rejection on %q", strict, param)
+		t.Fatalf("validation succeeded, want rejection on %q", param)
 	}
 	apiErr, ok := err.(*apierr.Error)
 	if !ok || apiErr.Kind != apierr.KindInvalidInput || apiErr.Param != param {
-		t.Fatalf("validation(strict=%t) error = %#v, want invalid_request_error on %q", strict, err, param)
+		t.Fatalf("validation error = %#v, want invalid_request_error on %q", err, param)
 	}
 }
 

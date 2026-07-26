@@ -13,16 +13,16 @@ import (
 // back the transport-free catalog vocabulary from internal/toolcatalog. The
 // catalog algebra itself — merging, identity, persistence — lives there.
 
+// NormalizeResponsesTools reads the OpenAI `tools` array into the catalog
+// vocabulary. Hosted tool types this proxy cannot run are dropped (see
+// IgnoredResponsesToolTypes, which lets the HTTP layer log the drop); anything
+// else that fails to normalize is a 400.
 func NormalizeResponsesTools(tools []Tool) ([]toolcatalog.NormalizedTool, error) {
-	return NormalizeResponsesToolsWithMode(tools, true)
-}
-
-func NormalizeResponsesToolsWithMode(tools []Tool, strict bool) ([]toolcatalog.NormalizedTool, error) {
 	out := make([]toolcatalog.NormalizedTool, 0, len(tools))
 	for i, tool := range tools {
 		normalized, err := normalizeResponsesTool(tool, fmt.Sprintf("tools.%d", i), false)
 		if err != nil {
-			if !strict && canIgnoreUnsupportedResponsesTool(tool) {
+			if canIgnoreUnsupportedResponsesTool(tool) {
 				continue
 			}
 			return nil, err
@@ -36,9 +36,9 @@ func NormalizeResponsesToolsWithMode(tools []Tool, strict bool) ([]toolcatalog.N
 }
 
 // hostedResponsesToolTypes are the OpenAI-hosted or proxy-executed Responses
-// tools this proxy cannot run. They are enumerated so that permissive mode can
-// drop exactly these (with a debug log) while any other unrecognized type stays
-// a 400: a typo like {"type":"funcion"} must surface, not disappear.
+// tools this proxy cannot run. They are enumerated so that exactly these can be
+// dropped (with a debug log) while any other unrecognized type stays a 400: a
+// typo like {"type":"funcion"} must surface, not disappear.
 var hostedResponsesToolTypes = map[string]struct{}{
 	"web_search":           {},
 	"web_search_preview":   {},
@@ -55,8 +55,8 @@ func canIgnoreUnsupportedResponsesTool(tool Tool) bool {
 }
 
 // IgnoredResponsesToolTypes lists the hosted tool types that
-// NormalizeResponsesToolsWithMode drops in permissive mode, so the HTTP layer
-// can report them at debug level.
+// NormalizeResponsesTools drops, so the HTTP layer can report them at debug
+// level.
 func IgnoredResponsesToolTypes(tools []Tool) []string {
 	var out []string
 	seen := map[string]struct{}{}

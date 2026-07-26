@@ -86,7 +86,6 @@ type Config struct {
 	StateDir               string
 	CacheDir               string
 	ConfigDir              string
-	StrictCompat           bool
 	ReasoningEmission      string
 	LogContent             bool
 	LogLevel               slog.Level
@@ -100,7 +99,6 @@ func Load() (Config, error) {
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 		CLIPath:                os.Getenv("COPILOT_CLI_PATH"),
 		DefaultReasoningEffort: strings.ToLower(strings.TrimSpace(os.Getenv("COPILOT_DEFAULT_REASONING_EFFORT"))),
-		StrictCompat:           false,
 		ModelsCacheTTL:         DefaultModelsCacheTTL,
 		ToolCallTTL:            DefaultToolCallTTL,
 		MaxRequestBodyBytes:    DefaultMaxRequestBodyBytes,
@@ -147,9 +145,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.SSEKeepAliveInterval, err = parseDurationEnv("COPILOT_SSE_KEEP_ALIVE_INTERVAL", DefaultSSEKeepAliveInterval); err != nil {
-		return Config{}, err
-	}
-	if cfg.StrictCompat, err = parseBoolEnv("COPILOT_STRICT_COMPAT", false); err != nil {
 		return Config{}, err
 	}
 	if cfg.ReasoningEmission, err = parseReasoningEmissionEnv("COPILOT_REASONING_EMISSION", DefaultReasoningEmission); err != nil {

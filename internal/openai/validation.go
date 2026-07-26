@@ -26,8 +26,11 @@ import (
 // rejected. {"type":"text"} is the documented default, so ignoring it is a
 // genuine no-op and it is accepted. A parameter, value, or tool type OpenAI does
 // not document is a 400 so client typos surface instead of being dropped.
-// COPILOT_STRICT_COMPAT may still reject more, but permissive mode is the
-// default and has to accept what real OpenAI clients send.
+//
+// There is one policy, not two. What this proxy cannot honour but can ignore
+// gracefully is reported to the operator through the debug-level logging in
+// internal/httpapi rather than through the client's status code, because a 400
+// is the client's problem and an unhonoured temperature is the operator's.
 
 // functionNameRE mirrors OpenAI's documented function-name grammar ("a-z, A-Z,
 // 0-9, underscores and dashes, with a maximum length of 64"), which allows a
@@ -55,43 +58,12 @@ var alwaysRejectChatFields = []unsupportedField{
 	{name: "n", message: "n other than 1 is not supported", allow: isOne},
 }
 
-var strictOnlyChatFields = []unsupportedField{
-	{name: "temperature", message: "temperature is not forwarded by this proxy in MVP"},
-	{name: "top_p", message: "top_p is not forwarded by this proxy in MVP"},
-	// logprobs/top_logprobs are the Chat counterpart of the Responses include
-	// value message.output_text.logprobs: they ask for an extra per-token
-	// annotation next to the reply, not for a different reply. The Copilot SDK
-	// surfaces no token probabilities, so ignoring them costs the caller an
-	// optional field and nothing else, which is the graceful degradation the
-	// policy above accepts. logprobs:false asks for nothing at all, so it stays
-	// acceptable even in strict mode.
-	{name: "logprobs", message: "logprobs is ignored by this proxy in permissive mode", allow: isFalse},
-	{name: "top_logprobs", message: "top_logprobs is ignored by this proxy in permissive mode"},
-	{name: "presence_penalty", message: "presence_penalty is not forwarded by this proxy in MVP"},
-	{name: "frequency_penalty", message: "frequency_penalty is not forwarded by this proxy in MVP"},
-	{name: "seed", message: "seed is not supported"},
-	{name: "metadata", message: "metadata is not supported on chat completions"},
-	{name: "service_tier", message: "service_tier is not supported"},
-	{name: "user", message: "user is not forwarded by this single-user proxy"},
-}
-
 var alwaysRejectResponseFields = []unsupportedField{
 	{name: "background", message: "background mode is not supported"},
 	{name: "truncation", message: "truncation controls are not supported in MVP"},
 }
 
-var strictOnlyResponseFields = []unsupportedField{
-	{name: "temperature", message: "temperature is not forwarded by this proxy in MVP"},
-	{name: "top_p", message: "top_p is not forwarded by this proxy in MVP"},
-	{name: "include", message: "include is ignored by this proxy in permissive mode"},
-	{name: "reasoning", message: "reasoning object controls are only partially supported in permissive mode; use reasoning_effort"},
-	{name: "text", message: "text controls are ignored by this proxy in permissive mode", allow: isDefaultTextObject},
-	{name: "metadata", message: "metadata is not supported in MVP"},
-	{name: "service_tier", message: "service_tier is not supported"},
-	{name: "user", message: "user is not forwarded by this single-user proxy"},
-}
-
-func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
+func ValidateChatRequest(req *ChatCompletionRequest) error {
 	if req.Model == "" {
 		return apierr.InvalidRequest("model is required", "model")
 	}
@@ -111,11 +83,6 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 	}
 	if err := validateUnsupportedFields(req.Raw, alwaysRejectChatFields); err != nil {
 		return err
-	}
-	if strict {
-		if err := validateUnsupportedFields(req.Raw, strictOnlyChatFields); err != nil {
-			return err
-		}
 	}
 	if err := validateMaxOutputTokens(req.MaxTokens, "max_tokens"); err != nil {
 		return err
@@ -160,7 +127,7 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 	return nil
 }
 
-func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
+func ValidateResponsesRequest(req *ResponsesRequest) error {
 	if req.Model == "" {
 		return apierr.InvalidRequest("model is required", "model")
 	}
@@ -176,15 +143,10 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 		return err
 	}
 	// text.format decides whether the client can use the reply at all, so it is
-	// checked ahead of the strict-only table: a structured-output request has to
-	// fail the same way, and name the same param, in both modes.
+	// checked here rather than left to the ignore-and-log path: a structured-output
+	// request has to fail, and name the param it failed on.
 	if err := validateResponsesText(req.Text); err != nil {
 		return err
-	}
-	if strict {
-		if err := validateUnsupportedFields(req.Raw, strictOnlyResponseFields); err != nil {
-			return err
-		}
 	}
 	if err := validateResponsesMaxOutputTokens(req.Raw); err != nil {
 		return err
@@ -195,7 +157,7 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 	if err := validateResponsesReasoning(req); err != nil {
 		return err
 	}
-	if err := ValidateResponsesTools(req.Tools, strict); err != nil {
+	if err := ValidateResponsesTools(req.Tools); err != nil {
 		return err
 	}
 	if err := validateToolChoice(req.ToolChoice); err != nil {
@@ -206,9 +168,8 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 
 // knownResponsesIncludeValues is OpenAI's documented include enum. Every entry
 // asks for extra output detail, so an entry this proxy cannot produce is simply
-// absent from the response rather than fatal — strict mode still rejects the
-// whole field, matching its "include is ignored by this proxy in permissive
-// mode" message. A value outside the enum is a typo and is rejected.
+// absent from the response rather than fatal. A value outside the enum is a typo
+// and is rejected.
 var knownResponsesIncludeValues = map[string]struct{}{
 	"code_interpreter_call.outputs":         {},
 	"computer_call_output.output.image_url": {},
@@ -274,9 +235,10 @@ func (r *ChatCompletionRequest) RequestedMaxOutputTokens() (int, bool) {
 }
 
 // RequestedLogprobs reports whether the client asked for token logprobs, via
-// either logprobs:true or top_logprobs. Both are accepted and ignored in
-// permissive mode (see strictOnlyChatFields), so the HTTP layer uses this to
-// record the gap at debug level rather than failing the request.
+// either logprobs:true or top_logprobs. They ask for an extra per-token
+// annotation next to the reply, not for a different reply, and the Copilot SDK
+// surfaces no token probabilities, so both are accepted and the gap is recorded
+// at debug level by the HTTP layer instead of failing the request.
 func (r *ChatCompletionRequest) RequestedLogprobs() bool {
 	if raw, ok := r.Raw["logprobs"]; ok && !isFalse(raw) {
 		return true
@@ -461,8 +423,8 @@ func ValidateTools(tools []Tool) error {
 	return validateTools(tools, false)
 }
 
-func ValidateResponsesTools(tools []Tool, strict bool) error {
-	_, err := NormalizeResponsesToolsWithMode(tools, strict)
+func ValidateResponsesTools(tools []Tool) error {
+	_, err := NormalizeResponsesTools(tools)
 	return err
 }
 
@@ -598,19 +560,6 @@ func isDefaultOutputFormat(raw json.RawMessage) bool {
 		Type string `json:"type"`
 	}
 	return json.Unmarshal(raw, &format) == nil && format.Type == outputFormatText
-}
-
-// isDefaultTextObject is the strict-mode allow predicate for the Responses text
-// object. Strict mode rejects text because its controls are ignored, but a lone
-// {"format":{"type":"text"}} carries nothing to ignore. Any other control
-// (verbosity, a structured format) is still rejected.
-func isDefaultTextObject(raw json.RawMessage) bool {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 1 {
-		return false
-	}
-	format, ok := fields["format"]
-	return ok && isDefaultOutputFormat(format)
 }
 
 // FoldChatInstructions hoists the leading system/developer messages into the

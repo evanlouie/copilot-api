@@ -151,7 +151,7 @@ func TestResponsesReasoningEffortUsesNormalizedConflictComparison(t *testing.T) 
 			if err := json.Unmarshal([]byte(test.body), &req); err != nil {
 				t.Fatal(err)
 			}
-			err := ValidateResponsesRequest(&req, false)
+			err := ValidateResponsesRequest(&req)
 			if test.wantErr {
 				apiErr, ok := err.(*apierr.Error)
 				if !ok || apiErr.Param != "reasoning.effort" {

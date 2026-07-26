@@ -2,7 +2,6 @@ package openai
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -99,7 +98,7 @@ func TestValidateToolChoice(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			req := decodeChatRequest(t, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tool_choice":`+tt.choice+`}`)
-			err := ValidateChatRequest(req, true)
+			err := ValidateChatRequest(req)
 			if tt.accepted && err != nil {
 				t.Fatalf("tool_choice %s should be accepted: %v", tt.choice, err)
 			}
@@ -147,7 +146,7 @@ func mustParseToolChoice(t *testing.T, raw string) ToolChoice {
 }
 
 // Every one of these is a valid OpenAI request that a widely-used client sends
-// by default, so permissive mode (and here even strict mode) must accept it.
+// by default, so validation must accept it.
 func TestValidateChatAcceptsCommonClientParameters(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -169,8 +168,7 @@ func TestValidateChatAcceptsCommonClientParameters(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			req := decodeChatRequest(t, tt.body)
-			assertChatAccepted(t, req, false)
-			assertChatAccepted(t, req, true)
+			assertChatAccepted(t, req)
 		})
 	}
 }
@@ -178,8 +176,8 @@ func TestValidateChatAcceptsCommonClientParameters(t *testing.T) {
 func TestValidateChatRejectsInvalidMaxTokens(t *testing.T) {
 	t.Parallel()
 	for _, param := range []string{"max_tokens", "max_completion_tokens"} {
-		assertChatRejected(t, decodeChatRequest(t, chatBody(param, `0`)), false, param)
-		assertChatRejected(t, decodeChatRequest(t, chatBody(param, `-1`)), false, param)
+		assertChatRejected(t, decodeChatRequest(t, chatBody(param, `0`)), param)
+		assertChatRejected(t, decodeChatRequest(t, chatBody(param, `-1`)), param)
 	}
 }
 
@@ -187,7 +185,7 @@ func TestValidateChatRejectsUnusableToolNames(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"", "has space", "dotted.name", strings.Repeat("a", 65)} {
 		req := decodeChatRequest(t, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"`+name+`"}}]}`)
-		if err := ValidateChatRequest(req, false); err == nil {
+		if err := ValidateChatRequest(req); err == nil {
 			t.Fatalf("function tool name %q should be rejected", name)
 		}
 	}
@@ -208,33 +206,30 @@ func TestValidateResponsesAcceptsCommonClientParameters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assertResponsesAccepted(t, decodeResponsesRequest(t, tt.body), false)
+			assertResponsesAccepted(t, decodeResponsesRequest(t, tt.body))
 		})
 	}
 }
 
 func TestValidateResponsesRejectsInvalidMaxOutputTokens(t *testing.T) {
 	t.Parallel()
-	assertResponsesRejected(t, decodeResponsesRequest(t, responsesBody("max_output_tokens", `0`)), false, "max_output_tokens")
-	assertResponsesRejected(t, decodeResponsesRequest(t, responsesBody("max_output_tokens", `"lots"`)), false, "max_output_tokens")
+	assertResponsesRejected(t, decodeResponsesRequest(t, responsesBody("max_output_tokens", `0`)), "max_output_tokens")
+	assertResponsesRejected(t, decodeResponsesRequest(t, responsesBody("max_output_tokens", `"lots"`)), "max_output_tokens")
 }
 
-func TestChatPermissiveAllowsIgnoredSamplingFields(t *testing.T) {
+func TestChatAcceptsIgnoredSamplingFields(t *testing.T) {
 	t.Parallel()
 	var req ChatCompletionRequest
 	body := []byte(`{"model":"gpt-5","temperature":0.1,"messages":[{"role":"user","content":"hi"}]}`)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateChatRequest(&req, false); err != nil {
-		t.Fatalf("temperature should be accepted in permissive mode: %v", err)
-	}
-	if err := ValidateChatRequest(&req, true); err == nil {
-		t.Fatal("expected temperature rejection in strict mode")
+	if err := ValidateChatRequest(&req); err != nil {
+		t.Fatalf("temperature should be accepted: %v", err)
 	}
 }
 
-func TestPermissiveChatRejectsUnsafeUnsupportedFields(t *testing.T) {
+func TestChatRejectsUnsafeUnsupportedFields(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
@@ -264,9 +259,9 @@ func TestPermissiveChatRejectsUnsafeUnsupportedFields(t *testing.T) {
 			if err := json.Unmarshal([]byte(tt.body), &req); err != nil {
 				t.Fatal(err)
 			}
-			err := ValidateChatRequest(&req, false)
+			err := ValidateChatRequest(&req)
 			if err == nil {
-				t.Fatal("expected unsafe field rejection in permissive mode")
+				t.Fatal("expected unsafe field rejection")
 			}
 			apiErr, ok := err.(*apierr.Error)
 			if !ok || apiErr.Param != tt.param {
@@ -280,9 +275,8 @@ func TestPermissiveChatRejectsUnsafeUnsupportedFields(t *testing.T) {
 // Responses include value "message.output_text.logprobs": all three ask for
 // extra per-token detail alongside the reply, none of them change its shape.
 // Ignoring them yields the same prose minus an optional annotation, which is
-// exactly the graceful degradation the policy accepts, so permissive mode must
-// take them and only strict mode may reject.
-func TestChatPermissiveAcceptsAndIgnoresLogprobs(t *testing.T) {
+// exactly the graceful degradation the policy accepts, so both are taken.
+func TestChatAcceptsAndIgnoresLogprobs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
@@ -304,28 +298,24 @@ func TestChatPermissiveAcceptsAndIgnoresLogprobs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			req := decodeChatRequest(t, tt.body)
-			assertChatAccepted(t, req, false)
-			assertChatRejected(t, req, true, tt.param)
+			assertChatAccepted(t, req)
 		})
 	}
 }
 
-func TestPermissiveChatAllowsSingleChoiceN(t *testing.T) {
+func TestChatAllowsSingleChoiceN(t *testing.T) {
 	t.Parallel()
 	var req ChatCompletionRequest
 	body := []byte(`{"model":"gpt-5","n":1,"messages":[{"role":"user","content":"hi"}]}`)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateChatRequest(&req, false); err != nil {
-		t.Fatalf("n=1 should be accepted in permissive mode: %v", err)
-	}
-	if err := ValidateChatRequest(&req, true); err != nil {
-		t.Fatalf("n=1 should be accepted in strict mode: %v", err)
+	if err := ValidateChatRequest(&req); err != nil {
+		t.Fatalf("n=1 should be accepted: %v", err)
 	}
 }
 
-func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
+func TestResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
@@ -355,9 +345,9 @@ func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 			if err := json.Unmarshal([]byte(tt.body), &req); err != nil {
 				t.Fatal(err)
 			}
-			err := ValidateResponsesRequest(&req, false)
+			err := ValidateResponsesRequest(&req)
 			if err == nil {
-				t.Fatal("expected unsafe field rejection in permissive mode")
+				t.Fatal("expected unsafe field rejection")
 			}
 			apiErr, ok := err.(*apierr.Error)
 			if !ok || apiErr.Param != tt.param {
@@ -416,37 +406,35 @@ func TestOutputFormatAcceptsOnlyTheExplicitTextDefault(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		for _, strict := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/strict=%t", tt.name, strict), func(t *testing.T) {
-				t.Parallel()
-				chatBodyJSON := `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`
-				responsesBodyJSON := `{"model":"gpt-5","input":"hi"}`
-				if tt.format != "" {
-					chatBodyJSON = chatBody("response_format", tt.format)
-					responsesBodyJSON = responsesBody("text", `{"format":`+tt.format+`}`)
-				}
-				chat := decodeChatRequest(t, chatBodyJSON)
-				responses := decodeResponsesRequest(t, responsesBodyJSON)
-				if tt.chatParam == "" {
-					assertChatAccepted(t, chat, strict)
-					assertResponsesAccepted(t, responses, strict)
-					return
-				}
-				assertChatRejected(t, chat, strict, tt.chatParam)
-				assertResponsesRejected(t, responses, strict, tt.responsesParam)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			chatBodyJSON := `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`
+			responsesBodyJSON := `{"model":"gpt-5","input":"hi"}`
+			if tt.format != "" {
+				chatBodyJSON = chatBody("response_format", tt.format)
+				responsesBodyJSON = responsesBody("text", `{"format":`+tt.format+`}`)
+			}
+			chat := decodeChatRequest(t, chatBodyJSON)
+			responses := decodeResponsesRequest(t, responsesBodyJSON)
+			if tt.chatParam == "" {
+				assertChatAccepted(t, chat)
+				assertResponsesAccepted(t, responses)
+				return
+			}
+			assertChatRejected(t, chat, tt.chatParam)
+			assertResponsesRejected(t, responses, tt.responsesParam)
 
-				// The two surfaces must explain the refusal identically, otherwise a
-				// client that switches surfaces learns two different things.
-				chatMessage := ValidateChatRequest(chat, strict).Error()
-				responsesMessage := ValidateResponsesRequest(responses, strict).Error()
-				if got := strings.ReplaceAll(chatMessage, "response_format", "text.format"); got != responsesMessage {
-					t.Fatalf("messages diverge:\n chat: %s\n responses: %s", chatMessage, responsesMessage)
-				}
-				if tt.chatParam == "response_format" && tt.format != `"json_schema"` && !strings.Contains(chatMessage, "structured output is not supported") {
-					t.Fatalf("message = %q, want it to name the unsupported feature", chatMessage)
-				}
-			})
-		}
+			// The two surfaces must explain the refusal identically, otherwise a
+			// client that switches surfaces learns two different things.
+			chatMessage := ValidateChatRequest(chat).Error()
+			responsesMessage := ValidateResponsesRequest(responses).Error()
+			if got := strings.ReplaceAll(chatMessage, "response_format", "text.format"); got != responsesMessage {
+				t.Fatalf("messages diverge:\n chat: %s\n responses: %s", chatMessage, responsesMessage)
+			}
+			if tt.chatParam == "response_format" && tt.format != `"json_schema"` && !strings.Contains(chatMessage, "structured output is not supported") {
+				t.Fatalf("message = %q, want it to name the unsupported feature", chatMessage)
+			}
+		})
 	}
 }
 
@@ -457,23 +445,20 @@ func TestResponsesInputMayBeOmittedForPreviousResponseContinuation(t *testing.T)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateResponsesRequest(&req, false); err != nil {
+	if err := ValidateResponsesRequest(&req); err != nil {
 		t.Fatalf("missing input should be accepted with previous_response_id: %v", err)
 	}
 }
 
-func TestResponsesPermissiveAllowsIgnoredFields(t *testing.T) {
+func TestResponsesAllowsIgnoredFields(t *testing.T) {
 	t.Parallel()
 	var req ResponsesRequest
 	body := []byte(`{"model":"gpt-5","temperature":0.1,"top_p":0.9,"input":"hi"}`)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateResponsesRequest(&req, false); err != nil {
-		t.Fatalf("ignored fields should be accepted in permissive mode: %v", err)
-	}
-	if err := ValidateResponsesRequest(&req, true); err == nil {
-		t.Fatal("expected ignored fields to be rejected in strict mode")
+	if err := ValidateResponsesRequest(&req); err != nil {
+		t.Fatalf("ignored fields should be accepted: %v", err)
 	}
 }
 
@@ -484,16 +469,8 @@ func TestResponsesAcceptsCodexReasoningDefaultsAndClientOwnedTools(t *testing.T)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateResponsesRequest(&req, false); err != nil {
-		t.Fatalf("Codex reasoning defaults and Responses tools should be accepted in permissive mode: %v", err)
-	}
-	var strictReq ResponsesRequest
-	strictBody := []byte(`{"model":"gpt-5.5","tools":[{"type":"function","name":"exec_command","description":"run","parameters":{"type":"object","properties":{}}},{"type":"function","name":"multi_tool_use.parallel","description":"parallel","parameters":{"type":"object","properties":{}}},{"type":"custom","name":"apply_patch","description":"patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},{"type":"namespace","name":"mcp__grep_app","tools":[{"name":"searchGitHub","description":"search","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}]},{"type":"tool_search","execution":"client","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}],"input":"hi"}`)
-	if err := json.Unmarshal(strictBody, &strictReq); err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateResponsesRequest(&strictReq, true); err != nil {
-		t.Fatalf("supported Responses tools should be accepted in strict mode: %v", err)
+	if err := ValidateResponsesRequest(&req); err != nil {
+		t.Fatalf("Codex reasoning defaults and Responses tools should be accepted: %v", err)
 	}
 	if got := ResponsesReasoningEffort(&req); got != "medium" {
 		t.Fatalf("ResponsesReasoningEffort = %q, want medium", got)
@@ -507,17 +484,17 @@ func TestResponsesAcceptsCodexReasoningDefaultsAndClientOwnedTools(t *testing.T)
 	}
 }
 
-func TestResponsesIgnoresHostedToolsInPermissiveAndRejectsInStrict(t *testing.T) {
+func TestResponsesIgnoresHostedTools(t *testing.T) {
 	t.Parallel()
 	var req ResponsesRequest
 	body := []byte(`{"model":"gpt-5.5","tools":[{"type":"web_search","external_web_access":true}],"input":"hi"}`)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateResponsesRequest(&req, false); err != nil {
-		t.Fatalf("hosted web_search should be ignored in permissive mode: %v", err)
+	if err := ValidateResponsesRequest(&req); err != nil {
+		t.Fatalf("hosted web_search should be ignored: %v", err)
 	}
-	normalized, err := NormalizeResponsesToolsWithMode(req.Tools, false)
+	normalized, err := NormalizeResponsesTools(req.Tools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,27 +504,22 @@ func TestResponsesIgnoresHostedToolsInPermissiveAndRejectsInStrict(t *testing.T)
 	if got := IgnoredResponsesToolTypes(req.Tools); len(got) != 1 || got[0] != "web_search" {
 		t.Fatalf("IgnoredResponsesToolTypes = %#v, want [web_search] so the drop can be logged", got)
 	}
-	if err := ValidateResponsesRequest(&req, true); err == nil {
-		t.Fatal("expected hosted web_search rejection in strict mode")
-	}
 }
 
 // A tool type that is neither supported nor a known hosted tool is a client
 // typo. Dropping it silently would ship a request with a missing capability, so
-// it is a 400 in both modes.
-func TestResponsesRejectsUnknownToolTypeInBothModes(t *testing.T) {
+// it is a 400.
+func TestResponsesRejectsUnknownToolType(t *testing.T) {
 	t.Parallel()
 	var req ResponsesRequest
 	body := []byte(`{"model":"gpt-5.5","tools":[{"type":"funcion","name":"lookup"}],"input":"hi"}`)
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	for _, strict := range []bool{false, true} {
-		err := ValidateResponsesRequest(&req, strict)
-		apiErr, ok := err.(*apierr.Error)
-		if !ok || apiErr.Param != "tools.0.type" {
-			t.Fatalf("ValidateResponsesRequest(strict=%t) = %#v, want a 400 on tools.0.type", strict, err)
-		}
+	err := ValidateResponsesRequest(&req)
+	apiErr, ok := err.(*apierr.Error)
+	if !ok || apiErr.Param != "tools.0.type" {
+		t.Fatalf("ValidateResponsesRequest() = %#v, want a 400 on tools.0.type", err)
 	}
 	if got := IgnoredResponsesToolTypes(req.Tools); len(got) != 0 {
 		t.Fatalf("IgnoredResponsesToolTypes = %#v, want none for an unknown type", got)
@@ -561,7 +533,7 @@ func TestValidateChatRejectsUnsupportedToolTypes(t *testing.T) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateChatRequest(&req, false); err == nil {
+	if err := ValidateChatRequest(&req); err == nil {
 		t.Fatal("expected Chat custom tools to be rejected")
 	}
 }
@@ -627,7 +599,7 @@ func TestValidateChatAllowsUserImageParts(t *testing.T) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateChatRequest(&req, true); err != nil {
+	if err := ValidateChatRequest(&req); err != nil {
 		t.Fatalf("user image content should be accepted: %v", err)
 	}
 	prompt, err := req.Messages[0].Prompt()
@@ -646,7 +618,7 @@ func TestValidateChatRejectsAssistantImageParts(t *testing.T) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateChatRequest(&req, true); err == nil {
+	if err := ValidateChatRequest(&req); err == nil {
 		t.Fatal("expected assistant image content rejection")
 	}
 }
@@ -658,14 +630,10 @@ func TestValidateChatRejectsAssistantImageParts(t *testing.T) {
 func TestValidateRejectsUnknownReasoningEffort(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		path string
-		body string
-		// param is the permissive-mode param; strictParam is the strict-mode one
-		// when strict rejects an enclosing field first (the whole `reasoning`
-		// object is strict-only on Responses).
-		param       string
-		strictParam string
+		name  string
+		path  string
+		body  string
+		param string
 	}{
 		{
 			name:  "chat reasoning_effort",
@@ -680,36 +648,28 @@ func TestValidateRejectsUnknownReasoningEffort(t *testing.T) {
 			param: "reasoning_effort",
 		},
 		{
-			name:        "responses reasoning.effort",
-			path:        "responses",
-			body:        `{"model":"gpt-5","reasoning":{"effort":"banana"},"input":"hi"}`,
-			param:       "reasoning.effort",
-			strictParam: "reasoning",
+			name:  "responses reasoning.effort",
+			path:  "responses",
+			body:  `{"model":"gpt-5","reasoning":{"effort":"banana"},"input":"hi"}`,
+			param: "reasoning.effort",
 		},
 		{
-			name:        "responses reasoning.effort ignoring case and padding",
-			path:        "responses",
-			body:        `{"model":"gpt-5","reasoning":{"effort":" Banana "},"input":"hi"}`,
-			param:       "reasoning.effort",
-			strictParam: "reasoning",
+			name:  "responses reasoning.effort ignoring case and padding",
+			path:  "responses",
+			body:  `{"model":"gpt-5","reasoning":{"effort":" Banana "},"input":"hi"}`,
+			param: "reasoning.effort",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			for _, strict := range []bool{false, true} {
-				wantParam := tt.param
-				if strict && tt.strictParam != "" {
-					wantParam = tt.strictParam
-				}
-				err := validateBodyForSurface(t, tt.path, tt.body, strict)
-				if err == nil {
-					t.Fatalf("strict=%t: expected unknown reasoning effort rejection", strict)
-				}
-				apiErr, ok := err.(*apierr.Error)
-				if !ok || apiErr.Kind != apierr.KindInvalidInput || apiErr.Param != wantParam {
-					t.Fatalf("strict=%t: error = %#v, want invalid_request_error param %q", strict, err, wantParam)
-				}
+			err := validateBodyForSurface(t, tt.path, tt.body)
+			if err == nil {
+				t.Fatal("expected unknown reasoning effort rejection")
+			}
+			apiErr, ok := err.(*apierr.Error)
+			if !ok || apiErr.Kind != apierr.KindInvalidInput || apiErr.Param != tt.param {
+				t.Fatalf("error = %#v, want invalid_request_error param %q", err, tt.param)
 			}
 		})
 	}
@@ -721,29 +681,29 @@ func TestValidateAcceptsKnownReasoningEfforts(t *testing.T) {
 		t.Run(effort, func(t *testing.T) {
 			t.Parallel()
 			chat := `{"model":"gpt-5","reasoning_effort":"` + effort + `","messages":[{"role":"user","content":"hi"}]}`
-			if err := validateBodyForSurface(t, "chat", chat, false); err != nil {
+			if err := validateBodyForSurface(t, "chat", chat); err != nil {
 				t.Fatalf("chat reasoning_effort %q: %v", effort, err)
 			}
 			responses := `{"model":"gpt-5","reasoning":{"effort":"` + effort + `"},"input":"hi"}`
-			if err := validateBodyForSurface(t, "responses", responses, false); err != nil {
+			if err := validateBodyForSurface(t, "responses", responses); err != nil {
 				t.Fatalf("responses reasoning.effort %q: %v", effort, err)
 			}
 		})
 	}
 }
 
-func validateBodyForSurface(t *testing.T, surface, body string, strict bool) error {
+func validateBodyForSurface(t *testing.T, surface, body string) error {
 	t.Helper()
 	if surface == "chat" {
 		var req ChatCompletionRequest
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatal(err)
 		}
-		return ValidateChatRequest(&req, strict)
+		return ValidateChatRequest(&req)
 	}
 	var req ResponsesRequest
 	if err := json.Unmarshal([]byte(body), &req); err != nil {
 		t.Fatal(err)
 	}
-	return ValidateResponsesRequest(&req, strict)
+	return ValidateResponsesRequest(&req)
 }

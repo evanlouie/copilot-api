@@ -40,19 +40,6 @@ func TestEnsureConfigDirSecuresCustomRoot(t *testing.T) {
 	}
 }
 
-func TestStrictCompatDefaultsFalse(t *testing.T) {
-	setLoadEnv(t)
-	t.Setenv("COPILOT_STRICT_COMPAT", "")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.StrictCompat {
-		t.Fatal("StrictCompat default = true, want false")
-	}
-}
-
 func TestMaxRequestBodyBytesDefaultsToRealLimitAndAllowsExplicitOptOut(t *testing.T) {
 	setLoadEnv(t)
 
@@ -77,19 +64,6 @@ func TestMaxRequestBodyBytesDefaultsToRealLimitAndAllowsExplicitOptOut(t *testin
 	}
 	if cfg.MaxRequestBodyBytes != 0 {
 		t.Fatalf("MaxRequestBodyBytes override = %d, want 0 to stay an explicit unlimited opt-out", cfg.MaxRequestBodyBytes)
-	}
-}
-
-func TestStrictCompatEnvOverrideTrue(t *testing.T) {
-	setLoadEnv(t)
-	t.Setenv("COPILOT_STRICT_COMPAT", "true")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.StrictCompat {
-		t.Fatal("StrictCompat override = false, want true")
 	}
 }
 
@@ -184,7 +158,6 @@ func setLoadEnv(t *testing.T) {
 		"COPILOT_RETENTION_MAX_BYTES",
 		"COPILOT_LOG_CONTENT",
 		"COPILOT_REASONING_EMISSION",
-		"COPILOT_STRICT_COMPAT",
 		"COPILOT_WEBSOCKET_IDLE_TIMEOUT",
 		"COPILOT_WEBSOCKET_MAX_LIFETIME",
 		"COPILOT_WEBSOCKET_PING_INTERVAL",

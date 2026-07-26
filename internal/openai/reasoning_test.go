@@ -122,14 +122,12 @@ func TestChatMessageInboundReasoningConcatenatesDetails(t *testing.T) {
 
 func TestValidateChatAcceptsParallelToolCalls(t *testing.T) {
 	t.Parallel()
-	for _, strict := range []bool{false, true} {
-		var req ChatCompletionRequest
-		body := []byte(`{"model":"gpt-5","parallel_tool_calls":true,"messages":[{"role":"user","content":"hi"}]}`)
-		if err := json.Unmarshal(body, &req); err != nil {
-			t.Fatal(err)
-		}
-		if err := ValidateChatRequest(&req, strict); err != nil {
-			t.Fatalf("parallel_tool_calls=true should be accepted (strict=%v): %v", strict, err)
-		}
+	var req ChatCompletionRequest
+	body := []byte(`{"model":"gpt-5","parallel_tool_calls":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateChatRequest(&req); err != nil {
+		t.Fatalf("parallel_tool_calls=true should be accepted: %v", err)
 	}
 }

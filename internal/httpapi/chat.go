@@ -30,7 +30,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Model = selector.Model
 	req.ReasoningEffort = reasoningEffort
-	if err := openai.ValidateChatRequest(&req, s.cfg.StrictCompat); err != nil {
+	if err := openai.ValidateChatRequest(&req); err != nil {
 		WriteError(w, err)
 		return
 	}

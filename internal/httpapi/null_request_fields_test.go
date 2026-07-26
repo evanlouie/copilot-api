@@ -63,20 +63,6 @@ func TestResponsesExplicitNullOptionalFieldsAreNotSet(t *testing.T) {
 	}
 }
 
-func TestResponsesExplicitNullOptionalFieldsAcceptedInStrictMode(t *testing.T) {
-	t.Parallel()
-	gw := &captureResponseGateway{}
-	s := New(config.Config{StrictCompat: true}, gw, slog.Default())
-	body := strings.NewReader(`{"model":"gpt-5","input":"hi","temperature":null,"top_p":null,"metadata":null,"user":null,"include":null,"reasoning":null,"text":null,"service_tier":null}`)
-	w := httptest.NewRecorder()
-
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
-	}
-}
-
 func TestResponsesExplicitStoreAndToolsStaySet(t *testing.T) {
 	t.Parallel()
 	gw := &captureResponseGateway{}

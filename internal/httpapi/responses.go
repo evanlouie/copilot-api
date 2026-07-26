@@ -127,12 +127,12 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 	}
 	req.Model = selector.Model
 	req.ReasoningEffort = mergedEffort
-	if err := openai.ValidateResponsesRequest(req, s.cfg.StrictCompat); err != nil {
+	if err := openai.ValidateResponsesRequest(req); err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 	}
 	reasoningEffort := openai.ResponsesReasoningEffort(req)
 	s.logUnhonoredResponseControls(ctx, req)
-	normalizedTools, err := openai.NormalizeResponsesToolsWithMode(req.Tools, s.cfg.StrictCompat)
+	normalizedTools, err := openai.NormalizeResponsesTools(req.Tools)
 	if err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 	}
