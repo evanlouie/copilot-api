@@ -212,6 +212,9 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		WriteError(w, apierr.Internal("streaming unsupported by ResponseWriter"))
 		return
 	}
+	// A reasoning-heavy turn can produce nothing for minutes, which any
+	// intermediary reads as an idle connection. Stops on every exit path below.
+	defer writer.KeepAlive(ctx, s.cfg.SSEKeepAliveInterval)()
 	responseWriter := newResponseStreamEncoder(newLoggedResponseEventWriter(s, ctx, sseResponseEventTransport{writer: writer}))
 	// Owning the encoder here keeps sequence numbers continuous if a panic
 	// forces the terminal response.failed frame below.

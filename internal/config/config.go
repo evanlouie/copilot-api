@@ -38,7 +38,19 @@ const (
 	DefaultRetentionMaxBytes     int64 = 2 << 30
 	DefaultWebSocketIdleTimeout        = 2 * time.Minute
 	DefaultWebSocketPingInterval       = 30 * time.Second
-	DefaultReasoningEmission           = "both"
+	// DefaultSSEKeepAliveInterval is the longest an SSE stream may go without
+	// putting a byte on the wire. A reasoning-heavy turn can think for minutes
+	// with nothing to emit, and the idle timeouts that kill such a connection
+	// belong to intermediaries, not to this process: AWS ALB defaults to 60s and
+	// Cloudflare to 100s, and both drop a connection with no bytes in flight no
+	// matter what the origin's own timeouts say (nginx's proxy_read_timeout and
+	// Heroku's router are 60s and 55s, so they are covered by the same number).
+	// 15s is a quarter of the tighter of the two, which leaves room for three
+	// consecutive frames to be lost or delayed before anything reaches a limit,
+	// and it doubles as dead-peer detection: a client that vanished is noticed
+	// within one interval instead of at the end of the turn.
+	DefaultSSEKeepAliveInterval = 15 * time.Second
+	DefaultReasoningEmission    = "both"
 )
 
 // Reasoning emission policy values control which de-facto-standard reasoning
@@ -69,6 +81,7 @@ type Config struct {
 	WebSocketIdleTimeout   time.Duration
 	WebSocketMaxLifetime   time.Duration
 	WebSocketPingInterval  time.Duration
+	SSEKeepAliveInterval   time.Duration
 	DataDir                string
 	StateDir               string
 	CacheDir               string
@@ -97,6 +110,7 @@ func Load() (Config, error) {
 		RetentionMaxBytes:      DefaultRetentionMaxBytes,
 		WebSocketIdleTimeout:   DefaultWebSocketIdleTimeout,
 		WebSocketPingInterval:  DefaultWebSocketPingInterval,
+		SSEKeepAliveInterval:   DefaultSSEKeepAliveInterval,
 	}
 
 	if cfg.ModelsCacheTTL, err = parseDurationEnv("COPILOT_MODELS_CACHE_TTL", DefaultModelsCacheTTL); err != nil {
@@ -130,6 +144,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.WebSocketPingInterval, err = parseDurationEnv("COPILOT_WEBSOCKET_PING_INTERVAL", DefaultWebSocketPingInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.SSEKeepAliveInterval, err = parseDurationEnv("COPILOT_SSE_KEEP_ALIVE_INTERVAL", DefaultSSEKeepAliveInterval); err != nil {
 		return Config{}, err
 	}
 	if cfg.StrictCompat, err = parseBoolEnv("COPILOT_STRICT_COMPAT", false); err != nil {

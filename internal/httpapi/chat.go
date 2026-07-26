@@ -129,6 +129,9 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 		WriteError(w, apierr.Internal("streaming unsupported by ResponseWriter"))
 		return
 	}
+	// A turn can think for minutes before its first token, which any intermediary
+	// reads as an idle connection. Stops on every exit path below.
+	defer writer.KeepAlive(ctx, s.cfg.SSEKeepAliveInterval)()
 	created := openai.UnixNow()
 	// Headers are already committed, so every exit below this point is an HTTP
 	// 200 no matter how the turn ends. Default to "abandoned" and let the
