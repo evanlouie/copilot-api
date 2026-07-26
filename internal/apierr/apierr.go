@@ -8,7 +8,10 @@
 // HTTP mapping lives in exactly one place, internal/httpapi.
 package apierr
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Kind classifies a failure. It is the only classification the domain layer
 // produces; transports derive their own vocabulary (HTTP status, OpenAI error
@@ -30,6 +33,15 @@ const (
 	KindUpstream Kind = "upstream"
 	// KindTimeout means the operation ran out of time.
 	KindTimeout Kind = "timeout"
+	// KindRateLimit means an upstream throttle rejected the request. It is kept
+	// distinct from KindUpstream because clients act on it: the official OpenAI
+	// SDKs implement backoff keyed on it and honour the wait the server names.
+	KindRateLimit Kind = "rate_limit"
+	// KindUnavailable means this service cannot accept the request right now,
+	// through no fault of the caller or of a dependency — a shutdown in progress,
+	// say. Retrying later is the correct response, which is not true of
+	// KindUpstream.
+	KindUnavailable Kind = "unavailable"
 )
 
 // Error is a classified domain failure. Param and Code carry the OpenAI error
@@ -40,6 +52,10 @@ type Error struct {
 	Message string
 	Param   string
 	Code    string
+	// RetryAfter is how long the caller should wait before retrying, when the
+	// failure named a wait. Zero means none was given. Transports render it in
+	// whatever way they express "try again later".
+	RetryAfter time.Duration
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -73,6 +89,20 @@ func PreviousResponseNotFound(id string) *Error {
 // Upstream reports a failure originating in the Copilot SDK.
 func Upstream(message string) *Error {
 	return &Error{Kind: KindUpstream, Message: message, Code: "upstream_error"}
+}
+
+// RateLimited reports that an upstream throttle rejected the request.
+// retryAfter is the wait the upstream named, or zero when it named none.
+func RateLimited(message string, retryAfter time.Duration) *Error {
+	if message == "" {
+		message = "rate limit reached"
+	}
+	return &Error{Kind: KindRateLimit, Message: message, Code: "rate_limit_exceeded", RetryAfter: retryAfter}
+}
+
+// Unavailable reports that this service cannot take the request right now.
+func Unavailable(message string) *Error {
+	return &Error{Kind: KindUnavailable, Message: message, Code: "service_unavailable"}
 }
 
 // Timeout reports an operation that ran out of time.

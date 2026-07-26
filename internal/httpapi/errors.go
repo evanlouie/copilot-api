@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
@@ -26,8 +28,12 @@ func httpStatus(kind apierr.Kind) int {
 		return http.StatusNotFound
 	case apierr.KindTooLarge:
 		return http.StatusRequestEntityTooLarge
+	case apierr.KindRateLimit:
+		return http.StatusTooManyRequests
 	case apierr.KindUpstream:
 		return http.StatusBadGateway
+	case apierr.KindUnavailable:
+		return http.StatusServiceUnavailable
 	case apierr.KindTimeout:
 		return http.StatusGatewayTimeout
 	case apierr.KindInternal:
@@ -40,8 +46,16 @@ func httpStatus(kind apierr.Kind) int {
 // openAIErrorType maps a domain error onto the OpenAI error-object `type`.
 func openAIErrorType(kind apierr.Kind) string {
 	switch kind {
-	case apierr.KindUpstream, apierr.KindTimeout, apierr.KindInternal:
+	case apierr.KindUpstream, apierr.KindTimeout, apierr.KindInternal, apierr.KindUnavailable:
 		return "server_error"
+	case apierr.KindRateLimit:
+		// On a real 429 OpenAI puts the exhausted dimension in `type` ("requests"
+		// or "tokens"; see openai-node#168) and "rate_limit_exceeded" in `code`.
+		// The Copilot SDK throttles a request, not a token budget, so "requests"
+		// is the accurate member of that enum. Note this is deliberately not
+		// "rate_limit_error", which is Anthropic's vocabulary and does not appear
+		// anywhere in OpenAI's.
+		return "requests"
 	default:
 		return "invalid_request_error"
 	}
@@ -65,6 +79,12 @@ func errorObject(err error) openai.ErrorObject {
 // WriteError renders err as an OpenAI error envelope with the mapped status.
 func WriteError(w http.ResponseWriter, err error) {
 	domain := domainError(err)
+	if domain.RetryAfter > 0 {
+		// RFC 9110 delay-seconds, rounded up so the header never advertises a
+		// shorter wait than the upstream asked for. openai-python and openai-node
+		// both read this to schedule their 429 backoff.
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(domain.RetryAfter.Seconds()))))
+	}
 	writeErrorObject(w, httpStatus(domain.Kind), errorObject(err))
 }
 

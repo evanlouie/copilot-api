@@ -557,8 +557,8 @@ func (r *turnRunner) loop(g *RealGateway) {
 				usage = usageFromSDK(d)
 				r.debug(g, "copilot usage received", "input_tokens", optionalInt(d.InputTokens), "output_tokens", optionalInt(d.OutputTokens), "reasoning_tokens", optionalInt(d.ReasoningTokens), "ms_since_turn_start", stats.msSinceTurnStart())
 			case *copilot.SessionErrorData:
-				err := apierr.Upstream(d.Message)
-				r.debug(g, "copilot session error", "error", d.Message, "ms_since_turn_start", stats.msSinceTurnStart())
+				err := upstreamSessionError(d)
+				r.debug(g, "copilot session error", "error", d.Message, "error_type", d.ErrorType, "kind", string(err.Kind), "ms_since_turn_start", stats.msSinceTurnStart())
 				r.emitError(err)
 				_ = r.session.Disconnect()
 				return

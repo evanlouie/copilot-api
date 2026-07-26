@@ -297,7 +297,9 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		// Stop already snapshotted the registry, so nothing would ever drain this
 		// session. Tear it down here instead of handing a leak to the client.
 		warm.Disconnect()
-		return nil, apierr.Upstream("gateway is shutting down")
+		// A shutdown is this service declining the request, not a dependency
+		// failing: 503, and retrying once the process is back is the right move.
+		return nil, apierr.Unavailable("gateway is shutting down")
 	}
 	return &WarmResponseResult{Response: resp, WarmSession: warm}, nil
 }
