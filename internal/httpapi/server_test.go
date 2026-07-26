@@ -1355,10 +1355,19 @@ func TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	gw := &websocketStreamGateway{started: started, release: release}
-	s := New(config.Config{WebSocketIdleTimeout: 30 * time.Millisecond, WebSocketPingInterval: 0}, gw, slog.Default())
+	// The idle clock starts when the handler builds its connection state, before
+	// the client's first frame can possibly have been read. idleTimeout is
+	// therefore also the budget for accepting the socket and scheduling the read
+	// loop; at 30ms a loaded runner missed it and the watchdog aborted the
+	// connection before generation began. Once generation starts the watchdog can
+	// never fire, so the only thing this budget has to dwarf is scheduling jitter.
+	// watchResponsesWebSocketIdle itself is pinned deterministically, without a
+	// socket, in responses_ws_idle_test.go.
+	const idleTimeout = 250 * time.Millisecond
+	s := New(config.Config{WebSocketIdleTimeout: idleTimeout, WebSocketPingInterval: 0}, gw, slog.Default())
 	hts := httptest.NewServer(s.Handler())
 	defer hts.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(hts.URL, "http")+"/v1/responses", nil)
 	if err != nil {
@@ -1374,10 +1383,11 @@ func TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("response generation did not start")
 	}
-	// Stay quiet well past the idle timeout while the response is still
+	// Stay quiet past the idle timeout - long enough for the watchdog to tick at
+	// least twice, since it ticks every idle/2 - while the response is still
 	// generating. The idle watchdog must not treat an in-flight response as idle
 	// and abort it mid-stream.
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(idleTimeout + idleTimeout/2)
 	close(release)
 
 	resp := readUntilResponseCompleted(t, ctx, conn)

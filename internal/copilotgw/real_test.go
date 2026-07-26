@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/config"
@@ -534,41 +535,42 @@ func TestFindModelThrottlesSequentialForcedRefreshes(t *testing.T) {
 }
 
 func TestRefreshModelsDeduplicatesConcurrentForcedRefreshes(t *testing.T) {
-	var calls int32
-	release := make(chan struct{})
-	started := make(chan struct{}, 1)
-	gw := &RealGateway{
-		modelCache: &modelCache{ttl: time.Hour},
-		modelsFetcher: func(context.Context) ([]Model, error) {
-			atomic.AddInt32(&calls, 1)
-			select {
-			case started <- struct{}{}:
-			default:
-			}
-			<-release
-			return []Model{{ID: "gpt-5"}}, nil
-		},
-	}
-	const n = 8
-	errs := make(chan error, n)
-	for range n {
-		go func() {
-			_, err := gw.refreshModels(context.Background(), true)
-			errs <- err
-		}()
-	}
-	// The first caller is now parked inside the single in-flight fetch.
-	<-started
-	// Give the remaining callers time to join that fetch rather than starting
-	// their own.
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	for range n {
-		if err := <-errs; err != nil {
-			t.Fatalf("forced refresh returned error: %v", err)
+	// synctest.Wait below replaces a "sleep 50ms and hope every caller got there"
+	// budget: inside a bubble it returns only once every other goroutine is
+	// durably blocked, which for this test means every caller is provably parked
+	// either in the fetch or on the shared in-flight refresh.
+	synctest.Test(t, func(t *testing.T) {
+		var calls int32
+		release := make(chan struct{})
+		gw := &RealGateway{
+			modelCache: &modelCache{ttl: time.Hour},
+			modelsFetcher: func(context.Context) ([]Model, error) {
+				atomic.AddInt32(&calls, 1)
+				<-release
+				return []Model{{ID: "gpt-5"}}, nil
+			},
 		}
-	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("upstream fetch ran %d times, want 1 (deduplicated)", got)
-	}
+		const n = 8
+		errs := make(chan error, n)
+		for range n {
+			go func() {
+				_, err := gw.refreshModels(context.Background(), true)
+				errs <- err
+			}()
+		}
+		// One caller is inside the fetch; the other seven have joined it.
+		synctest.Wait()
+		if got := atomic.LoadInt32(&calls); got != 1 {
+			t.Fatalf("%d callers entered the upstream fetch, want 1 (the rest must join it)", got)
+		}
+		close(release)
+		for range n {
+			if err := <-errs; err != nil {
+				t.Fatalf("forced refresh returned error: %v", err)
+			}
+		}
+		if got := atomic.LoadInt32(&calls); got != 1 {
+			t.Fatalf("upstream fetch ran %d times, want 1 (deduplicated)", got)
+		}
+	})
 }

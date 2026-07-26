@@ -157,7 +157,7 @@ func serve(args []string) error {
 	retentionDone := make(chan struct{})
 	go func() {
 		defer close(retentionDone)
-		runRetentionLoop(retentionCtx, store, logger, time.Minute)
+		runRetentionLoop(retentionCtx, store, logger, time.Minute, nil)
 	}()
 	defer func() {
 		stopRetention()
@@ -270,7 +270,13 @@ func awaitClose(done <-chan struct{}, timeout time.Duration) bool {
 	}
 }
 
-func runRetentionLoop(ctx context.Context, store *sessionstore.Store, logger *slog.Logger, interval time.Duration) {
+// runRetentionLoop prunes expired state on every tick until ctx is cancelled.
+//
+// onSweep, when non-nil, is invoked with the outcome of each completed prune.
+// Production passes nil; it exists so tests can block on a sweep that has
+// actually finished instead of racing the loop against a wall-clock deadline.
+// It is called from the loop goroutine, so it must not block.
+func runRetentionLoop(ctx context.Context, store *sessionstore.Store, logger *slog.Logger, interval time.Duration, onSweep func(sessionstore.PruneReport, error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -280,8 +286,12 @@ func runRetentionLoop(ctx context.Context, store *sessionstore.Store, logger *sl
 		case <-ticker.C:
 			// Store.Prune records readiness-affecting failures itself, so this log
 			// is for operator visibility into the skippable ones too.
-			if _, err := store.Prune(false); err != nil {
+			report, err := store.Prune(false)
+			if err != nil {
 				logger.Warn("automatic retention prune failed", "error", err)
+			}
+			if onSweep != nil {
+				onSweep(report, err)
 			}
 		}
 	}

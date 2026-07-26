@@ -52,15 +52,35 @@ func TestRetentionLoopPrunesIdleExpiredState(t *testing.T) {
 	store.SetRetentionPolicy(sessionstore.RetentionPolicy{MaxAge: time.Second})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runRetentionLoop(ctx, store, slog.Default(), time.Millisecond)
-	deadline := time.Now().Add(100 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if _, err := store.LoadResponse(record.ID); errors.Is(err, sessionstore.ErrNotFound) {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	// Block on a sweep the loop reports as finished rather than polling the
+	// filesystem against a short wall-clock budget: the assertion below is about
+	// what a completed prune did, not about how fast the loop got scheduled.
+	swept := make(chan struct{}, 1)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		runRetentionLoop(ctx, store, slog.Default(), time.Millisecond, func(_ sessionstore.PruneReport, err error) {
+			if err != nil {
+				return
+			}
+			select {
+			case swept <- struct{}{}:
+			default:
+			}
+		})
+	}()
+	defer func() {
+		cancel()
+		<-stopped
+	}()
+	select {
+	case <-swept:
+	case <-time.After(30 * time.Second):
+		t.Fatal("retention loop never completed a prune")
 	}
-	t.Fatal("idle expired response was not pruned")
+	if _, err := store.LoadResponse(record.ID); !errors.Is(err, sessionstore.ErrNotFound) {
+		t.Fatalf("idle expired response survived a completed retention sweep: %v", err)
+	}
 }
 
 func TestServeAcquiresLifecycleLockBeforeCreatingStorageRoots(t *testing.T) {
