@@ -4,16 +4,16 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
 
 func TestResponseFromTurnRehydratesExtendedToolCallItems(t *testing.T) {
 	turn := &TurnResult{FinishReason: "tool_calls", ResponseToolCalls: []toolproxy.CapturedCall{
-		{Kind: openai.ToolKindFunction, CallID: "call_fn", ResponseName: "multi_tool_use.parallel", ArgumentsJSON: json.RawMessage(`{"tool_uses":[]}`)},
-		{Kind: openai.ToolKindFunction, CallID: "call_mcp", Namespace: "mcp__grep_app", ResponseName: "searchGitHub", ArgumentsJSON: json.RawMessage(`{"query":"x"}`)},
-		{Kind: openai.ToolKindCustom, CallID: "call_patch", ResponseName: "apply_patch", Input: "*** Begin Patch\n*** End Patch"},
-		{Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"grep"}`)},
+		{Kind: toolcatalog.ToolKindFunction, CallID: "call_fn", ResponseName: "multi_tool_use.parallel", ArgumentsJSON: json.RawMessage(`{"tool_uses":[]}`)},
+		{Kind: toolcatalog.ToolKindFunction, CallID: "call_mcp", Namespace: "mcp__grep_app", ResponseName: "searchGitHub", ArgumentsJSON: json.RawMessage(`{"query":"x"}`)},
+		{Kind: toolcatalog.ToolKindCustom, CallID: "call_patch", ResponseName: "apply_patch", Input: "*** Begin Patch\n*** End Patch"},
+		{Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"grep"}`)},
 	}}
 	resp := responseFromTurn("resp_1", "gpt-test", "", nil, true, turn, false)
 	if len(resp.Output) != 4 {

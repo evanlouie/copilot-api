@@ -8,6 +8,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 )
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +44,7 @@ type preparedResponseLogFields struct {
 	continuation    bool
 }
 
-func (s *Server) logResponsesToolSummary(ctx context.Context, tools []openai.NormalizedTool) {
+func (s *Server) logResponsesToolSummary(ctx context.Context, tools []toolcatalog.NormalizedTool) {
 	if s.log == nil {
 		return
 	}
@@ -52,7 +53,7 @@ func (s *Server) logResponsesToolSummary(ctx context.Context, tools []openai.Nor
 	for _, tool := range tools {
 		counts[string(tool.Kind)]++
 		switch tool.Kind {
-		case openai.ToolKindNamespace:
+		case toolcatalog.ToolKindNamespace:
 			names = append(names, string(tool.Kind)+":"+tool.Name)
 			for _, child := range tool.Children {
 				names = append(names, "function:"+tool.Name+"."+child.Name)

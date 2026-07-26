@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
 	"github.com/google/uuid"
 )
 
-const NoToolsSentinel = openai.NoToolsSentinelName
+const NoToolsSentinel = toolcatalog.NoToolsSentinelName
 
 var (
 	ErrExpired  = errors.New("pending tool call batch expired")
@@ -26,7 +27,7 @@ var (
 
 type ClientTool struct {
 	SDKName      string
-	ResponseKind openai.ResponsesToolKind
+	ResponseKind toolcatalog.ResponsesToolKind
 	ResponseName string
 	Namespace    string
 	Description  string
@@ -34,11 +35,10 @@ type ClientTool struct {
 	Strict       *bool
 	DeferLoading *bool
 	Execution    string
-	Raw          json.RawMessage
 }
 
 type CapturedCall struct {
-	Kind          openai.ResponsesToolKind
+	Kind          toolcatalog.ResponsesToolKind
 	SDKName       string
 	ResponseName  string
 	Namespace     string
@@ -194,12 +194,12 @@ func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*Req
 		if err != nil {
 			return nil, err
 		}
-		clientTools = append(clientTools, ClientTool{SDKName: t.Function.Name, ResponseKind: openai.ToolKindFunction, ResponseName: t.Function.Name, Description: t.Function.Description, Parameters: params, Strict: t.Function.Strict})
+		clientTools = append(clientTools, ClientTool{SDKName: t.Function.Name, ResponseKind: toolcatalog.ToolKindFunction, ResponseName: t.Function.Name, Description: t.Function.Description, Parameters: params, Strict: t.Function.Strict})
 	}
 	return newRequestToolsFromClientTools(broker, clientTools, choiceNone)
 }
 
-func NewResponseRequestTools(broker *Broker, tools []openai.NormalizedTool, choiceNone bool) (*RequestTools, error) {
+func NewResponseRequestTools(broker *Broker, tools []toolcatalog.NormalizedTool, choiceNone bool) (*RequestTools, error) {
 	clientTools, err := FlattenResponsesTools(tools)
 	if err != nil {
 		return nil, err
@@ -240,23 +240,23 @@ func newRequestToolsFromClientTools(broker *Broker, clientTools []ClientTool, ch
 	return rt, nil
 }
 
-func FlattenResponsesTools(tools []openai.NormalizedTool) ([]ClientTool, error) {
+func FlattenResponsesTools(tools []toolcatalog.NormalizedTool) ([]ClientTool, error) {
 	flattened := make([]ClientTool, 0, len(tools))
 	for _, tool := range tools {
 		switch tool.Kind {
-		case openai.ToolKindFunction:
+		case toolcatalog.ToolKindFunction:
 			ct, err := clientToolFromNormalized(tool, "")
 			if err != nil {
 				return nil, err
 			}
 			flattened = append(flattened, ct)
-		case openai.ToolKindCustom:
+		case toolcatalog.ToolKindCustom:
 			ct, err := clientToolFromNormalized(tool, "")
 			if err != nil {
 				return nil, err
 			}
 			flattened = append(flattened, ct)
-		case openai.ToolKindNamespace:
+		case toolcatalog.ToolKindNamespace:
 			for _, child := range tool.Children {
 				child.Namespace = tool.Name
 				ct, err := clientToolFromNormalized(child, tool.Name)
@@ -265,7 +265,7 @@ func FlattenResponsesTools(tools []openai.NormalizedTool) ([]ClientTool, error) 
 				}
 				flattened = append(flattened, ct)
 			}
-		case openai.ToolKindToolSearch:
+		case toolcatalog.ToolKindToolSearch:
 			ct, err := clientToolFromNormalized(tool, "")
 			if err != nil {
 				return nil, err
@@ -276,16 +276,16 @@ func FlattenResponsesTools(tools []openai.NormalizedTool) ([]ClientTool, error) 
 	return assignSDKNames(flattened)
 }
 
-func clientToolFromNormalized(tool openai.NormalizedTool, namespace string) (ClientTool, error) {
+func clientToolFromNormalized(tool toolcatalog.NormalizedTool, namespace string) (ClientTool, error) {
 	if namespace == "" {
 		namespace = tool.Namespace
 	}
 	var params map[string]any
 	var err error
 	switch tool.Kind {
-	case openai.ToolKindCustom:
+	case toolcatalog.ToolKindCustom:
 		params = customToolSchema(tool.Name)
-	case openai.ToolKindToolSearch:
+	case toolcatalog.ToolKindToolSearch:
 		params, err = schemaMap(tool.Parameters)
 	default:
 		params, err = schemaMap(tool.Parameters)
@@ -294,8 +294,8 @@ func clientToolFromNormalized(tool openai.NormalizedTool, namespace string) (Cli
 		return ClientTool{}, err
 	}
 	desc := tool.Description
-	ct := ClientTool{ResponseKind: tool.Kind, ResponseName: tool.Name, Namespace: namespace, Description: desc, Parameters: params, Strict: tool.Strict, DeferLoading: tool.DeferLoading, Execution: tool.Execution, Raw: tool.Raw}
-	if ct.ResponseKind == openai.ToolKindToolSearch && ct.Execution == "" {
+	ct := ClientTool{ResponseKind: tool.Kind, ResponseName: tool.Name, Namespace: namespace, Description: desc, Parameters: params, Strict: tool.Strict, DeferLoading: tool.DeferLoading, Execution: tool.Execution}
+	if ct.ResponseKind == toolcatalog.ToolKindToolSearch && ct.Execution == "" {
 		ct.Execution = "client"
 	}
 	return ct, nil
@@ -327,7 +327,7 @@ func assignSDKNames(tools []ClientTool) ([]ClientTool, error) {
 }
 
 func desiredSDKName(tool ClientTool) string {
-	return openai.NormalizedToolSDKName(openai.NormalizedTool{Kind: tool.ResponseKind, Name: tool.ResponseName, Namespace: tool.Namespace})
+	return toolcatalog.NormalizedToolSDKName(toolcatalog.NormalizedTool{Kind: tool.ResponseKind, Name: tool.ResponseName, Namespace: tool.Namespace})
 }
 
 func responseIdentity(tool ClientTool) string {
@@ -343,10 +343,10 @@ func descriptionWithCanonicalName(tool ClientTool) string {
 		canonical = tool.Namespace + "." + tool.ResponseName
 	}
 	prefix := "Responses tool " + canonical + "."
-	if tool.ResponseKind == openai.ToolKindCustom {
+	if tool.ResponseKind == toolcatalog.ToolKindCustom {
 		prefix += " Freeform custom tool; provide the raw tool input in the required JSON string field named input."
 	}
-	if tool.ResponseKind == openai.ToolKindToolSearch {
+	if tool.ResponseKind == toolcatalog.ToolKindToolSearch {
 		prefix += " Client-executed tool discovery; returns loadable client tool specs."
 	}
 	if strings.TrimSpace(tool.Description) == "" {
@@ -444,11 +444,11 @@ func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolReque
 		if !ok {
 			return nil, nil, fmt.Errorf("unconfigured SDK tool request %q", req.Name)
 		}
-		if req.Type != nil && string(*req.Type) == "custom" && meta.ResponseKind == openai.ToolKindFunction {
-			meta.ResponseKind = openai.ToolKindCustom
+		if req.Type != nil && string(*req.Type) == "custom" && meta.ResponseKind == toolcatalog.ToolKindFunction {
+			meta.ResponseKind = toolcatalog.ToolKindCustom
 		}
 		input := ""
-		if meta.ResponseKind == openai.ToolKindCustom {
+		if meta.ResponseKind == toolcatalog.ToolKindCustom {
 			input = customInput(req.Arguments, args)
 		}
 		call := rt.batch.ensureCall(req.ToolCallID, req.Name, meta, args, input)
@@ -472,7 +472,7 @@ func (rt *RequestTools) handleInvocation(inv copilot.ToolInvocation) (copilot.To
 		return copilot.ToolResult{}, fmt.Errorf("unconfigured SDK tool invocation %q", inv.ToolName)
 	}
 	input := ""
-	if meta.ResponseKind == openai.ToolKindCustom {
+	if meta.ResponseKind == toolcatalog.ToolKindCustom {
 		input = customInput(inv.Arguments, args)
 	}
 	call := batch.ensureCall(inv.ToolCallID, inv.ToolName, meta, args, input)
@@ -631,7 +631,7 @@ func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.Raw
 		meta.ResponseName = sdkName
 	}
 	if meta.ResponseKind == "" {
-		meta.ResponseKind = openai.ToolKindFunction
+		meta.ResponseKind = toolcatalog.ToolKindFunction
 	}
 	if call, ok := b.calls[openaiID]; ok {
 		if len(call.ArgumentsJSON) == 0 && len(args) > 0 {
@@ -643,7 +643,7 @@ func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.Raw
 		return call
 	}
 	call := &Call{OpenAIID: openaiID, SDKID: sdkID, SDKName: meta.SDKName, PublicName: meta.ResponseName, Namespace: meta.Namespace, Kind: meta.ResponseKind, ArgumentsJSON: append(json.RawMessage{}, args...), Input: input, Execution: meta.Execution, outCh: make(chan string, 1), errCh: make(chan error, 1)}
-	if call.Execution == "" && call.Kind == openai.ToolKindToolSearch {
+	if call.Execution == "" && call.Kind == toolcatalog.ToolKindToolSearch {
 		call.Execution = "client"
 	}
 	b.calls[openaiID] = call
@@ -715,14 +715,14 @@ func (b *Batch) Complete(outputs map[string]string) error {
 }
 
 func (b *Batch) CompleteWithSetup(outputs map[string]string, setup func()) error {
-	wrapped := make(map[string]openai.ResponseToolOutput, len(outputs))
+	wrapped := make(map[string]toolcatalog.ResponseToolOutput, len(outputs))
 	for id, output := range outputs {
-		wrapped[id] = openai.ResponseToolOutput{Kind: openai.ToolKindFunction, CallID: id, Output: output}
+		wrapped[id] = toolcatalog.ResponseToolOutput{Kind: toolcatalog.ToolKindFunction, CallID: id, Output: output}
 	}
 	return b.CompleteToolOutputsWithSetup(wrapped, setup)
 }
 
-func (b *Batch) CompleteToolOutputsWithSetup(outputs map[string]openai.ResponseToolOutput, setup func()) error {
+func (b *Batch) CompleteToolOutputsWithSetup(outputs map[string]toolcatalog.ResponseToolOutput, setup func()) error {
 	b.mu.Lock()
 	if b.expired {
 		b.mu.Unlock()
@@ -755,7 +755,7 @@ func (b *Batch) CompleteToolOutputsWithSetup(outputs map[string]openai.ResponseT
 			b.mu.Unlock()
 			return fmt.Errorf("%s output does not match pending %s call %q", output.Kind, call.Kind, id)
 		}
-		if call.Kind == openai.ToolKindCustom && output.Name != "" && call.PublicName != "" && output.Name != call.PublicName {
+		if call.Kind == toolcatalog.ToolKindCustom && output.Name != "" && call.PublicName != "" && output.Name != call.PublicName {
 			b.mu.Unlock()
 			return fmt.Errorf("custom_tool_call_output name %q does not match pending custom tool %q for call %q", output.Name, call.PublicName, id)
 		}
@@ -812,7 +812,7 @@ type Call struct {
 	SDKName       string
 	PublicName    string
 	Namespace     string
-	Kind          openai.ResponsesToolKind
+	Kind          toolcatalog.ResponsesToolKind
 	ArgumentsJSON json.RawMessage
 	Input         string
 	Execution     string
@@ -833,7 +833,7 @@ func (c *Call) ChatToolCall() openai.ChatToolCall {
 func (c *Call) Captured() CapturedCall {
 	kind := c.Kind
 	if kind == "" {
-		kind = openai.ToolKindFunction
+		kind = toolcatalog.ToolKindFunction
 	}
 	args := append(json.RawMessage{}, c.ArgumentsJSON...)
 	return CapturedCall{Kind: kind, SDKName: c.SDKName, ResponseName: c.PublicName, Namespace: c.Namespace, CallID: c.OpenAIID, ArgumentsJSON: args, Input: c.Input, Execution: c.Execution}

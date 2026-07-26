@@ -635,10 +635,3 @@ func InstructionCandidates(s string) []string {
 	}
 	return []string{" ", "You are a chat completion model."}
 }
-
-func EffectiveInstructions(s string) string {
-	if s != "" {
-		return s
-	}
-	return "You are a chat completion model."
-}

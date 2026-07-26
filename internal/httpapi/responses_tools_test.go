@@ -8,6 +8,7 @@ import (
 
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 )
 
 func TestParseResponsesInputAcceptsCustomAndToolSearchOutputs(t *testing.T) {
@@ -22,10 +23,10 @@ func TestParseResponsesInputAcceptsCustomAndToolSearchOutputs(t *testing.T) {
 	if prompt.Text != "" || instructions != "" {
 		t.Fatalf("prompt/instructions = %#v/%q, want empty", prompt, instructions)
 	}
-	if got := outputs["call_patch"]; got.Kind != openai.ToolKindCustom || got.Name != "apply_patch" || got.Output != "patched" {
+	if got := outputs["call_patch"]; got.Kind != toolcatalog.ToolKindCustom || got.Name != "apply_patch" || got.Output != "patched" {
 		t.Fatalf("custom output = %#v", got)
 	}
-	if got := outputs["call_search"]; got.Kind != openai.ToolKindToolSearch || got.Execution != "client" || got.Status != "completed" || !strings.Contains(got.Output, "loaded_tool") || len(got.LoadedTools) != 1 || got.LoadedTools[0].Name != "loaded_tool" {
+	if got := outputs["call_search"]; got.Kind != toolcatalog.ToolKindToolSearch || got.Execution != "client" || got.Status != "completed" || !strings.Contains(got.Output, "loaded_tool") || len(got.LoadedTools) != 1 || got.LoadedTools[0].Name != "loaded_tool" {
 		t.Fatalf("tool_search output = %#v", got)
 	}
 }

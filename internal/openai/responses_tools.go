@@ -5,48 +5,20 @@ import (
 	"fmt"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 )
 
-type ResponsesToolKind string
+// This file is the wire -> domain adapter for Responses tools: it reads the
+// OpenAI `tools` array (and the `tool_search_output.tools` payload) and hands
+// back the transport-free catalog vocabulary from internal/toolcatalog. The
+// catalog algebra itself — merging, identity, persistence — lives there.
 
-const (
-	ToolKindFunction   ResponsesToolKind = "function"
-	ToolKindCustom     ResponsesToolKind = "custom"
-	ToolKindNamespace  ResponsesToolKind = "namespace"
-	ToolKindToolSearch ResponsesToolKind = "tool_search"
-)
-
-type NormalizedTool struct {
-	Kind         ResponsesToolKind
-	Name         string
-	Namespace    string
-	Description  string
-	Parameters   json.RawMessage
-	Format       json.RawMessage
-	Execution    string
-	Strict       *bool
-	DeferLoading *bool
-	Children     []NormalizedTool
-	Raw          json.RawMessage
-}
-
-type ResponseToolOutput struct {
-	Kind        ResponsesToolKind
-	CallID      string
-	Name        string
-	Output      string
-	Status      string
-	Execution   string
-	Tools       json.RawMessage
-	LoadedTools []NormalizedTool
-}
-
-func NormalizeResponsesTools(tools []Tool) ([]NormalizedTool, error) {
+func NormalizeResponsesTools(tools []Tool) ([]toolcatalog.NormalizedTool, error) {
 	return NormalizeResponsesToolsWithMode(tools, true)
 }
 
-func NormalizeResponsesToolsWithMode(tools []Tool, strict bool) ([]NormalizedTool, error) {
-	out := make([]NormalizedTool, 0, len(tools))
+func NormalizeResponsesToolsWithMode(tools []Tool, strict bool) ([]toolcatalog.NormalizedTool, error) {
+	out := make([]toolcatalog.NormalizedTool, 0, len(tools))
 	for i, tool := range tools {
 		normalized, err := normalizeResponsesTool(tool, fmt.Sprintf("tools.%d", i), false)
 		if err != nil {
@@ -57,7 +29,7 @@ func NormalizeResponsesToolsWithMode(tools []Tool, strict bool) ([]NormalizedToo
 		}
 		out = append(out, normalized)
 	}
-	if err := validateNormalizedToolCatalog(out, "tools"); err != nil {
+	if err := toolcatalog.ValidateCatalog(out, "tools"); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -101,23 +73,18 @@ func IgnoredResponsesToolTypes(tools []Tool) []string {
 	return out
 }
 
-func ValidateToolSearchOutputTools(raw json.RawMessage, param string) error {
-	_, err := NormalizeToolSearchOutputTools(raw, param)
-	return err
-}
-
-func NormalizeToolSearchOutputTools(raw json.RawMessage, param string) ([]NormalizedTool, error) {
+func NormalizeToolSearchOutputTools(raw json.RawMessage, param string) ([]toolcatalog.NormalizedTool, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
-	if len(raw) > MaxLoadedRawToolsBytes {
+	if len(raw) > toolcatalog.MaxLoadedRawToolsBytes {
 		return nil, apierr.InvalidRequest("tool_search_output.tools is too large", param)
 	}
 	var tools []Tool
 	if err := json.Unmarshal(raw, &tools); err != nil {
 		return nil, apierr.InvalidRequest("tool_search_output.tools must be an array of tool specs", param)
 	}
-	out := make([]NormalizedTool, 0, len(tools))
+	out := make([]toolcatalog.NormalizedTool, 0, len(tools))
 	for i, tool := range tools {
 		normalized, err := normalizeLoadableToolSearchTool(tool, fmt.Sprintf("%s.%d", param, i))
 		if err != nil {
@@ -125,19 +92,19 @@ func NormalizeToolSearchOutputTools(raw json.RawMessage, param string) ([]Normal
 		}
 		out = append(out, normalized)
 	}
-	if err := validateNormalizedToolCatalog(out, param); err != nil {
+	if err := toolcatalog.ValidateCatalog(out, param); err != nil {
 		return nil, err
 	}
-	if flattenedToolCount(out) > MaxLoadedToolCount {
+	if toolcatalog.FlattenedToolCount(out) > toolcatalog.MaxLoadedToolCount {
 		return nil, apierr.InvalidRequest("tool_search_output.tools contains too many loadable tools", param)
 	}
-	if err := validateLoadedToolLimits(out); err != nil {
+	if err := toolcatalog.ValidateLoadedToolLimits(out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func normalizeResponsesTool(tool Tool, param string, namespaceChild bool) (NormalizedTool, error) {
+func normalizeResponsesTool(tool Tool, param string, namespaceChild bool) (toolcatalog.NormalizedTool, error) {
 	typ := tool.Type
 	if namespaceChild && typ == "" {
 		typ = "function"
@@ -149,7 +116,7 @@ func normalizeResponsesTool(tool Tool, param string, namespaceChild bool) (Norma
 			name = tool.Name
 		}
 		if name == "" {
-			return NormalizedTool{}, apierr.InvalidRequest("function tools require name", toolNameParam(param, namespaceChild))
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("function tools require name", toolNameParam(param, namespaceChild))
 		}
 		description := tool.Function.Description
 		if description == "" {
@@ -163,72 +130,72 @@ func normalizeResponsesTool(tool Tool, param string, namespaceChild bool) (Norma
 		if strict == nil {
 			strict = tool.Strict
 		}
-		if err := validateSchemaRaw(parameters, toolParametersParam(param, namespaceChild), "function parameters must be valid JSON Schema"); err != nil {
-			return NormalizedTool{}, err
+		if err := toolcatalog.ValidateSchemaRaw(parameters, toolParametersParam(param, namespaceChild), "function parameters must be valid JSON Schema"); err != nil {
+			return toolcatalog.NormalizedTool{}, err
 		}
-		return NormalizedTool{Kind: ToolKindFunction, Name: name, Description: description, Parameters: cloneRaw(parameters), Strict: strict, DeferLoading: tool.DeferLoading, Raw: cloneRaw(tool.Raw)}, nil
+		return toolcatalog.NormalizedTool{Kind: toolcatalog.ToolKindFunction, Name: name, Description: description, Parameters: toolcatalog.CloneRaw(parameters), Strict: strict, DeferLoading: tool.DeferLoading, Raw: toolcatalog.CloneRaw(tool.Raw)}, nil
 	case "custom":
 		if namespaceChild {
-			return NormalizedTool{}, apierr.InvalidRequest("namespace tools may only contain function tools", param+".type")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("namespace tools may only contain function tools", param+".type")
 		}
 		if tool.Name == "" {
-			return NormalizedTool{}, apierr.InvalidRequest("custom tools require name", param+".name")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("custom tools require name", param+".name")
 		}
-		if err := validateJSONRaw(tool.Format, param+".format", "custom tool format must be valid JSON"); err != nil {
-			return NormalizedTool{}, err
+		if err := toolcatalog.ValidateJSONRaw(tool.Format, param+".format", "custom tool format must be valid JSON"); err != nil {
+			return toolcatalog.NormalizedTool{}, err
 		}
-		return NormalizedTool{Kind: ToolKindCustom, Name: tool.Name, Description: tool.Description, Format: cloneRaw(tool.Format), Strict: tool.Strict, DeferLoading: tool.DeferLoading, Raw: cloneRaw(tool.Raw)}, nil
+		return toolcatalog.NormalizedTool{Kind: toolcatalog.ToolKindCustom, Name: tool.Name, Description: tool.Description, Format: toolcatalog.CloneRaw(tool.Format), Strict: tool.Strict, DeferLoading: tool.DeferLoading, Raw: toolcatalog.CloneRaw(tool.Raw)}, nil
 	case "namespace":
 		if namespaceChild {
-			return NormalizedTool{}, apierr.InvalidRequest("nested namespace tools are not supported", param+".type")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("nested namespace tools are not supported", param+".type")
 		}
 		if tool.Name == "" {
-			return NormalizedTool{}, apierr.InvalidRequest("namespace tools require name", param+".name")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("namespace tools require name", param+".name")
 		}
 		if len(tool.Tools) == 0 {
-			return NormalizedTool{}, apierr.InvalidRequest("namespace tools require at least one child tool", param+".tools")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("namespace tools require at least one child tool", param+".tools")
 		}
-		children := make([]NormalizedTool, 0, len(tool.Tools))
+		children := make([]toolcatalog.NormalizedTool, 0, len(tool.Tools))
 		seen := map[string]struct{}{}
 		for i, child := range tool.Tools {
 			normalized, err := normalizeResponsesTool(child, fmt.Sprintf("%s.tools.%d", param, i), true)
 			if err != nil {
-				return NormalizedTool{}, err
+				return toolcatalog.NormalizedTool{}, err
 			}
 			if _, exists := seen[normalized.Name]; exists {
-				return NormalizedTool{}, apierr.InvalidRequest("duplicate namespace child tool name", fmt.Sprintf("%s.tools.%d.name", param, i))
+				return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("duplicate namespace child tool name", fmt.Sprintf("%s.tools.%d.name", param, i))
 			}
 			seen[normalized.Name] = struct{}{}
 			normalized.Namespace = tool.Name
 			children = append(children, normalized)
 		}
-		return NormalizedTool{Kind: ToolKindNamespace, Name: tool.Name, Description: tool.Description, DeferLoading: tool.DeferLoading, Children: children, Raw: cloneRaw(tool.Raw)}, nil
+		return toolcatalog.NormalizedTool{Kind: toolcatalog.ToolKindNamespace, Name: tool.Name, Description: tool.Description, DeferLoading: tool.DeferLoading, Children: children, Raw: toolcatalog.CloneRaw(tool.Raw)}, nil
 	case "tool_search":
 		if namespaceChild {
-			return NormalizedTool{}, apierr.InvalidRequest("namespace tools may only contain function tools", param+".type")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("namespace tools may only contain function tools", param+".type")
 		}
 		execution := tool.Execution
 		if execution == "" {
 			execution = "client"
 		}
 		if execution != "client" {
-			return NormalizedTool{}, apierr.InvalidRequest("tool_search execution must be client", param+".execution")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("tool_search execution must be client", param+".execution")
 		}
-		if err := validateSchemaRaw(tool.Parameters, param+".parameters", "tool_search parameters must be valid JSON Schema"); err != nil {
-			return NormalizedTool{}, err
+		if err := toolcatalog.ValidateSchemaRaw(tool.Parameters, param+".parameters", "tool_search parameters must be valid JSON Schema"); err != nil {
+			return toolcatalog.NormalizedTool{}, err
 		}
-		return NormalizedTool{Kind: ToolKindToolSearch, Name: "tool_search", Description: tool.Description, Parameters: cloneRaw(tool.Parameters), Execution: execution, Raw: cloneRaw(tool.Raw)}, nil
+		return toolcatalog.NormalizedTool{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Description: tool.Description, Parameters: toolcatalog.CloneRaw(tool.Parameters), Execution: execution, Raw: toolcatalog.CloneRaw(tool.Raw)}, nil
 	case "":
-		return NormalizedTool{}, apierr.InvalidRequest("tool type is required", param+".type")
+		return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("tool type is required", param+".type")
 	default:
 		if _, hosted := hostedResponsesToolTypes[typ]; hosted {
-			return NormalizedTool{}, apierr.InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
 		}
-		return NormalizedTool{}, apierr.InvalidRequest("unsupported Responses tool type", param+".type")
+		return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("unsupported Responses tool type", param+".type")
 	}
 }
 
-func normalizeLoadableToolSearchTool(tool Tool, param string) (NormalizedTool, error) {
+func normalizeLoadableToolSearchTool(tool Tool, param string) (toolcatalog.NormalizedTool, error) {
 	typ := tool.Type
 	if typ == "" {
 		typ = "function"
@@ -236,64 +203,22 @@ func normalizeLoadableToolSearchTool(tool Tool, param string) (NormalizedTool, e
 	switch typ {
 	case "function":
 		if err := validateLoadableFunctionToolFields(tool.Raw, param); err != nil {
-			return NormalizedTool{}, err
+			return toolcatalog.NormalizedTool{}, err
 		}
 		return normalizeResponsesTool(tool, param, false)
 	case "namespace":
 		if err := validateLoadableNamespaceToolFields(tool, param); err != nil {
-			return NormalizedTool{}, err
+			return toolcatalog.NormalizedTool{}, err
 		}
 		return normalizeResponsesTool(tool, param, false)
 	case "custom", "tool_search":
-		return NormalizedTool{}, apierr.InvalidRequest("tool_search_output.tools may only contain loadable function or namespace tools", param+".type")
+		return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("tool_search_output.tools may only contain loadable function or namespace tools", param+".type")
 	default:
 		if _, hosted := hostedResponsesToolTypes[typ]; hosted {
-			return NormalizedTool{}, apierr.InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
+			return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
 		}
-		return NormalizedTool{}, apierr.InvalidRequest("unsupported tool_search_output tool type", param+".type")
+		return toolcatalog.NormalizedTool{}, apierr.InvalidRequest("unsupported tool_search_output tool type", param+".type")
 	}
-}
-
-func validateNormalizedToolCatalog(tools []NormalizedTool, param string) error {
-	identities := map[string]struct{}{}
-	namespaces := map[string]struct{}{}
-	sdkNames := map[string]string{NoToolsSentinelName: "reserved sentinel"}
-	for _, tool := range tools {
-		if tool.Kind == ToolKindNamespace {
-			if len(tool.Children) == 0 {
-				return apierr.InvalidRequest("namespace tools require at least one child tool", param)
-			}
-			if _, exists := namespaces[tool.Name]; exists {
-				return apierr.InvalidRequest("duplicate Responses namespace tool name", param)
-			}
-			namespaces[tool.Name] = struct{}{}
-			for _, child := range tool.Children {
-				child.Namespace = tool.Name
-				if err := validateFlattenedToolIdentity(child, param, identities, sdkNames); err != nil {
-					return err
-				}
-			}
-			continue
-		}
-		if err := validateFlattenedToolIdentity(tool, param, identities, sdkNames); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateFlattenedToolIdentity(tool NormalizedTool, param string, identities map[string]struct{}, sdkNames map[string]string) error {
-	identity := NormalizedToolIdentity(tool)
-	if _, exists := identities[identity]; exists {
-		return apierr.InvalidRequest("duplicate Responses tool identity", param)
-	}
-	identities[identity] = struct{}{}
-	sdkName := NormalizedToolSDKName(tool)
-	if prior, exists := sdkNames[sdkName]; exists {
-		return apierr.InvalidRequest(fmt.Sprintf("Responses tool SDK name collision for %q with %s", sdkName, prior), param)
-	}
-	sdkNames[sdkName] = identity
-	return nil
 }
 
 func validateLoadableFunctionToolFields(raw json.RawMessage, param string) error {
@@ -359,31 +284,6 @@ func rejectUnknownFields(fields map[string]json.RawMessage, allowed map[string]s
 		}
 	}
 	return nil
-}
-
-func validateSchemaRaw(raw json.RawMessage, param, message string) error {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	return validateJSONRaw(raw, param, message)
-}
-
-func validateJSONRaw(raw json.RawMessage, param, message string) error {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	var js any
-	if err := json.Unmarshal(raw, &js); err != nil {
-		return apierr.InvalidRequest(message, param)
-	}
-	return nil
-}
-
-func cloneRaw(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return nil
-	}
-	return append(json.RawMessage{}, raw...)
 }
 
 func toolNameParam(param string, namespaceChild bool) string {

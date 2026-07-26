@@ -8,13 +8,14 @@ import (
 
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 )
 
 func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *testing.T) {
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewResponseRequestTools(broker, []openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
+	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,8 +23,8 @@ func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	install, err := validateResponseToolOutputsForBatch(batch, map[string]openai.ResponseToolOutput{
-		"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "loaded_tool"}}},
+	install, err := validateResponseToolOutputsForBatch(batch, map[string]toolcatalog.ResponseToolOutput{
+		"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +36,7 @@ func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *
 
 func TestValidateResponseToolOutputsRejectsFailedToolSearchWithTools(t *testing.T) {
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewResponseRequestTools(broker, []openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
+	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +44,8 @@ func TestValidateResponseToolOutputsRejectsFailedToolSearchWithTools(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = validateResponseToolOutputsForBatch(batch, map[string]openai.ResponseToolOutput{
-		"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "failed", Output: "nope", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "loaded_tool"}}},
+	_, err = validateResponseToolOutputsForBatch(batch, map[string]toolcatalog.ResponseToolOutput{
+		"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "failed", Output: "nope", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "cannot include tools") {
 		t.Fatalf("error = %v, want failed-status loaded tool rejection", err)
@@ -52,13 +53,13 @@ func TestValidateResponseToolOutputsRejectsFailedToolSearchWithTools(t *testing.
 }
 
 func TestMergeLoadedToolSearchOutputsUsesPreviousCatalogAndPersistsEvent(t *testing.T) {
-	base, err := openai.NewToolCatalog([]openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
+	base, err := toolcatalog.NewToolCatalog([]toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	previous := sessionstore.ResponseRecord{ID: "resp_prev", InstalledToolCatalog: base.StoredDTO()}
-	outputs := map[string]openai.ResponseToolOutput{
-		"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`), LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
+	outputs := map[string]toolcatalog.ResponseToolOutput{
+		"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`), LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}}}},
 	}
 	merge, err := mergeLoadedToolSearchOutputs(ResponseRequest{ResponseID: "resp_next", Model: "gpt-test"}, previous, outputs)
 	if err != nil {
@@ -68,7 +69,7 @@ func TestMergeLoadedToolSearchOutputsUsesPreviousCatalogAndPersistsEvent(t *test
 		t.Fatalf("merge = %#v, want changed with one event", merge)
 	}
 	flat := merge.Catalog.Flatten()
-	if len(flat) != 2 || flat[1].Kind != openai.ToolKindNamespace || flat[1].Children[0].Name != "spawn_agent" {
+	if len(flat) != 2 || flat[1].Kind != toolcatalog.ToolKindNamespace || flat[1].Children[0].Name != "spawn_agent" {
 		t.Fatalf("merged catalog = %#v", flat)
 	}
 	rt, err := toolproxy.NewResponseRequestTools(toolproxy.NewBroker(time.Minute), flat, false)
@@ -97,29 +98,29 @@ func containsString(values []string, want string) bool {
 }
 
 func TestResponseCatalogForContinuationMergesRequestToolsIntoStoredCatalog(t *testing.T) {
-	base, err := openai.NewToolCatalog([]openai.NormalizedTool{
-		{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
-		{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}},
+	base, err := toolcatalog.NewToolCatalog([]toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
+		{Kind: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	previous := sessionstore.ResponseRecord{ID: "resp_prev", InstalledToolCatalog: base.StoredDTO()}
-	catalog, err := responseCatalogForRequest(ResponseRequest{ToolsSet: true, Tools: []openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}}, &previous)
+	catalog, err := responseCatalogForRequest(ResponseRequest{ToolsSet: true, Tools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}}, &previous)
 	if err != nil {
 		t.Fatal(err)
 	}
 	flat := catalog.Flatten()
-	if len(flat) != 2 || flat[1].Kind != openai.ToolKindNamespace || flat[1].Children[0].Name != "spawn_agent" {
+	if len(flat) != 2 || flat[1].Kind != toolcatalog.ToolKindNamespace || flat[1].Children[0].Name != "spawn_agent" {
 		t.Fatalf("catalog after request tools = %#v, want stored dynamic namespace preserved", flat)
 	}
 }
 
 func TestActiveResponseToolOutputsFromRecordRejectsSpoofedLoadedToolCallID(t *testing.T) {
 	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "tool_search_call", CallID: "call_real", Execution: "client"}}}
-	_, err := activeResponseToolOutputsFromRecord(record, map[string]openai.ResponseToolOutput{
-		"call_real":  {Kind: openai.ToolKindToolSearch, CallID: "call_real", Execution: "client", Output: "none"},
-		"call_spoof": {Kind: openai.ToolKindToolSearch, CallID: "call_spoof", Execution: "client", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "evil"}}},
+	_, err := activeResponseToolOutputsFromRecord(record, map[string]toolcatalog.ResponseToolOutput{
+		"call_real":  {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_real", Execution: "client", Output: "none"},
+		"call_spoof": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_spoof", Execution: "client", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "evil"}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not belong to previous_response_id") {
 		t.Fatalf("error = %v, want spoofed call_id rejection", err)
@@ -128,8 +129,8 @@ func TestActiveResponseToolOutputsFromRecordRejectsSpoofedLoadedToolCallID(t *te
 
 func TestActiveResponseToolOutputsFromRecordRejectsLoadedToolsForFunctionCall(t *testing.T) {
 	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "function_call", CallID: "call_lookup", Name: "lookup"}}}
-	_, err := activeResponseToolOutputsFromRecord(record, map[string]openai.ResponseToolOutput{
-		"call_lookup": {Kind: openai.ToolKindFunction, CallID: "call_lookup", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "evil"}}},
+	_, err := activeResponseToolOutputsFromRecord(record, map[string]toolcatalog.ResponseToolOutput{
+		"call_lookup": {Kind: toolcatalog.ToolKindFunction, CallID: "call_lookup", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "evil"}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "only tool_search_output") {
 		t.Fatalf("error = %v, want non-search loaded tool rejection", err)
@@ -137,8 +138,8 @@ func TestActiveResponseToolOutputsFromRecordRejectsLoadedToolsForFunctionCall(t 
 }
 
 func TestMergeLoadedToolSearchOutputsRequiresCatalogForMigratedRecords(t *testing.T) {
-	outputs := map[string]openai.ResponseToolOutput{
-		"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "loaded_tool"}}},
+	outputs := map[string]toolcatalog.ResponseToolOutput{
+		"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
 	}
 	_, err := mergeLoadedToolSearchOutputs(ResponseRequest{ResponseID: "resp_next", Model: "gpt-test"}, sessionstore.ResponseRecord{ID: "resp_prev"}, outputs)
 	if err == nil || !strings.Contains(err.Error(), "does not contain an installed tool catalog") {

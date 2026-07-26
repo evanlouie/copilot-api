@@ -6,16 +6,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	copilot "github.com/github/copilot-sdk/go"
 )
 
 func TestResponseRequestToolsFlattenExtendedResponsesTools(t *testing.T) {
-	tools := []openai.NormalizedTool{
-		{Kind: openai.ToolKindFunction, Name: "multi_tool_use.parallel", Description: "parallel", Parameters: []byte(`{"type":"object","properties":{}}`)},
-		{Kind: openai.ToolKindCustom, Name: "apply_patch", Description: "patch"},
-		{Kind: openai.ToolKindNamespace, Name: "mcp__grep_app", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "searchGitHub", Description: "search", Parameters: []byte(`{"type":"object","properties":{"query":{"type":"string"}}}`)}}},
-		{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client", Parameters: []byte(`{"type":"object","properties":{"query":{"type":"string"}}}`)},
+	tools := []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindFunction, Name: "multi_tool_use.parallel", Description: "parallel", Parameters: []byte(`{"type":"object","properties":{}}`)},
+		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Description: "patch"},
+		{Kind: toolcatalog.ToolKindNamespace, Name: "mcp__grep_app", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "searchGitHub", Description: "search", Parameters: []byte(`{"type":"object","properties":{"query":{"type":"string"}}}`)}}},
+		{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client", Parameters: []byte(`{"type":"object","properties":{"query":{"type":"string"}}}`)},
 	}
 	rt, err := NewResponseRequestTools(NewBroker(time.Minute), tools, false)
 	if err != nil {
@@ -46,10 +46,10 @@ func TestResponseRequestToolsFlattenExtendedResponsesTools(t *testing.T) {
 
 func TestCaptureRequestsRehydratesExtendedResponseToolMetadata(t *testing.T) {
 	broker := NewBroker(time.Minute)
-	rt, err := NewResponseRequestTools(broker, []openai.NormalizedTool{
-		{Kind: openai.ToolKindCustom, Name: "apply_patch"},
-		{Kind: openai.ToolKindNamespace, Name: "mcp__grep_app", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "searchGitHub"}}},
-		{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
+	rt, err := NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"},
+		{Kind: toolcatalog.ToolKindNamespace, Name: "mcp__grep_app", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "searchGitHub"}}},
+		{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
 	}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -69,21 +69,21 @@ func TestCaptureRequestsRehydratesExtendedResponseToolMetadata(t *testing.T) {
 	for _, call := range calls {
 		byID[call.CallID] = call
 	}
-	if got := byID["call_patch"]; got.Kind != openai.ToolKindCustom || got.ResponseName != "apply_patch" || got.Input != "*** Begin Patch\n*** End Patch" {
+	if got := byID["call_patch"]; got.Kind != toolcatalog.ToolKindCustom || got.ResponseName != "apply_patch" || got.Input != "*** Begin Patch\n*** End Patch" {
 		t.Fatalf("custom captured call = %#v", got)
 	}
-	if got := byID["call_mcp"]; got.Kind != openai.ToolKindFunction || got.Namespace != "mcp__grep_app" || got.ResponseName != "searchGitHub" || string(got.ArgumentsJSON) != `{"query":"repo:test"}` {
+	if got := byID["call_mcp"]; got.Kind != toolcatalog.ToolKindFunction || got.Namespace != "mcp__grep_app" || got.ResponseName != "searchGitHub" || string(got.ArgumentsJSON) != `{"query":"repo:test"}` {
 		t.Fatalf("namespace captured call = %#v", got)
 	}
-	if got := byID["call_search"]; got.Kind != openai.ToolKindToolSearch || got.Execution != "client" || string(got.ArgumentsJSON) != `{"query":"grep"}` {
+	if got := byID["call_search"]; got.Kind != toolcatalog.ToolKindToolSearch || got.Execution != "client" || string(got.ArgumentsJSON) != `{"query":"grep"}` {
 		t.Fatalf("tool_search captured call = %#v", got)
 	}
 }
 
 func TestResponseRequestToolsRejectSDKAliasCollisions(t *testing.T) {
-	_, err := FlattenResponsesTools([]openai.NormalizedTool{
-		{Kind: openai.ToolKindFunction, Name: "lookup"},
-		{Kind: openai.ToolKindCustom, Name: "lookup"},
+	_, err := FlattenResponsesTools([]toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindFunction, Name: "lookup"},
+		{Kind: toolcatalog.ToolKindCustom, Name: "lookup"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "SDK tool name collision") {
 		t.Fatalf("error = %v, want SDK collision", err)
@@ -91,7 +91,7 @@ func TestResponseRequestToolsRejectSDKAliasCollisions(t *testing.T) {
 }
 
 func TestToolChoiceNoneWithExtendedResponsesToolsUsesSentinel(t *testing.T) {
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []openai.NormalizedTool{{Kind: openai.ToolKindCustom, Name: "apply_patch"}}, true)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestToolChoiceNoneWithExtendedResponsesToolsUsesSentinel(t *testing.T) {
 }
 
 func TestRequestToolsRejectUnconfiguredSDKToolRequestsAndInvocations(t *testing.T) {
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "lookup"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestRequestToolsRejectUnconfiguredSDKToolRequestsAndInvocations(t *testing.
 }
 
 func TestExtendedToolOutputKindMustMatchPendingCall(t *testing.T) {
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []openai.NormalizedTool{{Kind: openai.ToolKindCustom, Name: "apply_patch"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,14 +128,14 @@ func TestExtendedToolOutputKindMustMatchPendingCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongKind := map[string]openai.ResponseToolOutput{"call_patch": {Kind: openai.ToolKindFunction, CallID: "call_patch", Output: "ok"}}
+	wrongKind := map[string]toolcatalog.ResponseToolOutput{"call_patch": {Kind: toolcatalog.ToolKindFunction, CallID: "call_patch", Output: "ok"}}
 	if err := batch.CompleteToolOutputsWithSetup(wrongKind, nil); err == nil || !strings.Contains(err.Error(), "output does not match pending") {
 		t.Fatalf("error = %v, want kind mismatch", err)
 	}
 }
 
 func TestCustomToolOutputNameMustMatchPendingCallWhenPresent(t *testing.T) {
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []openai.NormalizedTool{{Kind: openai.ToolKindCustom, Name: "apply_patch"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,18 +143,18 @@ func TestCustomToolOutputNameMustMatchPendingCallWhenPresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad := map[string]openai.ResponseToolOutput{"call_patch": {Kind: openai.ToolKindCustom, CallID: "call_patch", Name: "wrong_tool", Output: "ok"}}
+	bad := map[string]toolcatalog.ResponseToolOutput{"call_patch": {Kind: toolcatalog.ToolKindCustom, CallID: "call_patch", Name: "wrong_tool", Output: "ok"}}
 	if err := batch.CompleteToolOutputsWithSetup(bad, nil); err == nil || !strings.Contains(err.Error(), "does not match pending custom tool") {
 		t.Fatalf("error = %v, want custom name mismatch", err)
 	}
-	good := map[string]openai.ResponseToolOutput{"call_patch": {Kind: openai.ToolKindCustom, CallID: "call_patch", Name: "apply_patch", Output: "ok"}}
+	good := map[string]toolcatalog.ResponseToolOutput{"call_patch": {Kind: toolcatalog.ToolKindCustom, CallID: "call_patch", Name: "apply_patch", Output: "ok"}}
 	if err := batch.CompleteToolOutputsWithSetup(good, nil); err != nil {
 		t.Fatalf("matching custom output name should complete: %v", err)
 	}
 }
 
 func TestToolSearchOutputToolsDoNotMutateLiveAvailableTools(t *testing.T) {
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestToolSearchOutputToolsDoNotMutateLiveAvailableTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := append([]string{}, rt.AvailableTools()...)
-	outputs := map[string]openai.ResponseToolOutput{"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Output: `[{"type":"function","name":"loaded_tool"}]`, Tools: []byte(`[{"type":"function","name":"loaded_tool"}]`)}}
+	outputs := map[string]toolcatalog.ResponseToolOutput{"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Output: `[{"type":"function","name":"loaded_tool"}]`, Tools: []byte(`[{"type":"function","name":"loaded_tool"}]`)}}
 	if err := batch.CompleteToolOutputsWithSetup(outputs, nil); err != nil {
 		t.Fatal(err)
 	}

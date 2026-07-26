@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 
 	copilot "github.com/github/copilot-sdk/go"
 )
@@ -64,7 +65,7 @@ func TestInvocationDuringExpiryDoesNotRaceOnCallMap(t *testing.T) {
 // the same call id, which would strand the live batch.
 func TestRemoveKeepsCallIDsOwnedByAnotherBatch(t *testing.T) {
 	broker := NewBroker(time.Minute)
-	meta := ClientTool{SDKName: "lookup", ResponseName: "lookup", ResponseKind: openai.ToolKindFunction}
+	meta := ClientTool{SDKName: "lookup", ResponseName: "lookup", ResponseKind: toolcatalog.ToolKindFunction}
 
 	stale := newBatch(time.Minute, "", "chat", "gpt-test", nil, nil, context.Background())
 	stale.ensureCall("call_shared", "lookup", meta, nil, "")

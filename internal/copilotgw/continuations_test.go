@@ -11,6 +11,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 )
@@ -39,10 +40,10 @@ func TestFunctionOutputsWithContinuationInputRejectsImages(t *testing.T) {
 	}
 }
 
-func responseToolOutputs(values map[string]string) map[string]openai.ResponseToolOutput {
-	out := make(map[string]openai.ResponseToolOutput, len(values))
+func responseToolOutputs(values map[string]string) map[string]toolcatalog.ResponseToolOutput {
+	out := make(map[string]toolcatalog.ResponseToolOutput, len(values))
 	for id, value := range values {
-		out[id] = openai.ResponseToolOutput{Kind: openai.ToolKindFunction, CallID: id, Output: value}
+		out[id] = toolcatalog.ResponseToolOutput{Kind: toolcatalog.ToolKindFunction, CallID: id, Output: value}
 	}
 	return out
 }
@@ -217,10 +218,10 @@ func TestResponseFallbackWithPreviousResponseUsesExtendedToolLabels(t *testing.T
 	fallback, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{
 		Model:              "gpt-test",
 		PreviousResponseID: "resp_prev",
-		ToolOutputs: map[string]openai.ResponseToolOutput{
-			"call_patch":  {Kind: openai.ToolKindCustom, CallID: "call_patch", Name: "apply_patch", Output: "patched"},
-			"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"function","name":"loaded_tool"}]`)},
-			"call_mcp":    {Kind: openai.ToolKindFunction, CallID: "call_mcp", Output: "results"},
+		ToolOutputs: map[string]toolcatalog.ResponseToolOutput{
+			"call_patch":  {Kind: toolcatalog.ToolKindCustom, CallID: "call_patch", Name: "apply_patch", Output: "patched"},
+			"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"function","name":"loaded_tool"}]`)},
+			"call_mcp":    {Kind: toolcatalog.ToolKindFunction, CallID: "call_mcp", Output: "results"},
 		},
 	})
 	if err != nil {
@@ -248,8 +249,8 @@ func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalo
 		t.Fatal(err)
 	}
 	g := &RealGateway{store: store}
-	previous := responseFromTurn("resp_prev", "gpt-test", "", nil, true, &TurnResult{FinishReason: "tool_calls", ResponseToolCalls: []toolproxy.CapturedCall{{Kind: openai.ToolKindToolSearch, CallID: "call_search", ResponseName: "tool_search", Execution: "client"}}}, false)
-	catalog, err := openai.NewToolCatalog([]openai.NormalizedTool{{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
+	previous := responseFromTurn("resp_prev", "gpt-test", "", nil, true, &TurnResult{FinishReason: "tool_calls", ResponseToolCalls: []toolproxy.CapturedCall{{Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", ResponseName: "tool_search", Execution: "client"}}}, false)
+	catalog, err := toolcatalog.NewToolCatalog([]toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,8 +262,8 @@ func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalo
 	fallback, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{
 		Model:              "gpt-test",
 		PreviousResponseID: "resp_prev",
-		ToolOutputs: map[string]openai.ResponseToolOutput{
-			"call_search": {Kind: openai.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`), LoadedTools: []openai.NormalizedTool{{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
+		ToolOutputs: map[string]toolcatalog.ResponseToolOutput{
+			"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`), LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}}}},
 		},
 	})
 	if err != nil {
@@ -271,7 +272,7 @@ func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalo
 	if !fallback.ForceSynthetic || len(fallback.ToolOutputs) != 0 || !fallback.ToolsSet {
 		t.Fatalf("fallback fields = ForceSynthetic %v ToolOutputs %#v ToolsSet %v", fallback.ForceSynthetic, fallback.ToolOutputs, fallback.ToolsSet)
 	}
-	if len(fallback.Tools) != 2 || fallback.Tools[1].Kind != openai.ToolKindNamespace || fallback.Tools[1].Children[0].Name != "spawn_agent" {
+	if len(fallback.Tools) != 2 || fallback.Tools[1].Kind != toolcatalog.ToolKindNamespace || fallback.Tools[1].Children[0].Name != "spawn_agent" {
 		t.Fatalf("fallback tools = %#v, want installed loaded namespace", fallback.Tools)
 	}
 	if len(fallback.LoadedToolEvents) != 1 || fallback.LoadedToolEvents[0].SourceCallID != "call_search" {
@@ -287,11 +288,11 @@ func TestResponseContinuationPromptIncludesStructuredToolState(t *testing.T) {
 		Output: []openai.ResponseOutputItem{
 			{Type: "tool_search_call", CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"agents"}`)},
 		},
-		ToolOutputs: []openai.StoredToolOutput{
+		ToolOutputs: []toolcatalog.StoredToolOutput{
 			{Type: "tool_search_output", CallID: "call_search", Execution: "client", Status: "completed", Output: "loaded", Tools: json.RawMessage(`[{"type":"namespace","name":"multi_agent_v1","tools":[{"name":"spawn_agent"}]}]`)},
 		},
-		LoadedToolEvents: []openai.StoredLoadedToolEvent{
-			{SourceCallID: "call_search", LoadedTools: []openai.StoredToolSpec{{Type: openai.ToolKindNamespace, Name: "multi_agent_v1", Tools: []openai.StoredToolSpec{{Type: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
+		LoadedToolEvents: []toolcatalog.StoredLoadedToolEvent{
+			{SourceCallID: "call_search", LoadedTools: []toolcatalog.StoredToolSpec{{Type: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Tools: []toolcatalog.StoredToolSpec{{Type: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}}}},
 		},
 	}
 	prompt := g.responseContinuationPrompt(previous, resolvedPrompt{Text: "continue"})

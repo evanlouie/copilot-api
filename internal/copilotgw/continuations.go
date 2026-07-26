@@ -10,6 +10,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
 
@@ -193,7 +194,7 @@ func functionOutputsWithContinuationInput(outputs map[string]string, input opena
 	return out, nil
 }
 
-func toolOutputsWithContinuationInput(outputs map[string]openai.ResponseToolOutput, input openai.PromptContent) (map[string]openai.ResponseToolOutput, error) {
+func toolOutputsWithContinuationInput(outputs map[string]toolcatalog.ResponseToolOutput, input openai.PromptContent) (map[string]toolcatalog.ResponseToolOutput, error) {
 	stringsOnly := make(map[string]string, len(outputs))
 	for id, output := range outputs {
 		stringsOnly[id] = output.Output
@@ -205,7 +206,7 @@ func toolOutputsWithContinuationInput(outputs map[string]openai.ResponseToolOutp
 	if len(updatedStrings) == 0 {
 		return outputs, nil
 	}
-	out := make(map[string]openai.ResponseToolOutput, len(outputs))
+	out := make(map[string]toolcatalog.ResponseToolOutput, len(outputs))
 	maps.Copy(out, outputs)
 	for id, text := range updatedStrings {
 		entry := out[id]
@@ -291,7 +292,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 		record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 		record.PendingBatchID = turn.PendingBatchID
-		record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
+		record.ToolOutputs = toolcatalog.StoredToolOutputsFromMap(outputs)
 		record.InstalledToolCatalog = catalogDTO
 		if err := g.store.SaveResponse(record); err != nil {
 			return nil, apierr.Internal("failed to persist response")
@@ -302,7 +303,7 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 	}
 }
 
-func (g *RealGateway) continueDynamicToolSearchResponse(ctx context.Context, req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]openai.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (*ResponseResult, error) {
+func (g *RealGateway) continueDynamicToolSearchResponse(ctx context.Context, req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]toolcatalog.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (*ResponseResult, error) {
 	fallback, err := g.prepareDynamicToolSearchFallback(req, batch, activeOutputs, previousResponseID, previousRecord)
 	if err != nil {
 		return nil, err
@@ -310,7 +311,7 @@ func (g *RealGateway) continueDynamicToolSearchResponse(ctx context.Context, req
 	return g.CreateResponse(ctx, fallback)
 }
 
-func (g *RealGateway) streamDynamicToolSearchResponse(ctx context.Context, req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]openai.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (<-chan ResponseStreamEvent, error) {
+func (g *RealGateway) streamDynamicToolSearchResponse(ctx context.Context, req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]toolcatalog.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (<-chan ResponseStreamEvent, error) {
 	fallback, err := g.prepareDynamicToolSearchFallback(req, batch, activeOutputs, previousResponseID, previousRecord)
 	if err != nil {
 		return nil, err
@@ -318,7 +319,7 @@ func (g *RealGateway) streamDynamicToolSearchResponse(ctx context.Context, req R
 	return g.StreamResponse(ctx, fallback)
 }
 
-func (g *RealGateway) prepareDynamicToolSearchFallback(req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]openai.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (ResponseRequest, error) {
+func (g *RealGateway) prepareDynamicToolSearchFallback(req ResponseRequest, batch *toolproxy.Batch, activeOutputs map[string]toolcatalog.ResponseToolOutput, previousResponseID string, previousRecord sessionstore.ResponseRecord) (ResponseRequest, error) {
 	outputs, err := toolOutputsWithContinuationInput(activeOutputs, req.Input)
 	if err != nil {
 		return ResponseRequest{}, err
@@ -348,11 +349,11 @@ func (g *RealGateway) prepareDynamicToolSearchFallback(req ResponseRequest, batc
 	fallback.Store = storeVisible
 	fallback.StoreSet = true
 	fallback.ContinuationToolOutputs = outputs
-	fallback.LoadedToolEvents = append(append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...), merge.Events...)
+	fallback.LoadedToolEvents = append(append([]toolcatalog.StoredLoadedToolEvent{}, req.LoadedToolEvents...), merge.Events...)
 	return fallback, nil
 }
 
-func (g *RealGateway) responseContinuationBatch(outputs map[string]openai.ResponseToolOutput) (*toolproxy.Batch, map[string]openai.ResponseToolOutput, error) {
+func (g *RealGateway) responseContinuationBatch(outputs map[string]toolcatalog.ResponseToolOutput) (*toolproxy.Batch, map[string]toolcatalog.ResponseToolOutput, error) {
 	ids := make([]string, 0, len(outputs))
 	for id := range outputs {
 		ids = append(ids, id)
@@ -372,7 +373,7 @@ func (g *RealGateway) responseContinuationBatch(outputs map[string]openai.Respon
 		}
 		return nil, nil, apierr.InvalidRequest(subsetErr.Error(), "input")
 	}
-	active := make(map[string]openai.ResponseToolOutput, len(matched))
+	active := make(map[string]toolcatalog.ResponseToolOutput, len(matched))
 	for _, id := range matched {
 		active[id] = outputs[id]
 	}
@@ -432,14 +433,14 @@ func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseReq
 	fallback.ToolsSet = true
 	fallback.ForceSynthetic = true
 	fallback.ContinuationToolOutputs = outputs
-	fallback.LoadedToolEvents = append(append([]openai.StoredLoadedToolEvent{}, req.LoadedToolEvents...), merge.Events...)
+	fallback.LoadedToolEvents = append(append([]toolcatalog.StoredLoadedToolEvent{}, req.LoadedToolEvents...), merge.Events...)
 	if !fallback.StoreSet {
 		fallback.Store = previousRecord.Stored
 	}
 	return fallback, nil
 }
 
-func responseToolOutputsPrompt(outputs map[string]openai.ResponseToolOutput, previousItems []openai.ResponseOutputItem) string {
+func responseToolOutputsPrompt(outputs map[string]toolcatalog.ResponseToolOutput, previousItems []openai.ResponseOutputItem) string {
 	ids := make([]string, 0, len(outputs))
 	for id := range outputs {
 		ids = append(ids, id)
@@ -472,16 +473,16 @@ func responseToolOutputsPrompt(outputs map[string]openai.ResponseToolOutput, pre
 	return b.String()
 }
 
-func responseToolOutputPromptHeader(id string, output openai.ResponseToolOutput, previous openai.ResponseOutputItem) string {
+func responseToolOutputPromptHeader(id string, output toolcatalog.ResponseToolOutput, previous openai.ResponseOutputItem) string {
 	kind := output.Kind
 	if kind == "" {
 		switch previous.Type {
 		case "custom_tool_call":
-			kind = openai.ToolKindCustom
+			kind = toolcatalog.ToolKindCustom
 		case "tool_search_call":
-			kind = openai.ToolKindToolSearch
+			kind = toolcatalog.ToolKindToolSearch
 		default:
-			kind = openai.ToolKindFunction
+			kind = toolcatalog.ToolKindFunction
 		}
 	}
 	name := output.Name
@@ -496,9 +497,9 @@ func responseToolOutputPromptHeader(id string, output openai.ResponseToolOutput,
 		suffix = " for " + name
 	}
 	switch kind {
-	case openai.ToolKindCustom:
+	case toolcatalog.ToolKindCustom:
 		return "Custom tool output " + id + suffix + ":"
-	case openai.ToolKindToolSearch:
+	case toolcatalog.ToolKindToolSearch:
 		extra := ""
 		if output.Execution != "" || output.Status != "" {
 			parts := []string{}

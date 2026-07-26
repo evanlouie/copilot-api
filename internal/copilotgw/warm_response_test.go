@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	copilot "github.com/github/copilot-sdk/go"
 )
 
@@ -14,7 +15,7 @@ func TestWarmResponseSessionUseInheritsWarmRequestState(t *testing.T) {
 		model:           "gpt-5",
 		instructions:    "Be concise.",
 		reasoningEffort: "low",
-		tools:           []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "lookup"}},
+		tools:           []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}},
 		input:           resolvedPrompt{Text: "Warm context"},
 	}
 	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Input: openai.PromptContent{Text: "Current turn"}}
@@ -80,9 +81,9 @@ func TestWarmResponseSessionUseInheritsResolvedDynamicCatalog(t *testing.T) {
 	warm := &WarmResponseSession{
 		responseID: "resp_warm",
 		model:      "gpt-5",
-		tools: []openai.NormalizedTool{
-			{Kind: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
-			{Kind: openai.ToolKindNamespace, Name: "multi_agent_v1", Children: []openai.NormalizedTool{{Kind: openai.ToolKindFunction, Name: "spawn_agent"}}},
+		tools: []toolcatalog.NormalizedTool{
+			{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
+			{Kind: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}},
 		},
 	}
 	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm"}
@@ -90,7 +91,7 @@ func TestWarmResponseSessionUseInheritsResolvedDynamicCatalog(t *testing.T) {
 	if !ok {
 		t.Fatal("warm session was not used")
 	}
-	if len(req.Tools) != 2 || req.Tools[1].Kind != openai.ToolKindNamespace || req.Tools[1].Children[0].Name != "spawn_agent" {
+	if len(req.Tools) != 2 || req.Tools[1].Kind != toolcatalog.ToolKindNamespace || req.Tools[1].Children[0].Name != "spawn_agent" {
 		t.Fatalf("request tools = %#v, want resolved dynamic catalog", req.Tools)
 	}
 }
@@ -99,14 +100,14 @@ func TestWarmResponseSessionUseAcceptsSemanticEquivalentToolCatalog(t *testing.T
 	warm := &WarmResponseSession{
 		responseID: "resp_warm",
 		model:      "gpt-5",
-		tools: []openai.NormalizedTool{
-			{Kind: openai.ToolKindFunction, Name: "lookup", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`), Raw: json.RawMessage(`{"type":"function","name":"lookup","parameters":{"properties":{"q":{"type":"string"}},"type":"object"}}`)},
-			{Kind: openai.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"syntax":"lark","type":"grammar"}`), Raw: json.RawMessage(`{"name":"apply_patch","type":"custom"}`)},
+		tools: []toolcatalog.NormalizedTool{
+			{Kind: toolcatalog.ToolKindFunction, Name: "lookup", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`), Raw: json.RawMessage(`{"type":"function","name":"lookup","parameters":{"properties":{"q":{"type":"string"}},"type":"object"}}`)},
+			{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"syntax":"lark","type":"grammar"}`), Raw: json.RawMessage(`{"name":"apply_patch","type":"custom"}`)},
 		},
 	}
-	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Tools: []openai.NormalizedTool{
-		{Kind: openai.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"lark"}`), Raw: json.RawMessage(`{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark"}}`)},
-		{Kind: openai.ToolKindFunction, Name: "lookup", Parameters: json.RawMessage(` { "properties" : { "q" : { "type" : "string" } }, "type" : "object" } `), Raw: json.RawMessage(`{"different":"raw should not affect reuse"}`)},
+	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Tools: []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"lark"}`), Raw: json.RawMessage(`{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark"}}`)},
+		{Kind: toolcatalog.ToolKindFunction, Name: "lookup", Parameters: json.RawMessage(` { "properties" : { "q" : { "type" : "string" } }, "type" : "object" } `), Raw: json.RawMessage(`{"different":"raw should not affect reuse"}`)},
 	}}
 	if _, ok := warm.use(&req); !ok {
 		t.Fatal("warm session was not used for semantically equivalent tool catalog")
@@ -114,8 +115,8 @@ func TestWarmResponseSessionUseAcceptsSemanticEquivalentToolCatalog(t *testing.T
 }
 
 func TestWarmResponseSessionUseRejectsSemanticToolCatalogMismatch(t *testing.T) {
-	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", tools: []openai.NormalizedTool{{Kind: openai.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"lark"}`)}}}
-	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Tools: []openai.NormalizedTool{{Kind: openai.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"regex"}`)}}}
+	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", tools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"lark"}`)}}}
+	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Tools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"regex"}`)}}}
 	if _, ok := warm.use(&req); ok {
 		t.Fatal("warm session used despite semantic tool catalog mismatch")
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 )
 
 func TestResponseTextMarshalsEmptyAnnotationsArray(t *testing.T) {
@@ -447,7 +448,7 @@ func TestResponsesAcceptsCodexReasoningDefaultsAndClientOwnedTools(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(normalized) != 5 || normalized[2].Kind != ToolKindCustom || normalized[3].Kind != ToolKindNamespace || normalized[4].Kind != ToolKindToolSearch {
+	if len(normalized) != 5 || normalized[2].Kind != toolcatalog.ToolKindCustom || normalized[3].Kind != toolcatalog.ToolKindNamespace || normalized[4].Kind != toolcatalog.ToolKindToolSearch {
 		t.Fatalf("normalized tools = %#v, want function/function/custom/namespace/tool_search", normalized)
 	}
 }

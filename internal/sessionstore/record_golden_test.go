@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 )
 
 // ResponseRecord embeds the openai wire types directly. The gateway used to
@@ -72,21 +73,21 @@ func goldenResponseRecord() ResponseRecord {
 		PreviousResponseID: "resp_prev",
 		PendingBatchID:     "batch_1",
 		RetainedPath:       "/retained/resp_golden",
-		InstalledToolCatalog: &openai.StoredToolCatalog{
+		InstalledToolCatalog: &toolcatalog.StoredToolCatalog{
 			SchemaVersion: 1,
 			CatalogKey:    "catalog-key",
-			Tools: []openai.StoredToolSpec{
-				{Type: openai.ToolKindFunction, Name: "lookup", Namespace: "ns", Description: "look things up", Parameters: json.RawMessage(`{"type":"object"}`), Execution: "server", Strict: &strict, DeferLoading: &deferLoading},
-				{Type: openai.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar"}`)},
-				{Type: openai.ToolKindNamespace, Name: "multi_agent_v1", Tools: []openai.StoredToolSpec{{Type: openai.ToolKindFunction, Name: "spawn_agent"}}},
-				{Type: openai.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
+			Tools: []toolcatalog.StoredToolSpec{
+				{Type: toolcatalog.ToolKindFunction, Name: "lookup", Namespace: "ns", Description: "look things up", Parameters: json.RawMessage(`{"type":"object"}`), Execution: "server", Strict: &strict, DeferLoading: &deferLoading},
+				{Type: toolcatalog.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar"}`)},
+				{Type: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Tools: []toolcatalog.StoredToolSpec{{Type: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}},
+				{Type: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
 			},
 		},
-		LoadedToolEvents: []openai.StoredLoadedToolEvent{
-			{SourceCallID: "call_s", ResponseID: "resp_golden", Status: "completed", Execution: "client", RawTools: json.RawMessage(`[{"name":"spawn_agent"}]`), LoadedTools: []openai.StoredToolSpec{{Type: openai.ToolKindNamespace, Name: "multi_agent_v1", Tools: []openai.StoredToolSpec{{Type: openai.ToolKindFunction, Name: "spawn_agent"}}}}},
+		LoadedToolEvents: []toolcatalog.StoredLoadedToolEvent{
+			{SourceCallID: "call_s", ResponseID: "resp_golden", Status: "completed", Execution: "client", RawTools: json.RawMessage(`[{"name":"spawn_agent"}]`), LoadedTools: []toolcatalog.StoredToolSpec{{Type: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Tools: []toolcatalog.StoredToolSpec{{Type: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}}}},
 			{SourceCallID: "call_s2", ResponseID: "resp_golden"},
 		},
-		ToolOutputs: []openai.StoredToolOutput{
+		ToolOutputs: []toolcatalog.StoredToolOutput{
 			{Type: "function_call_output", CallID: "call_f", Name: "lookup", Output: "done", Status: "completed", Execution: "server"},
 			{Type: "tool_search_output", CallID: "call_s", Tools: json.RawMessage(`[{"name":"spawn_agent"}]`)},
 		},
@@ -132,7 +133,7 @@ func TestResponseRecordTombstoneGoldenJSON(t *testing.T) {
 }
 
 func TestResponseRecordKnownEmptyCatalogGoldenJSON(t *testing.T) {
-	got, err := json.Marshal(&openai.StoredToolCatalog{SchemaVersion: 1, CatalogKey: "empty-key", KnownEmpty: true})
+	got, err := json.Marshal(&toolcatalog.StoredToolCatalog{SchemaVersion: 1, CatalogKey: "empty-key", KnownEmpty: true})
 	if err != nil {
 		t.Fatal(err)
 	}

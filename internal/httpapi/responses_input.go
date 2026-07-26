@@ -8,20 +8,21 @@ import (
 	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
+	"github.com/evanlouie/copilot-api/internal/copilotgw"
 	"github.com/evanlouie/copilot-api/internal/openai"
-	"github.com/evanlouie/copilot-api/internal/toolproxy"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 )
 
 type parsedResponsesInput struct {
 	input                openai.PromptContent
-	outputs              map[string]openai.ResponseToolOutput
+	outputs              map[string]toolcatalog.ResponseToolOutput
 	instructions         string
 	fallbackInput        openai.PromptContent
 	fallbackInstructions string
 	fallbackAvailable    bool
 }
 
-func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]openai.ResponseToolOutput, string, error) {
+func parseResponsesInput(raw json.RawMessage) (openai.PromptContent, map[string]toolcatalog.ResponseToolOutput, string, error) {
 	parsed, err := parseResponsesInputOnce(raw)
 	return parsed.input, parsed.outputs, parsed.instructions, err
 }
@@ -42,7 +43,7 @@ func parseResponsesInputOnce(raw json.RawMessage) (parsedResponsesInput, error) 
 	}
 	parsed := parsedResponsesInput{}
 	if responsesInputHasToolOutputs(items) {
-		parsed.outputs = map[string]openai.ResponseToolOutput{}
+		parsed.outputs = map[string]toolcatalog.ResponseToolOutput{}
 		lastOutput := -1
 		for i, item := range items {
 			if !isResponsesToolOutput(item.Type) {
@@ -207,49 +208,49 @@ func isResponsesToolOutput(typ string) bool {
 	return typ == "function_call_output" || typ == "custom_tool_call_output" || typ == "tool_search_output"
 }
 
-func parseToolOutputItem(item openai.ResponseInputItem, i int) (openai.ResponseToolOutput, error) {
+func parseToolOutputItem(item openai.ResponseInputItem, i int) (toolcatalog.ResponseToolOutput, error) {
 	if item.CallID == "" {
-		return openai.ResponseToolOutput{}, apierr.InvalidRequest(item.Type+" items require call_id", fmt.Sprintf("input.%d.call_id", i))
+		return toolcatalog.ResponseToolOutput{}, apierr.InvalidRequest(item.Type+" items require call_id", fmt.Sprintf("input.%d.call_id", i))
 	}
-	kind := openai.ToolKindFunction
+	kind := toolcatalog.ToolKindFunction
 	if item.Type == "custom_tool_call_output" {
-		kind = openai.ToolKindCustom
+		kind = toolcatalog.ToolKindCustom
 	}
 	if item.Type == "tool_search_output" {
-		kind = openai.ToolKindToolSearch
+		kind = toolcatalog.ToolKindToolSearch
 	}
 	out, err := outputRawToString(item.Output)
 	if err != nil {
-		return openai.ResponseToolOutput{}, apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
+		return toolcatalog.ResponseToolOutput{}, apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.output", i))
 	}
-	if kind == openai.ToolKindToolSearch {
+	if kind == toolcatalog.ToolKindToolSearch {
 		execution := item.Execution
 		if execution == "" {
 			execution = "client"
 		}
 		if execution != "client" {
-			return openai.ResponseToolOutput{}, apierr.InvalidRequest("tool_search_output execution must be client", fmt.Sprintf("input.%d.execution", i))
+			return toolcatalog.ResponseToolOutput{}, apierr.InvalidRequest("tool_search_output execution must be client", fmt.Sprintf("input.%d.execution", i))
 		}
 		normalizedTools, err := openai.NormalizeToolSearchOutputTools(item.Tools, fmt.Sprintf("input.%d.tools", i))
 		if err != nil {
-			return openai.ResponseToolOutput{}, err
+			return toolcatalog.ResponseToolOutput{}, err
 		}
-		if _, err := toolproxy.FlattenResponsesTools(normalizedTools); err != nil {
-			return openai.ResponseToolOutput{}, apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.tools", i))
+		if err := copilotgw.ValidateLoadedTools(normalizedTools); err != nil {
+			return toolcatalog.ResponseToolOutput{}, apierr.InvalidRequest(err.Error(), fmt.Sprintf("input.%d.tools", i))
 		}
 		if len(item.Tools) > 0 && out == "" {
 			out = string(item.Tools)
 		}
-		return openai.ResponseToolOutput{Kind: kind, CallID: item.CallID, Output: out, Status: item.Status, Execution: execution, Tools: item.Tools, LoadedTools: normalizedTools}, nil
+		return toolcatalog.ResponseToolOutput{Kind: kind, CallID: item.CallID, Output: out, Status: item.Status, Execution: execution, Tools: item.Tools, LoadedTools: normalizedTools}, nil
 	}
-	return openai.ResponseToolOutput{Kind: kind, CallID: item.CallID, Name: item.Name, Output: out}, nil
+	return toolcatalog.ResponseToolOutput{Kind: kind, CallID: item.CallID, Name: item.Name, Output: out}, nil
 }
 
-func toolOutputTranscriptLabel(out openai.ResponseToolOutput) string {
+func toolOutputTranscriptLabel(out toolcatalog.ResponseToolOutput) string {
 	switch out.Kind {
-	case openai.ToolKindCustom:
+	case toolcatalog.ToolKindCustom:
 		return "Custom tool output " + out.CallID
-	case openai.ToolKindToolSearch:
+	case toolcatalog.ToolKindToolSearch:
 		return "Tool search output " + out.CallID
 	default:
 		return "Function output " + out.CallID

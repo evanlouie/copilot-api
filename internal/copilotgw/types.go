@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
 
@@ -128,18 +129,18 @@ type ResponseRequest struct {
 	Model                              string
 	Instructions                       string
 	Input                              openai.PromptContent
-	ToolOutputs                        map[string]openai.ResponseToolOutput
+	ToolOutputs                        map[string]toolcatalog.ResponseToolOutput
 	FunctionOutputFallbackInput        openai.PromptContent
 	FunctionOutputFallbackInstructions string
 	FunctionOutputFallbackAvailable    bool
 	PreviousResponseID                 string
 	WarmSession                        *WarmResponseSession
-	Tools                              []openai.NormalizedTool
+	Tools                              []toolcatalog.NormalizedTool
 	ToolsSet                           bool
 	ToolChoiceNone                     bool
 	ForceSynthetic                     bool
-	ContinuationToolOutputs            map[string]openai.ResponseToolOutput
-	LoadedToolEvents                   []openai.StoredLoadedToolEvent
+	ContinuationToolOutputs            map[string]toolcatalog.ResponseToolOutput
+	LoadedToolEvents                   []toolcatalog.StoredLoadedToolEvent
 	Store                              bool
 	StoreSet                           bool
 	ReasoningEffort                    string

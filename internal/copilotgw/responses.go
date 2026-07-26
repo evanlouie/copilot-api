@@ -9,6 +9,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 )
@@ -53,7 +54,7 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	record.InputText = incrementalInput
 	record.PendingBatchID = turn.PendingBatchID
 	record.InstalledToolCatalog = prepared.catalog.StoredDTO()
-	record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
+	record.ToolOutputs = toolcatalog.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 	record.LoadedToolEvents = req.LoadedToolEvents
 	if err := g.store.SaveResponse(record); err != nil {
 		return nil, apierr.Internal("failed to persist response")
@@ -132,7 +133,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 				record.PendingBatchID = turn.PendingBatchID
-				record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
+				record.ToolOutputs = toolcatalog.StoredToolOutputsFromMap(outputs)
 				record.InstalledToolCatalog = catalogDTO
 				if err := g.store.SaveResponse(record); err != nil {
 					return apierr.Internal("failed to persist response")
@@ -168,7 +169,7 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record.InputText = incrementalInput
 		record.PendingBatchID = turn.PendingBatchID
 		record.InstalledToolCatalog = prepared.catalog.StoredDTO()
-		record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
+		record.ToolOutputs = toolcatalog.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
 		record.LoadedToolEvents = req.LoadedToolEvents
 		if err := g.store.SaveResponse(record); err != nil {
 			return apierr.Internal("failed to persist response")
@@ -260,7 +261,7 @@ func appendResponseRecordTranscript(b *strings.Builder, record sessionstore.Resp
 	}
 }
 
-func storedToolOutputPrompt(output openai.StoredToolOutput) string {
+func storedToolOutputPrompt(output toolcatalog.StoredToolOutput) string {
 	var b strings.Builder
 	switch output.Type {
 	case "custom_tool_call_output":
@@ -297,10 +298,10 @@ func storedToolOutputPrompt(output openai.StoredToolOutput) string {
 	return b.String()
 }
 
-func storedToolNames(tools []openai.StoredToolSpec) string {
+func storedToolNames(tools []toolcatalog.StoredToolSpec) string {
 	parts := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Type == openai.ToolKindNamespace {
+		if tool.Type == toolcatalog.ToolKindNamespace {
 			for _, child := range tool.Tools {
 				parts = append(parts, tool.Name+"."+child.Name)
 			}

@@ -1,4 +1,4 @@
-package openai
+package toolcatalog
 
 import (
 	"bytes"
@@ -84,7 +84,7 @@ type StoredToolOutput struct {
 func NewToolCatalog(tools []NormalizedTool) (ToolCatalog, error) {
 	cloned := cloneNormalizedTools(tools, false)
 	canonicalizeNamespaceChildren(cloned)
-	if err := validateNormalizedToolCatalog(cloned, "tools"); err != nil {
+	if err := ValidateCatalog(cloned, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
 	if err := validateInstalledToolCount(cloned, "tools"); err != nil {
@@ -175,8 +175,8 @@ func cloneStoredToolSpecs(specs []StoredToolSpec) []StoredToolSpec {
 	out := make([]StoredToolSpec, len(specs))
 	for i, spec := range specs {
 		out[i] = spec
-		out[i].Parameters = cloneRaw(spec.Parameters)
-		out[i].Format = cloneRaw(spec.Format)
+		out[i].Parameters = CloneRaw(spec.Parameters)
+		out[i].Format = CloneRaw(spec.Format)
 		if spec.Strict != nil {
 			value := *spec.Strict
 			out[i].Strict = &value
@@ -194,10 +194,10 @@ func (c ToolCatalog) MergeLoaded(sourceCallID string, loaded []NormalizedTool) (
 	if len(loaded) == 0 {
 		return c.WithoutRaw(), nil
 	}
-	if flattenedToolCount(loaded) > MaxLoadedToolCount {
+	if FlattenedToolCount(loaded) > MaxLoadedToolCount {
 		return ToolCatalog{}, apierr.InvalidRequest("tool_search_output.tools contains too many loadable tools", "input")
 	}
-	if err := validateLoadedToolLimits(loaded); err != nil {
+	if err := ValidateLoadedToolLimits(loaded); err != nil {
 		return ToolCatalog{}, err
 	}
 	return c.mergeTools(loaded, true, "tool_search_output.tools")
@@ -216,7 +216,7 @@ func (c ToolCatalog) mergeTools(tools []NormalizedTool, loadedOnly bool, param s
 	merged.stored = nil
 	incoming := cloneNormalizedTools(tools, false)
 	canonicalizeNamespaceChildren(incoming)
-	if err := validateNormalizedToolCatalog(incoming, param); err != nil {
+	if err := ValidateCatalog(incoming, param); err != nil {
 		return ToolCatalog{}, err
 	}
 	for _, tool := range incoming {
@@ -226,7 +226,7 @@ func (c ToolCatalog) mergeTools(tools []NormalizedTool, loadedOnly bool, param s
 			return ToolCatalog{}, err
 		}
 	}
-	if err := validateNormalizedToolCatalog(merged.tools, "tools"); err != nil {
+	if err := ValidateCatalog(merged.tools, "tools"); err != nil {
 		return ToolCatalog{}, err
 	}
 	if err := validateInstalledToolCount(merged.tools, "tools"); err != nil {
@@ -240,7 +240,7 @@ func (c ToolCatalog) mergeTools(tools []NormalizedTool, loadedOnly bool, param s
 
 func StoredLoadedToolEventFromLoaded(e LoadedToolEvent) StoredLoadedToolEvent {
 	loaded := cloneNormalizedTools(e.LoadedTools, false)
-	out := StoredLoadedToolEvent{SourceCallID: e.SourceCallID, ResponseID: e.ResponseID, Status: e.Status, Execution: e.Execution, RawTools: cloneRaw(e.RawTools)}
+	out := StoredLoadedToolEvent{SourceCallID: e.SourceCallID, ResponseID: e.ResponseID, Status: e.Status, Execution: e.Execution, RawTools: CloneRaw(e.RawTools)}
 	out.LoadedTools = make([]StoredToolSpec, 0, len(loaded))
 	for _, tool := range loaded {
 		out.LoadedTools = append(out.LoadedTools, storedToolSpecFromNormalized(tool))
@@ -249,7 +249,7 @@ func StoredLoadedToolEventFromLoaded(e LoadedToolEvent) StoredLoadedToolEvent {
 }
 
 func StoredToolOutputFromResponse(out ResponseToolOutput) StoredToolOutput {
-	return StoredToolOutput{Type: responseToolOutputType(out.Kind), CallID: out.CallID, Name: out.Name, Output: out.Output, Status: out.Status, Execution: out.Execution, Tools: cloneRaw(out.Tools)}
+	return StoredToolOutput{Type: responseToolOutputType(out.Kind), CallID: out.CallID, Name: out.Name, Output: out.Output, Status: out.Status, Execution: out.Execution, Tools: CloneRaw(out.Tools)}
 }
 
 func StoredToolOutputsFromMap(outputs map[string]ResponseToolOutput) []StoredToolOutput {
@@ -396,20 +396,20 @@ func isSDKNameStart(b byte) bool {
 }
 
 func normalizedToolFromStored(spec StoredToolSpec, param string) (NormalizedTool, error) {
-	tool := NormalizedTool{Kind: spec.Type, Name: spec.Name, Namespace: spec.Namespace, Description: spec.Description, Parameters: cloneRaw(spec.Parameters), Format: cloneRaw(spec.Format), Execution: spec.Execution, Strict: spec.Strict, DeferLoading: spec.DeferLoading}
+	tool := NormalizedTool{Kind: spec.Type, Name: spec.Name, Namespace: spec.Namespace, Description: spec.Description, Parameters: CloneRaw(spec.Parameters), Format: CloneRaw(spec.Format), Execution: spec.Execution, Strict: spec.Strict, DeferLoading: spec.DeferLoading}
 	switch spec.Type {
 	case ToolKindFunction:
 		if tool.Name == "" {
 			return NormalizedTool{}, apierr.InvalidRequest("stored function tool requires name", param+".name")
 		}
-		if err := validateSchemaRaw(tool.Parameters, param+".parameters", "function parameters must be valid JSON Schema"); err != nil {
+		if err := ValidateSchemaRaw(tool.Parameters, param+".parameters", "function parameters must be valid JSON Schema"); err != nil {
 			return NormalizedTool{}, err
 		}
 	case ToolKindCustom:
 		if tool.Name == "" {
 			return NormalizedTool{}, apierr.InvalidRequest("stored custom tool requires name", param+".name")
 		}
-		if err := validateJSONRaw(tool.Format, param+".format", "custom tool format must be valid JSON"); err != nil {
+		if err := ValidateJSONRaw(tool.Format, param+".format", "custom tool format must be valid JSON"); err != nil {
 			return NormalizedTool{}, err
 		}
 	case ToolKindToolSearch:
@@ -420,7 +420,7 @@ func normalizedToolFromStored(spec StoredToolSpec, param string) (NormalizedTool
 		if tool.Execution != "client" {
 			return NormalizedTool{}, apierr.InvalidRequest("stored tool_search execution must be client", param+".execution")
 		}
-		if err := validateSchemaRaw(tool.Parameters, param+".parameters", "tool_search parameters must be valid JSON Schema"); err != nil {
+		if err := ValidateSchemaRaw(tool.Parameters, param+".parameters", "tool_search parameters must be valid JSON Schema"); err != nil {
 			return NormalizedTool{}, err
 		}
 	case ToolKindNamespace:
@@ -446,7 +446,7 @@ func normalizedToolFromStored(spec StoredToolSpec, param string) (NormalizedTool
 }
 
 func storedToolSpecFromNormalized(tool NormalizedTool) StoredToolSpec {
-	spec := StoredToolSpec{Type: tool.Kind, Name: tool.Name, Namespace: tool.Namespace, Description: tool.Description, Parameters: cloneRaw(tool.Parameters), Format: cloneRaw(tool.Format), Execution: tool.Execution, Strict: tool.Strict, DeferLoading: tool.DeferLoading}
+	spec := StoredToolSpec{Type: tool.Kind, Name: tool.Name, Namespace: tool.Namespace, Description: tool.Description, Parameters: CloneRaw(tool.Parameters), Format: CloneRaw(tool.Format), Execution: tool.Execution, Strict: tool.Strict, DeferLoading: tool.DeferLoading}
 	if tool.Kind == ToolKindNamespace {
 		spec.Tools = make([]StoredToolSpec, 0, len(tool.Children))
 		for _, child := range tool.Children {
@@ -481,10 +481,10 @@ func cloneNormalizedTools(tools []NormalizedTool, keepRaw bool) []NormalizedTool
 
 func cloneNormalizedTool(tool NormalizedTool, keepRaw bool) NormalizedTool {
 	out := tool
-	out.Parameters = cloneRaw(tool.Parameters)
-	out.Format = cloneRaw(tool.Format)
+	out.Parameters = CloneRaw(tool.Parameters)
+	out.Format = CloneRaw(tool.Format)
 	if keepRaw {
-		out.Raw = cloneRaw(tool.Raw)
+		out.Raw = CloneRaw(tool.Raw)
 	} else {
 		out.Raw = nil
 	}
@@ -563,7 +563,9 @@ func CanonicalRawJSON(raw json.RawMessage) string {
 	return string(b)
 }
 
-func flattenedToolCount(tools []NormalizedTool) int {
+// FlattenedToolCount counts tools as the SDK sees them: a namespace
+// contributes its children, not itself.
+func FlattenedToolCount(tools []NormalizedTool) int {
 	count := 0
 	for _, tool := range tools {
 		if tool.Kind == ToolKindNamespace {
@@ -575,7 +577,8 @@ func flattenedToolCount(tools []NormalizedTool) int {
 	return count
 }
 
-func validateLoadedToolLimits(tools []NormalizedTool) error {
+// ValidateLoadedToolLimits caps the size of a client-supplied loadable catalog.
+func ValidateLoadedToolLimits(tools []NormalizedTool) error {
 	for _, tool := range tools {
 		if len(tool.Description) > MaxLoadedDescriptionBytes {
 			return apierr.InvalidRequest("tool_search_output.tools description is too large", "input")
@@ -587,7 +590,7 @@ func validateLoadedToolLimits(tools []NormalizedTool) error {
 			if len(tool.Children) > MaxLoadedToolCount {
 				return apierr.InvalidRequest("tool_search_output.tools namespace contains too many tools", "input")
 			}
-			if err := validateLoadedToolLimits(tool.Children); err != nil {
+			if err := ValidateLoadedToolLimits(tool.Children); err != nil {
 				return err
 			}
 		}
@@ -596,7 +599,7 @@ func validateLoadedToolLimits(tools []NormalizedTool) error {
 }
 
 func validateInstalledToolCount(tools []NormalizedTool, param string) error {
-	if flattenedToolCount(tools) > MaxInstalledToolCount {
+	if FlattenedToolCount(tools) > MaxInstalledToolCount {
 		return apierr.InvalidRequest("installed tool catalog contains too many tools", param)
 	}
 	return nil

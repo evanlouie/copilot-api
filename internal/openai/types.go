@@ -11,13 +11,11 @@ import (
 )
 
 const (
-	ObjectList              = "list"
-	ObjectModel             = "model"
-	ObjectChatCompletion    = "chat.completion"
-	ObjectChatChunk         = "chat.completion.chunk"
-	ObjectResponse          = "response"
-	ObjectResponseItem      = "response.output_item"
-	ObjectResponseTextDelta = "response.output_text.delta"
+	ObjectList           = "list"
+	ObjectModel          = "model"
+	ObjectChatCompletion = "chat.completion"
+	ObjectChatChunk      = "chat.completion.chunk"
+	ObjectResponse       = "response"
 )
 
 func NewID(prefix string) string { return prefix + uuid.NewString() }

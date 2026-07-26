@@ -7,6 +7,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/google/uuid"
@@ -19,7 +20,7 @@ type WarmResponseSession struct {
 	model           string
 	instructions    string
 	reasoningEffort string
-	tools           []openai.NormalizedTool
+	tools           []toolcatalog.NormalizedTool
 	toolChoiceNone  bool
 	input           resolvedPrompt
 	imageBudget     *imageRequestBudget
@@ -95,7 +96,7 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (warmResponseUse, bool) 
 		return warmResponseUse{}, false
 	}
 	if !req.ToolsSet && len(req.Tools) == 0 {
-		req.Tools = append([]openai.NormalizedTool{}, w.tools...)
+		req.Tools = append([]toolcatalog.NormalizedTool{}, w.tools...)
 	} else if !responseToolsEqual(req.Tools, w.tools) {
 		return warmResponseUse{}, false
 	}
@@ -123,12 +124,12 @@ func releaseAll(releases []func()) {
 	}
 }
 
-func responseToolsEqual(a, b []openai.NormalizedTool) bool {
-	ac, err := openai.NewToolCatalog(a)
+func responseToolsEqual(a, b []toolcatalog.NormalizedTool) bool {
+	ac, err := toolcatalog.NewToolCatalog(a)
 	if err != nil {
 		return false
 	}
-	bc, err := openai.NewToolCatalog(b)
+	bc, err := toolcatalog.NewToolCatalog(b)
 	if err != nil {
 		return false
 	}

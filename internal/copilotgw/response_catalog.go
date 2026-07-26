@@ -6,30 +6,31 @@ import (
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 )
 
 type responseCatalogMergeResult struct {
-	Catalog openai.ToolCatalog
-	Events  []openai.StoredLoadedToolEvent
+	Catalog toolcatalog.ToolCatalog
+	Events  []toolcatalog.StoredLoadedToolEvent
 	Changed bool
 }
 
-func responseCatalogForRequest(req ResponseRequest, previous *sessionstore.ResponseRecord) (openai.ToolCatalog, error) {
+func responseCatalogForRequest(req ResponseRequest, previous *sessionstore.ResponseRecord) (toolcatalog.ToolCatalog, error) {
 	if previous != nil && previous.InstalledToolCatalog != nil {
-		catalog, _, err := openai.ToolCatalogFromStored(previous.InstalledToolCatalog)
+		catalog, _, err := toolcatalog.ToolCatalogFromStored(previous.InstalledToolCatalog)
 		if err != nil {
-			return openai.ToolCatalog{}, err
+			return toolcatalog.ToolCatalog{}, err
 		}
 		if req.ToolsSet {
 			return catalog.MergeRequestTools(req.Tools)
 		}
 		return catalog, nil
 	}
-	return openai.NewToolCatalog(req.Tools)
+	return toolcatalog.NewToolCatalog(req.Tools)
 }
 
-func responseCatalogDTOForRequest(req ResponseRequest, previous *sessionstore.ResponseRecord) (*openai.StoredToolCatalog, error) {
+func responseCatalogDTOForRequest(req ResponseRequest, previous *sessionstore.ResponseRecord) (*toolcatalog.StoredToolCatalog, error) {
 	catalog, err := responseCatalogForRequest(req, previous)
 	if err != nil {
 		return nil, err
@@ -37,9 +38,9 @@ func responseCatalogDTOForRequest(req ResponseRequest, previous *sessionstore.Re
 	return catalog.StoredDTO(), nil
 }
 
-func mergeLoadedToolSearchOutputs(req ResponseRequest, previous sessionstore.ResponseRecord, outputs map[string]openai.ResponseToolOutput) (responseCatalogMergeResult, error) {
+func mergeLoadedToolSearchOutputs(req ResponseRequest, previous sessionstore.ResponseRecord, outputs map[string]toolcatalog.ResponseToolOutput) (responseCatalogMergeResult, error) {
 	for _, output := range outputs {
-		if output.Kind == openai.ToolKindToolSearch && !toolSearchOutputStatusInstallable(output.Status) && len(output.LoadedTools) > 0 {
+		if output.Kind == toolcatalog.ToolKindToolSearch && !toolSearchOutputStatusInstallable(output.Status) && len(output.LoadedTools) > 0 {
 			return responseCatalogMergeResult{}, apierr.InvalidRequest("tool_search_output with failed, incomplete, cancelled, or unknown status cannot include tools", "input")
 		}
 	}
@@ -52,7 +53,7 @@ func mergeLoadedToolSearchOutputs(req ResponseRequest, previous sessionstore.Res
 	}
 	ids := make([]string, 0, len(outputs))
 	for id, output := range outputs {
-		if output.Kind == openai.ToolKindToolSearch && len(output.LoadedTools) > 0 && toolSearchOutputStatusInstallable(output.Status) {
+		if output.Kind == toolcatalog.ToolKindToolSearch && len(output.LoadedTools) > 0 && toolSearchOutputStatusInstallable(output.Status) {
 			ids = append(ids, id)
 		}
 	}
@@ -68,21 +69,21 @@ func mergeLoadedToolSearchOutputs(req ResponseRequest, previous sessionstore.Res
 			result.Changed = true
 		}
 		result.Catalog = merged
-		result.Events = append(result.Events, openai.StoredLoadedToolEventFromLoaded(openai.LoadedToolEvent{SourceCallID: id, ResponseID: req.ResponseID, Status: output.Status, Execution: output.Execution, RawTools: output.Tools, LoadedTools: output.LoadedTools}))
+		result.Events = append(result.Events, toolcatalog.StoredLoadedToolEventFromLoaded(toolcatalog.LoadedToolEvent{SourceCallID: id, ResponseID: req.ResponseID, Status: output.Status, Execution: output.Execution, RawTools: output.Tools, LoadedTools: output.LoadedTools}))
 	}
 	return result, nil
 }
 
-func responseOutputsContainLoadedTools(outputs map[string]openai.ResponseToolOutput) bool {
+func responseOutputsContainLoadedTools(outputs map[string]toolcatalog.ResponseToolOutput) bool {
 	for _, output := range outputs {
-		if output.Kind == openai.ToolKindToolSearch && len(output.LoadedTools) > 0 && toolSearchOutputStatusInstallable(output.Status) {
+		if output.Kind == toolcatalog.ToolKindToolSearch && len(output.LoadedTools) > 0 && toolSearchOutputStatusInstallable(output.Status) {
 			return true
 		}
 	}
 	return false
 }
 
-func activeResponseToolOutputsFromRecord(record sessionstore.ResponseRecord, outputs map[string]openai.ResponseToolOutput) (map[string]openai.ResponseToolOutput, error) {
+func activeResponseToolOutputsFromRecord(record sessionstore.ResponseRecord, outputs map[string]toolcatalog.ResponseToolOutput) (map[string]toolcatalog.ResponseToolOutput, error) {
 	expected := map[string]openai.ResponseOutputItem{}
 	for _, item := range record.Output {
 		if item.CallID == "" {
@@ -101,7 +102,7 @@ func activeResponseToolOutputsFromRecord(record sessionstore.ResponseRecord, out
 		}
 		return nil, apierr.InvalidRequest("previous response has no pending tool calls", "previous_response_id")
 	}
-	active := make(map[string]openai.ResponseToolOutput, len(expected))
+	active := make(map[string]toolcatalog.ResponseToolOutput, len(expected))
 	for id, output := range outputs {
 		previous, ok := expected[id]
 		if !ok {
@@ -123,21 +124,21 @@ func activeResponseToolOutputsFromRecord(record sessionstore.ResponseRecord, out
 	return active, nil
 }
 
-func validateResponseToolOutputForItem(previous openai.ResponseOutputItem, output openai.ResponseToolOutput) error {
-	expectedKind := openai.ToolKindFunction
+func validateResponseToolOutputForItem(previous openai.ResponseOutputItem, output toolcatalog.ResponseToolOutput) error {
+	expectedKind := toolcatalog.ToolKindFunction
 	switch previous.Type {
 	case "custom_tool_call":
-		expectedKind = openai.ToolKindCustom
+		expectedKind = toolcatalog.ToolKindCustom
 	case "tool_search_call":
-		expectedKind = openai.ToolKindToolSearch
+		expectedKind = toolcatalog.ToolKindToolSearch
 	}
 	if output.Kind != "" && output.Kind != expectedKind {
 		return apierr.InvalidRequest(string(output.Kind)+" output does not match previous "+string(expectedKind)+" call", "input")
 	}
-	if expectedKind == openai.ToolKindCustom && output.Name != "" && previous.Name != "" && output.Name != previous.Name {
+	if expectedKind == toolcatalog.ToolKindCustom && output.Name != "" && previous.Name != "" && output.Name != previous.Name {
 		return apierr.InvalidRequest("custom_tool_call_output name does not match previous custom tool", "input")
 	}
-	if expectedKind == openai.ToolKindToolSearch {
+	if expectedKind == toolcatalog.ToolKindToolSearch {
 		if previous.Execution != "" && previous.Execution != "client" {
 			return apierr.InvalidRequest("previous tool_search_call execution is not client", "input")
 		}
@@ -155,7 +156,7 @@ func validateResponseToolOutputForItem(previous openai.ResponseOutputItem, outpu
 	return nil
 }
 
-func validateResponseToolOutputsForBatch(batch *toolproxy.Batch, outputs map[string]openai.ResponseToolOutput) (bool, error) {
+func validateResponseToolOutputsForBatch(batch *toolproxy.Batch, outputs map[string]toolcatalog.ResponseToolOutput) (bool, error) {
 	calls := batch.CapturedCalls()
 	if len(outputs) != len(calls) {
 		return false, apierr.InvalidRequest("expected exactly one output for each pending tool call", "input")
@@ -169,13 +170,13 @@ func validateResponseToolOutputsForBatch(batch *toolproxy.Batch, outputs map[str
 		if output.Kind != "" && call.Kind != "" && output.Kind != call.Kind {
 			return false, apierr.InvalidRequest(string(output.Kind)+" output does not match pending "+string(call.Kind)+" call", "input")
 		}
-		if call.Kind == openai.ToolKindCustom && output.Name != "" && call.ResponseName != "" && output.Name != call.ResponseName {
+		if call.Kind == toolcatalog.ToolKindCustom && output.Name != "" && call.ResponseName != "" && output.Name != call.ResponseName {
 			return false, apierr.InvalidRequest("custom_tool_call_output name does not match pending custom tool", "input")
 		}
-		if output.Kind != openai.ToolKindToolSearch {
+		if output.Kind != toolcatalog.ToolKindToolSearch {
 			continue
 		}
-		if call.Kind != openai.ToolKindToolSearch {
+		if call.Kind != toolcatalog.ToolKindToolSearch {
 			return false, apierr.InvalidRequest("tool_search_output does not match pending tool_search call", "input")
 		}
 		if call.Execution != "" && call.Execution != "client" {

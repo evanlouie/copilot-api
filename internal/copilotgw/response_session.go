@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
-	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/google/uuid"
@@ -18,7 +18,7 @@ type preparedResponseTurn struct {
 	rt          *toolproxy.RequestTools
 	events      *sessionEventSink
 	prompt      resolvedPrompt
-	catalog     openai.ToolCatalog
+	catalog     toolcatalog.ToolCatalog
 	retained    string
 	imageBudget *imageRequestBudget
 	pinReleases []func()
@@ -58,7 +58,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 			prepared.retained = warmUse.retained
 			prepared.previous = warmUse.previous
 			prepared.sessionID = warmUse.session.SessionID
-			prepared.catalog, err = openai.NewToolCatalog(req.Tools)
+			prepared.catalog, err = toolcatalog.NewToolCatalog(req.Tools)
 			if err != nil {
 				_ = prepared.session.Disconnect()
 				return nil, err

@@ -14,6 +14,7 @@ import (
 	"github.com/evanlouie/copilot-api/internal/observability"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 
 	copilot "github.com/github/copilot-sdk/go"
@@ -1097,7 +1098,7 @@ func responseFromTurn(id, model, instructions string, previous *string, store bo
 func capturedFromChatToolCalls(calls []openai.ChatToolCall) []toolproxy.CapturedCall {
 	out := make([]toolproxy.CapturedCall, 0, len(calls))
 	for _, tc := range calls {
-		out = append(out, toolproxy.CapturedCall{Kind: openai.ToolKindFunction, ResponseName: tc.Function.Name, CallID: tc.ID, ArgumentsJSON: jsonRaw(tc.Function.Arguments)})
+		out = append(out, toolproxy.CapturedCall{Kind: toolcatalog.ToolKindFunction, ResponseName: tc.Function.Name, CallID: tc.ID, ArgumentsJSON: jsonRaw(tc.Function.Arguments)})
 	}
 	return out
 }
@@ -1105,16 +1106,16 @@ func capturedFromChatToolCalls(calls []openai.ChatToolCall) []toolproxy.Captured
 func responseOutputItemFromCaptured(tc toolproxy.CapturedCall) openai.ResponseOutputItem {
 	kind := tc.Kind
 	if kind == "" {
-		kind = openai.ToolKindFunction
+		kind = toolcatalog.ToolKindFunction
 	}
 	name := tc.ResponseName
 	if name == "" {
 		name = tc.SDKName
 	}
 	switch kind {
-	case openai.ToolKindCustom:
+	case toolcatalog.ToolKindCustom:
 		return openai.ResponseOutputItem{ID: "ctc_" + tc.CallID, Type: "custom_tool_call", Status: "completed", CallID: tc.CallID, Name: name, Input: tc.Input}
-	case openai.ToolKindToolSearch:
+	case toolcatalog.ToolKindToolSearch:
 		execution := tc.Execution
 		if execution == "" {
 			execution = "client"

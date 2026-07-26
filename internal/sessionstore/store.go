@@ -14,6 +14,7 @@ import (
 
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/safepath"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 )
 
 type Store struct {
@@ -314,26 +315,26 @@ const ResponseRecordVersion = 3
 // pins the on-disk bytes instead, so any openai change that moves the persisted
 // format fails with a diff.
 type ResponseRecord struct {
-	Version              int                            `json:"version"`
-	ID                   string                         `json:"id"`
-	SDKSessionID         string                         `json:"sdk_session_id"`
-	Model                string                         `json:"model"`
-	Instructions         string                         `json:"instructions,omitempty"`
-	CreatedAt            time.Time                      `json:"created_at"`
-	UpdatedAt            time.Time                      `json:"updated_at"`
-	Status               string                         `json:"status"`
-	Stored               bool                           `json:"stored"`
-	Deleted              bool                           `json:"deleted"`
-	InputText            string                         `json:"input_text,omitempty"`
-	Output               []openai.ResponseOutputItem    `json:"output"`
-	OutputText           string                         `json:"output_text"`
-	Usage                *openai.ResponseUsage          `json:"usage,omitempty"`
-	PreviousResponseID   string                         `json:"previous_response_id,omitempty"`
-	PendingBatchID       string                         `json:"pending_batch_id,omitempty"`
-	RetainedPath         string                         `json:"retained_path,omitempty"`
-	InstalledToolCatalog *openai.StoredToolCatalog      `json:"installed_tool_catalog,omitempty"`
-	LoadedToolEvents     []openai.StoredLoadedToolEvent `json:"loaded_tool_events,omitempty"`
-	ToolOutputs          []openai.StoredToolOutput      `json:"tool_outputs,omitempty"`
+	Version              int                                 `json:"version"`
+	ID                   string                              `json:"id"`
+	SDKSessionID         string                              `json:"sdk_session_id"`
+	Model                string                              `json:"model"`
+	Instructions         string                              `json:"instructions,omitempty"`
+	CreatedAt            time.Time                           `json:"created_at"`
+	UpdatedAt            time.Time                           `json:"updated_at"`
+	Status               string                              `json:"status"`
+	Stored               bool                                `json:"stored"`
+	Deleted              bool                                `json:"deleted"`
+	InputText            string                              `json:"input_text,omitempty"`
+	Output               []openai.ResponseOutputItem         `json:"output"`
+	OutputText           string                              `json:"output_text"`
+	Usage                *openai.ResponseUsage               `json:"usage,omitempty"`
+	PreviousResponseID   string                              `json:"previous_response_id,omitempty"`
+	PendingBatchID       string                              `json:"pending_batch_id,omitempty"`
+	RetainedPath         string                              `json:"retained_path,omitempty"`
+	InstalledToolCatalog *toolcatalog.StoredToolCatalog      `json:"installed_tool_catalog,omitempty"`
+	LoadedToolEvents     []toolcatalog.StoredLoadedToolEvent `json:"loaded_tool_events,omitempty"`
+	ToolOutputs          []toolcatalog.StoredToolOutput      `json:"tool_outputs,omitempty"`
 }
 
 func (s *Store) SaveResponse(record ResponseRecord) error {
