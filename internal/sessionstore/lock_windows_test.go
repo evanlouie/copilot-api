@@ -9,6 +9,7 @@ import (
 )
 
 func TestWindowsLockRecoversAfterOwnerExit(t *testing.T) {
+	t.Parallel()
 	if path := os.Getenv("COPILOT_API_LOCK_CRASH_HELPER"); path != "" {
 		if _, err := AcquireLock(path); err != nil {
 			os.Exit(2)

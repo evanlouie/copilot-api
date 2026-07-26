@@ -116,6 +116,7 @@ func goldenResponseRecordAfterRoundTrip() ResponseRecord {
 }
 
 func TestResponseRecordGoldenJSON(t *testing.T) {
+	t.Parallel()
 	got, err := json.Marshal(goldenResponseRecord())
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +125,7 @@ func TestResponseRecordGoldenJSON(t *testing.T) {
 }
 
 func TestResponseRecordTombstoneGoldenJSON(t *testing.T) {
+	t.Parallel()
 	record := ResponseRecord{
 		Version:   ResponseRecordVersion,
 		ID:        "resp_gone",
@@ -140,6 +142,7 @@ func TestResponseRecordTombstoneGoldenJSON(t *testing.T) {
 }
 
 func TestResponseRecordKnownEmptyCatalogGoldenJSON(t *testing.T) {
+	t.Parallel()
 	got, err := json.Marshal(&toolcatalog.StoredToolCatalog{SchemaVersion: 1, CatalogKey: "empty-key", KnownEmpty: true})
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +151,7 @@ func TestResponseRecordKnownEmptyCatalogGoldenJSON(t *testing.T) {
 }
 
 func TestResponseRecordSparseUsageGoldenJSON(t *testing.T) {
+	t.Parallel()
 	record := ResponseRecord{
 		Version:   ResponseRecordVersion,
 		ID:        "resp_sparse_usage",
@@ -168,6 +172,7 @@ func TestResponseRecordSparseUsageGoldenJSON(t *testing.T) {
 // must decode back into the record that produced them, so the golden cannot be
 // satisfied by a format that persists fields the loader then drops.
 func TestResponseRecordGoldenDecodesToRecord(t *testing.T) {
+	t.Parallel()
 	var decoded ResponseRecord
 	if err := json.Unmarshal([]byte(goldenResponseRecordJSON), &decoded); err != nil {
 		t.Fatal(err)
@@ -186,6 +191,7 @@ func TestResponseRecordGoldenDecodesToRecord(t *testing.T) {
 // TestResponseRecordGoldenSurvivesStore verifies the golden describes what the
 // store actually writes and reads, not just what json.Marshal does in isolation.
 func TestResponseRecordGoldenSurvivesStore(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)

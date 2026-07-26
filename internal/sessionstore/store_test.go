@@ -14,6 +14,7 @@ import (
 )
 
 func TestSafeNameIsInjectiveAndRejectsDotSegments(t *testing.T) {
+	t.Parallel()
 	if safeName("a/b") == safeName("a?b") {
 		t.Fatal("unsafe response IDs collided")
 	}
@@ -31,6 +32,7 @@ func TestSafeNameIsInjectiveAndRejectsDotSegments(t *testing.T) {
 }
 
 func TestLockExcludesSecondProcess(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -46,6 +48,7 @@ func TestLockExcludesSecondProcess(t *testing.T) {
 }
 
 func TestAtomicWriteCleansTemporaryFileAfterRenameFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {
@@ -64,6 +67,7 @@ func TestAtomicWriteCleansTemporaryFileAfterRenameFailure(t *testing.T) {
 }
 
 func TestSaveResponseWritesVersionedCompactJSON(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -84,6 +88,7 @@ func TestSaveResponseWritesVersionedCompactJSON(t *testing.T) {
 }
 
 func TestEnsureMigratesLegacyOwnershipMarkers(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	store := New(filepath.Join(root, "data"), filepath.Join(root, "state"), filepath.Join(root, "cache"))
 	for _, dir := range []string{store.DataDir, store.StateDir, store.CacheDir} {
@@ -109,6 +114,7 @@ func TestEnsureMigratesLegacyOwnershipMarkers(t *testing.T) {
 }
 
 func TestEnsureRefusesToClaimNonEmptyRoot(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	data := filepath.Join(root, "data")
 	if err := os.MkdirAll(data, 0o700); err != nil {
@@ -127,6 +133,7 @@ func TestEnsureRefusesToClaimNonEmptyRoot(t *testing.T) {
 }
 
 func TestValidateRootsRejectsAncestorOfWorkingDirectory(t *testing.T) {
+	t.Parallel()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +146,7 @@ func TestValidateRootsRejectsAncestorOfWorkingDirectory(t *testing.T) {
 }
 
 func TestLoadResponseMigratesOldVersionsAndRejectsFuture(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -185,6 +193,7 @@ func TestLoadResponseMigratesOldVersionsAndRejectsFuture(t *testing.T) {
 }
 
 func TestDeleteResponseWritesMinimalTombstone(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -209,6 +218,7 @@ func TestDeleteResponseWritesMinimalTombstone(t *testing.T) {
 }
 
 func TestConcurrentSaveCannotResurrectDeletedResponse(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -244,6 +254,7 @@ func TestConcurrentSaveCannotResurrectDeletedResponse(t *testing.T) {
 }
 
 func TestPinnedTombstoneBlocksLateSaveUntilRunnerReleases(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -276,6 +287,7 @@ func TestPinnedTombstoneBlocksLateSaveUntilRunnerReleases(t *testing.T) {
 }
 
 func TestPruneSkipsPinnedResponseAndSession(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -313,6 +325,7 @@ func TestPruneSkipsPinnedResponseAndSession(t *testing.T) {
 }
 
 func TestDeleteResponseCleansSessionAfterFinalReference(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -342,6 +355,7 @@ func TestDeleteResponseCleansSessionAfterFinalReference(t *testing.T) {
 }
 
 func TestPinnedSessionIsCleanedWhenReleasedAfterDelete(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -368,6 +382,7 @@ func TestPinnedSessionIsCleanedWhenReleasedAfterDelete(t *testing.T) {
 }
 
 func TestResponseCountPruneCleansUnreferencedSession(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -409,6 +424,7 @@ func TestResponseCountPruneCleansUnreferencedSession(t *testing.T) {
 }
 
 func TestBytePruneCreditsSessionOrphanedBySelectedResponse(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -458,6 +474,7 @@ func TestBytePruneCreditsSessionOrphanedBySelectedResponse(t *testing.T) {
 }
 
 func TestResponseCountIncludesTombstones(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -496,6 +513,7 @@ func TestResponseCountIncludesTombstones(t *testing.T) {
 }
 
 func TestPruneHonorsResponseCountAndDryRun(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -532,6 +550,7 @@ func TestPruneHonorsResponseCountAndDryRun(t *testing.T) {
 }
 
 func TestPruneSkipsUnreadableRecordsAndStillEnforcesQuota(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -579,6 +598,7 @@ func TestPruneSkipsUnreadableRecordsAndStillEnforcesQuota(t *testing.T) {
 }
 
 func TestDeleteResponseIgnoresUndecodableNeighbour(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -606,6 +626,7 @@ func TestDeleteResponseIgnoresUndecodableNeighbour(t *testing.T) {
 }
 
 func TestPruneContinuesAfterUndeletablePath(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -659,6 +680,7 @@ func TestPruneContinuesAfterUndeletablePath(t *testing.T) {
 }
 
 func TestPruneToleratesSessionFilesVanishingDuringScan(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -709,6 +731,7 @@ func TestPruneToleratesSessionFilesVanishingDuringScan(t *testing.T) {
 }
 
 func TestPinnedResponseSurvivesConcurrentPrune(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -774,6 +797,7 @@ func TestPinnedResponseSurvivesConcurrentPrune(t *testing.T) {
 }
 
 func TestRetainedPathInfoReportsVanishedPathAsAbsent(t *testing.T) {
+	t.Parallel()
 	item, found, err := retainedPathInfo(filepath.Join(t.TempDir(), "gone"), nil)
 	if err != nil {
 		t.Fatalf("vanished path reported an error: %v", err)
@@ -784,6 +808,7 @@ func TestRetainedPathInfoReportsVanishedPathAsAbsent(t *testing.T) {
 }
 
 func TestResponseStoreVisibility(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)

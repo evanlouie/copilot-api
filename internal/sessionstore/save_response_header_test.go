@@ -34,6 +34,7 @@ func mustExist(t *testing.T, path, why string) {
 // Leaving the old link behind protects a session nothing references any more;
 // dropping the new one lets retention delete a session a live response needs.
 func TestSaveResponseMovesTheRetentionLinkWhenTheSessionChanges(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -70,6 +71,7 @@ func TestSaveResponseMovesTheRetentionLinkWhenTheSessionChanges(t *testing.T) {
 // (proceed) and "unreadable" (refuse) is what keeps a future-version record
 // written by a newer binary from being clobbered by an older one.
 func TestSaveResponseRefusesToOverwriteAnUnreadableRecord(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		onDisk  string
@@ -97,6 +99,7 @@ func TestSaveResponseRefusesToOverwriteAnUnreadableRecord(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			store := New(t.TempDir(), t.TempDir(), t.TempDir())
 			if err := store.Ensure(); err != nil {
 				t.Fatal(err)
@@ -125,6 +128,7 @@ func TestSaveResponseRefusesToOverwriteAnUnreadableRecord(t *testing.T) {
 // report the same tombstone flag, the same session id, and the same error
 // classification as decoding the whole record did.
 func TestSaveResponseHeaderAgreesWithTheFullRecord(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -166,6 +170,7 @@ func TestSaveResponseHeaderAgreesWithTheFullRecord(t *testing.T) {
 		{"unversioned with id", `{"id":"z","sdk_session_id":"sdk_z","deleted":false,"stored":true}`},
 		{"nested objects before the fields", `{"version":3,"id":"z","usage":{"a":{"b":[1,2,{"c":null}]}},"sdk_session_id":"sdk_z","deleted":false}`},
 	} {
+		// Not parallel: every case writes and reads the same "z" record path.
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(store.responsePath("z"), []byte(tc.onDisk), 0o600); err != nil {
 				t.Fatal(err)
@@ -195,6 +200,7 @@ func TestSaveResponseHeaderAgreesWithTheFullRecord(t *testing.T) {
 // divergence is therefore unreachable, but it is pinned rather than left to be
 // rediscovered.
 func TestSaveResponseHeaderResolvesDuplicateKeysFirstWins(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -215,6 +221,7 @@ func TestSaveResponseHeaderResolvesDuplicateKeysFirstWins(t *testing.T) {
 // change: the cost of deciding whether to overwrite a record must not scale
 // with the record's size. A 16 MiB record is read in a bounded number of bytes.
 func TestSaveResponseHeaderStopsBeforeThePayload(t *testing.T) {
+	t.Parallel()
 	store := New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -260,6 +267,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // still answered from disk, not only from the in-memory deletedIDs set, which
 // is populated only while a pin is held.
 func TestSaveResponseTombstoneSurvivesAProcessRestart(t *testing.T) {
+	t.Parallel()
 	dataDir, stateDir, cacheDir := t.TempDir(), t.TempDir(), t.TempDir()
 	store := New(dataDir, stateDir, cacheDir)
 	if err := store.Ensure(); err != nil {

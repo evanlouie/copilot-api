@@ -30,6 +30,7 @@ func symlinksAvailable(t *testing.T, target string) bool {
 }
 
 func TestProviderRejectsTraversal(t *testing.T) {
+	t.Parallel()
 	manager, p := newTestProvider(t, "session")
 	// ".." used to be silently dropped, which quietly redirected the request to
 	// a different file. It is now rejected outright.
@@ -79,6 +80,7 @@ func TestProviderRejectsTraversal(t *testing.T) {
 }
 
 func TestProviderHardensExistingFileAndDirectoryModes(t *testing.T) {
+	t.Parallel()
 	manager, provider := newTestProvider(t, "session")
 	root := manager.SessionRoot("session")
 	dir := filepath.Join(root, "session-state")
@@ -112,6 +114,7 @@ func TestProviderHardensExistingFileAndDirectoryModes(t *testing.T) {
 }
 
 func TestProviderRejectsSymlinkComponents(t *testing.T) {
+	t.Parallel()
 	outside := t.TempDir()
 	if !symlinksAvailable(t, outside) {
 		t.Skip("symlinks unavailable")
@@ -129,6 +132,7 @@ func TestProviderRejectsSymlinkComponents(t *testing.T) {
 }
 
 func TestProviderRejectsOperationsThroughSymlinkedDirectory(t *testing.T) {
+	t.Parallel()
 	outside := t.TempDir()
 	if !symlinksAvailable(t, outside) {
 		t.Skip("symlinks unavailable")
@@ -194,6 +198,7 @@ func TestProviderRejectsOperationsThroughSymlinkedDirectory(t *testing.T) {
 // symlinked parent, replacing or unlinking the link itself stays inside the
 // session, so those operations succeed on the link rather than failing.
 func TestProviderDoesNotFollowSymlinkedFinalComponent(t *testing.T) {
+	t.Parallel()
 	outside := t.TempDir()
 	if !symlinksAvailable(t, outside) {
 		t.Skip("symlinks unavailable")
@@ -235,6 +240,7 @@ func TestProviderDoesNotFollowSymlinkedFinalComponent(t *testing.T) {
 // The pre-fix provider validated the path and then reopened it by name, so a
 // symlink planted in that window redirected the write outside the session.
 func TestProviderRejectsSymlinkPlantedDuringWrite(t *testing.T) {
+	t.Parallel()
 	outside := t.TempDir()
 	if !symlinksAvailable(t, outside) {
 		t.Skip("symlinks unavailable")
@@ -272,6 +278,7 @@ func TestProviderRejectsSymlinkPlantedDuringWrite(t *testing.T) {
 }
 
 func TestProviderWriteFileIsAtomicForConcurrentReaders(t *testing.T) {
+	t.Parallel()
 	manager, p := newTestProvider(t, "session")
 	const path = "/session-state/events.jsonl"
 	first := strings.Repeat("a", 1<<16)
@@ -340,6 +347,7 @@ func TestProviderWriteFileIsAtomicForConcurrentReaders(t *testing.T) {
 }
 
 func TestProviderKeepsFilesUsableForRestrictiveModes(t *testing.T) {
+	t.Parallel()
 	_, p := newTestProvider(t, "session")
 	for _, mode := range []int{0o444, 0o200, 0o000, 0o777} {
 		path := fmt.Sprintf("/session-state/mode-%o", mode)
@@ -367,6 +375,7 @@ func TestProviderKeepsFilesUsableForRestrictiveModes(t *testing.T) {
 }
 
 func TestProviderKeepsDirectoriesUsableForRestrictiveModes(t *testing.T) {
+	t.Parallel()
 	probe := filepath.Join(t.TempDir(), "probe")
 	if err := os.Mkdir(probe, 0o500); err != nil {
 		t.Fatal(err)
@@ -402,6 +411,7 @@ func TestProviderKeepsDirectoriesUsableForRestrictiveModes(t *testing.T) {
 }
 
 func TestSafeSessionIDIsInjectiveForUnsafeValues(t *testing.T) {
+	t.Parallel()
 	if safeSessionID("a/b") == safeSessionID("a?b") {
 		t.Fatal("unsafe session IDs collided")
 	}
@@ -411,6 +421,7 @@ func TestSafeSessionIDIsInjectiveForUnsafeValues(t *testing.T) {
 }
 
 func TestEnsureSessionCreatesReadableProviderRoot(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	m := NewManager(root)
 	t.Cleanup(func() { _ = m.Close() })
@@ -443,6 +454,7 @@ func TestEnsureSessionCreatesReadableProviderRoot(t *testing.T) {
 }
 
 func TestManagerReopensStoreRootAfterClose(t *testing.T) {
+	t.Parallel()
 	m := NewManager(t.TempDir())
 	if err := m.EnsureSession("session"); err != nil {
 		t.Fatal(err)
@@ -462,6 +474,7 @@ func TestManagerReopensStoreRootAfterClose(t *testing.T) {
 }
 
 func TestManagerSharesLockForSessionWithoutRetainingProviders(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(t.TempDir())
 	t.Cleanup(func() { _ = manager.Close() })
 	first := manager.Provider("session-1")
@@ -475,6 +488,7 @@ func TestManagerSharesLockForSessionWithoutRetainingProviders(t *testing.T) {
 }
 
 func TestWriteEventsRejectsSymlinkedSessionTree(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	outside := t.TempDir()
 	if err := os.Symlink(outside, filepath.Join(root, "sessions")); err != nil {
@@ -489,6 +503,7 @@ func TestWriteEventsRejectsSymlinkedSessionTree(t *testing.T) {
 }
 
 func TestWriteEvents(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path, err := WriteEvents(root, "abc", []byte("{}\n"))
 	if err != nil {
