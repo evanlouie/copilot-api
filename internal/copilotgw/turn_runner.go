@@ -413,9 +413,14 @@ func (r *turnRunner) loop(g *RealGateway) {
 	// accumulator's: cleared at the turn start and at the tool-call boundary.
 	var text strings.Builder
 	var reason reasoningAccumulator
+	// toolCalls routes incremental tool-call argument fragments to the client.
+	// Like text and reasoning it is per-turn state: a continuation turn plans its
+	// own calls and must not inherit the emitted turn's routing.
+	toolCalls := toolCallStreamState{}
 	var usage *openai.Usage
 	var contentBytes int64
 	var reasoningStreamBytes int64
+	var toolCallStreamBytes int64
 	stats := newTurnDebugStats()
 	debugEnabled := g != nil && g.log != nil && g.log.Enabled(r.ctx, slog.LevelDebug)
 	idleTimeout := r.idleTimeout
@@ -456,6 +461,8 @@ func (r *turnRunner) loop(g *RealGateway) {
 				usage = nil
 				contentBytes = 0
 				reasoningStreamBytes = 0
+				toolCallStreamBytes = 0
+				clear(toolCalls)
 				stats.reset()
 				r.debug(g, "copilot turn started")
 			case *copilot.AssistantMessageStartData:
@@ -491,6 +498,23 @@ func (r *turnRunner) loop(g *RealGateway) {
 						r.debugDelta(g, "copilot content delta", d.DeltaContent, deltaStats, "message_id", d.MessageID)
 					}
 					r.emitDelta(d.DeltaContent)
+				}
+			case *copilot.AssistantToolCallDeltaData:
+				// The SDK streams a tool call's provider input in fragments well
+				// before the finished tool request arrives, which is the only chance
+				// a client has to render arguments as they are produced.
+				if d.InputDelta != "" {
+					toolCallStreamBytes += int64(len(d.InputDelta))
+					if contentBytes+reasoningStreamBytes+toolCallStreamBytes > r.maxOutputBytes {
+						r.emitError(apierr.Upstream("copilot tool-call output exceeded size limit"))
+						r.abort()
+						return
+					}
+					stream := toolCalls.resolve(r.rt, d)
+					if debugEnabled {
+						r.debug(g, "copilot tool call delta", "tool_call_id", d.ToolCallID, "tool_name", optionalString(d.ToolName), "delta_bytes", len(d.InputDelta), "forwarded", stream.forwarded(), "ms_since_turn_start", stats.msSinceTurnStart())
+					}
+					r.emitToolCallDelta(stream, d.InputDelta)
 				}
 			case *copilot.AssistantReasoningData:
 				if contentBytes+reason.retainedSizeAfterConsolidated(d.Content) > r.maxOutputBytes {
@@ -565,6 +589,8 @@ func (r *turnRunner) loop(g *RealGateway) {
 					usage = nil
 					contentBytes = 0
 					reasoningStreamBytes = 0
+					toolCallStreamBytes = 0
+					clear(toolCalls)
 					reason.markToolBoundary()
 					r.resetOutputItems()
 					stats.reset()
@@ -920,6 +946,89 @@ func (r *turnRunner) emitDelta(delta string) {
 	response.send(ResponseStreamEvent{Kind: "delta", ItemID: itemID, Delta: delta})
 }
 
+// toolCallStreamState is the current turn's routing table for incremental
+// tool-call arguments, keyed by the model's tool-call id.
+type toolCallStreamState map[string]*toolCallStream
+
+// toolCallStream is one tool call's incremental-argument routing: the identity
+// its fragments are published under, and which surfaces can carry them.
+//
+// A zero value is the decision not to forward this call's fragments at all,
+// which is how a strict tool, an unrecognised tool and a tool-search call are
+// all represented. Once made, that decision is remembered for the rest of the
+// turn: a later fragment must not start a stream halfway through a call's
+// arguments, since the client would then hold a fragment it cannot place.
+type toolCallStream struct {
+	call toolproxy.StreamingCall
+	// item is the in-progress Responses output item the fragments extend, nil
+	// when the call has no Responses representation that streams.
+	item *openai.ResponseOutputItem
+	// chat records whether Chat Completions can carry these fragments.
+	chat bool
+}
+
+func (s *toolCallStream) forwarded() bool { return s != nil && s.call.CallID != "" }
+
+// resolve classifies a tool call the first time a fragment for it arrives.
+//
+// The tool name is what resolves the call back to a declared tool, and
+// therefore what decides whether it is strict. A fragment that arrives without
+// one cannot be classified, so it is buffered rather than guessed at.
+func (s toolCallStreamState) resolve(rt *toolproxy.RequestTools, d *copilot.AssistantToolCallDeltaData) *toolCallStream {
+	if stream, ok := s[d.ToolCallID]; ok {
+		return stream
+	}
+	custom := d.ToolType != nil && *d.ToolType == copilot.AssistantMessageToolRequestTypeCustom
+	stream := &toolCallStream{}
+	if call, ok := rt.ReserveStreamingCall(d.ToolCallID, optionalString(d.ToolName), custom); ok {
+		stream = newToolCallStream(call)
+	}
+	s[d.ToolCallID] = stream
+	return stream
+}
+
+func newToolCallStream(call toolproxy.StreamingCall) *toolCallStream {
+	itemID := responseToolItemID(call.Kind, call.CallID)
+	switch call.Kind {
+	case toolcatalog.ToolKindCustom:
+		// A custom tool's fragments are the raw grammar input, which is what the
+		// custom_tool_call item's `input` accumulates. Chat Completions has
+		// nowhere to put them: it renders a custom call as a function call whose
+		// arguments are the JSON envelope around that input, so the fragments
+		// would not reconcile against what the terminal chunk carries.
+		return &toolCallStream{call: call, item: &openai.ResponseOutputItem{ID: itemID, Type: "custom_tool_call", Status: "in_progress", CallID: call.CallID, Name: call.Name}}
+	case toolcatalog.ToolKindToolSearch:
+		// Neither surface defines an incremental event for a tool-search call, so
+		// it keeps the announce/done pair it has always had.
+		return &toolCallStream{}
+	default:
+		return &toolCallStream{call: call, chat: true, item: &openai.ResponseOutputItem{ID: itemID, Type: "function_call", Status: "in_progress", CallID: call.CallID, Name: call.Name}}
+	}
+}
+
+// emitToolCallDelta publishes one tool-call argument fragment. The item it
+// names is announced here for the same reason a message item is: the order of
+// first announcement is what responseFromTurn arranges the terminal output to
+// match.
+func (r *turnRunner) emitToolCallDelta(stream *toolCallStream, delta string) {
+	if !stream.forwarded() || delta == "" {
+		return
+	}
+	r.mu.Lock()
+	chat := r.chat
+	response := r.response
+	if stream.item != nil {
+		r.announceItemLocked(stream.item.ID)
+	}
+	r.mu.Unlock()
+	if stream.chat {
+		chat.send(StreamEvent{Kind: "tool_call_delta", Delta: delta, ToolCallID: stream.call.CallID, ToolName: stream.call.Name})
+	}
+	if stream.item != nil {
+		response.send(ResponseStreamEvent{Kind: "tool_call_delta", ItemID: stream.item.ID, Item: stream.item, Delta: delta})
+	}
+}
+
 func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {
 	if delta == "" {
 		return
@@ -1262,6 +1371,21 @@ func capturedFromChatToolCalls(calls []openai.ChatToolCall) []toolproxy.Captured
 	return out
 }
 
+// responseToolItemID is the Responses output-item id for a tool call of the
+// given kind. The streaming path and the terminal response both derive an
+// item's id from here, so a call's fragments and its finished item can never
+// name two different items.
+func responseToolItemID(kind toolcatalog.ResponsesToolKind, callID string) string {
+	switch kind {
+	case toolcatalog.ToolKindCustom:
+		return "ctc_" + callID
+	case toolcatalog.ToolKindToolSearch:
+		return "tsc_" + callID
+	default:
+		return "fc_" + callID
+	}
+}
+
 func responseOutputItemFromCaptured(tc toolproxy.CapturedCall) openai.ResponseOutputItem {
 	kind := tc.Kind
 	if kind == "" {
@@ -1273,7 +1397,7 @@ func responseOutputItemFromCaptured(tc toolproxy.CapturedCall) openai.ResponseOu
 	}
 	switch kind {
 	case toolcatalog.ToolKindCustom:
-		return openai.ResponseOutputItem{ID: "ctc_" + tc.CallID, Type: "custom_tool_call", Status: "completed", CallID: tc.CallID, Name: name, Input: tc.Input}
+		return openai.ResponseOutputItem{ID: responseToolItemID(kind, tc.CallID), Type: "custom_tool_call", Status: "completed", CallID: tc.CallID, Name: name, Input: tc.Input}
 	case toolcatalog.ToolKindToolSearch:
 		execution := tc.Execution
 		if execution == "" {
@@ -1283,9 +1407,9 @@ func responseOutputItemFromCaptured(tc toolproxy.CapturedCall) openai.ResponseOu
 		if len(args) == 0 {
 			args = jsonRaw(`{}`)
 		}
-		return openai.ResponseOutputItem{ID: "tsc_" + tc.CallID, Type: "tool_search_call", Status: "completed", CallID: tc.CallID, Execution: execution, ArgumentsJSON: args}
+		return openai.ResponseOutputItem{ID: responseToolItemID(kind, tc.CallID), Type: "tool_search_call", Status: "completed", CallID: tc.CallID, Execution: execution, ArgumentsJSON: args}
 	default:
-		return openai.ResponseOutputItem{ID: "fc_" + tc.CallID, Type: "function_call", Status: "completed", CallID: tc.CallID, Namespace: tc.Namespace, Name: name, Arguments: string(tc.ArgumentsJSON)}
+		return openai.ResponseOutputItem{ID: responseToolItemID(kind, tc.CallID), Type: "function_call", Status: "completed", CallID: tc.CallID, Namespace: tc.Namespace, Name: name, Arguments: string(tc.ArgumentsJSON)}
 	}
 }
 

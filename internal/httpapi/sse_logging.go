@@ -87,6 +87,9 @@ func (s *Server) logChatStreamEvent(ctx context.Context, ev copilotgw.StreamEven
 	if ev.Delta != "" {
 		attrs = append(attrs, streamDeltaAttrs(ev.Delta)...)
 	}
+	if ev.ToolCallID != "" {
+		attrs = append(attrs, "tool_call_id", ev.ToolCallID, "tool_name", ev.ToolName)
+	}
 	if ev.Result != nil {
 		attrs = append(attrs,
 			"finish_reason", ev.Result.FinishReason,

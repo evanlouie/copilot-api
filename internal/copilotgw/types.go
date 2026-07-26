@@ -151,8 +151,14 @@ type StreamEvent struct {
 	Kind        string
 	Delta       string
 	ReasoningID string
-	Result      *TurnResult
-	Error       error
+	// ToolCallID and ToolName name the tool call a "tool_call_delta" belongs to.
+	// OpenAI's Chat wire shape sends a call's id, type and name once, on its
+	// first argument fragment, so the transport needs them on every fragment to
+	// recognise which one that is.
+	ToolCallID string
+	ToolName   string
+	Result     *TurnResult
+	Error      error
 }
 
 type ResponseRequest struct {
@@ -201,10 +207,13 @@ type ResponseStreamEvent struct {
 	// ItemID is the Responses output-item ID the delta belongs to. The gateway
 	// is the only component that assigns output-item IDs, so the HTTP layer
 	// forwards this value rather than minting one of its own. It is required on
-	// "delta" and "reasoning_delta" events.
+	// "delta", "reasoning_delta" and "tool_call_delta" events.
 	ItemID   string
 	Delta    string
 	Response *openai.Response
-	Item     *openai.ResponseOutputItem
-	Error    error
+	// Item carries the in-progress output item a "tool_call_delta" belongs to,
+	// so the transport can announce it without inventing one. It repeats on
+	// every fragment; the transport announces it exactly once.
+	Item  *openai.ResponseOutputItem
+	Error error
 }
