@@ -2,10 +2,10 @@ package copilotgw
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/openai"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
 )
@@ -410,15 +410,6 @@ func tokenLimitsMetadata(limits *TokenLimits) map[string]any {
 	return meta
 }
 
-var reasoningEffortRanks = map[string]int{
-	"none":    0,
-	"minimal": 1,
-	"low":     2,
-	"medium":  3,
-	"high":    4,
-	"xhigh":   5,
-}
-
 func (g *RealGateway) ResolveReasoningEffort(ctx context.Context, model, requestedEffort, defaultEffort string) (string, error) {
 	return g.effectiveReasoningEffort(ctx, model, requestedEffort, defaultEffort)
 }
@@ -460,7 +451,7 @@ func closestReasoningEffort(defaultEffort string, model Model) string {
 				return cleanReasoningEffort(effort)
 			}
 		}
-		defaultRank, ok := reasoningEffortRanks[defaultEffort]
+		defaultRank, ok := openai.ReasoningEffortRank(defaultEffort)
 		if !ok {
 			return ""
 		}
@@ -469,7 +460,7 @@ func closestReasoningEffort(defaultEffort string, model Model) string {
 		bestRank := 1 << 30
 		for _, effort := range model.SupportedReasoningEfforts {
 			cleaned := cleanReasoningEffort(effort)
-			rank, ok := reasoningEffortRanks[cleaned]
+			rank, ok := openai.ReasoningEffortRank(cleaned)
 			if !ok {
 				continue
 			}
@@ -514,8 +505,10 @@ func cleanReasoningEfforts(efforts []string) []string {
 	return out
 }
 
+// cleanReasoningEffort is the OpenAI-boundary normalization, reused so the
+// gateway and the request validators agree on what a token spells.
 func cleanReasoningEffort(effort string) string {
-	return strings.ToLower(strings.TrimSpace(effort))
+	return openai.NormalizeReasoningEffort(effort)
 }
 
 func abs(n int) int {

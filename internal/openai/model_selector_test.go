@@ -25,7 +25,12 @@ func TestParseModelSelector(t *testing.T) {
 		{name: "xhigh", raw: "gpt-5.6-sol:xhigh", model: "gpt-5.6-sol", effort: "xhigh", hasEffort: true},
 		{name: "normalizes effort", raw: "gpt-5.6-sol:  XHIGH  ", model: "gpt-5.6-sol", effort: "xhigh", hasEffort: true},
 		{name: "uses final colon", raw: "vendor:model:HIGH", model: "vendor:model", effort: "high", hasEffort: true},
-		{name: "future model specific effort", raw: "gpt-5.6-sol:adaptive", model: "gpt-5.6-sol", effort: "adaptive", hasEffort: true},
+		// A colon is legal inside a model ID. Only a known effort token is a
+		// suffix; everything else belongs to the model the client asked for.
+		{name: "vendor tag is part of the model id", raw: "openrouter/mistral-7b:free", model: "openrouter/mistral-7b:free"},
+		{name: "unknown suffix is part of the model id", raw: "gpt-5:banana", model: "gpt-5:banana"},
+		{name: "unknown suffix after a vendor colon", raw: "vendor:model:free", model: "vendor:model:free"},
+		{name: "future model specific effort is not an effort", raw: "gpt-5.6-sol:adaptive", model: "gpt-5.6-sol:adaptive"},
 		{name: "empty model", raw: "", wantErr: true},
 		{name: "suffix only", raw: ":high", wantErr: true},
 		{name: "empty suffix", raw: "gpt-5.6-sol:", wantErr: true},
@@ -52,6 +57,22 @@ func TestParseModelSelector(t *testing.T) {
 				t.Fatalf("ParseModelSelector(%q) = %#v, want model=%q effort=%q hasEffort=%t", test.raw, got, test.model, test.effort, test.hasEffort)
 			}
 		})
+	}
+}
+
+// An unknown suffix must not reach the SDK as a reasoning effort by any route,
+// including the merge with the explicit request field.
+func TestUnknownModelSuffixIsNotForwardedAsEffort(t *testing.T) {
+	selector, err := ParseModelSelector("gpt-5:banana")
+	if err != nil {
+		t.Fatalf("ParseModelSelector: %v", err)
+	}
+	if selector.HasEffort || selector.ReasoningEffort != "" {
+		t.Fatalf("selector = %#v, want no effort", selector)
+	}
+	merged, err := MergeReasoningEffort(selector, "", "reasoning_effort")
+	if err != nil || merged != "" {
+		t.Fatalf("MergeReasoningEffort() = %q, %v; want \"\", nil", merged, err)
 	}
 }
 
