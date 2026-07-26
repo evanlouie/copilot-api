@@ -8,6 +8,7 @@ import (
 // The grammar has to accept everything NewID mints, or a legitimately created
 // response becomes unreadable through GET /v1/responses/{id}.
 func TestValidResponseIDAcceptsEveryMintedID(t *testing.T) {
+	t.Parallel()
 	for range 100 {
 		id := NewID(ResponseIDPrefix)
 		if !ValidResponseID(id) {
@@ -17,6 +18,7 @@ func TestValidResponseIDAcceptsEveryMintedID(t *testing.T) {
 }
 
 func TestValidResponseIDRejectsAnythingThatCouldNameAnotherPath(t *testing.T) {
+	t.Parallel()
 	for _, id := range []string{
 		"",
 		".",

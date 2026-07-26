@@ -7,6 +7,7 @@ import (
 )
 
 func TestRequestRawFieldsRetainOnlyValidationPresence(t *testing.T) {
+	t.Parallel()
 	var chat ChatCompletionRequest
 	if err := json.Unmarshal([]byte(`{"model":"gpt-test","messages":[{"role":"user","content":"large-known-field"}],"n":1}`), &chat); err != nil {
 		t.Fatal(err)
@@ -24,6 +25,7 @@ func TestRequestRawFieldsRetainOnlyValidationPresence(t *testing.T) {
 }
 
 func TestChatCompletionChunkUsageSerialization(t *testing.T) {
+	t.Parallel()
 	// Without include_usage, usage is omitted entirely when nil.
 	b, err := json.Marshal(ChatCompletionChunk{ID: "c", Object: ObjectChatChunk})
 	if err != nil {

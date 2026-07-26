@@ -6,6 +6,7 @@ import (
 )
 
 func TestTruncateForLogPreservesRuneBoundaries(t *testing.T) {
+	t.Parallel()
 	if got := TruncateForLog("a😀bc", 2); got != "a😀…" {
 		t.Fatalf("TruncateForLog = %q, want %q", got, "a😀…")
 	}
@@ -15,6 +16,7 @@ func TestTruncateForLogPreservesRuneBoundaries(t *testing.T) {
 }
 
 func TestTruncateBytesForLogPreservesRuneBoundaries(t *testing.T) {
+	t.Parallel()
 	if got := TruncateBytesForLog([]byte("a😀bc"), 2); got != "a😀…" {
 		t.Fatalf("TruncateBytesForLog = %q, want %q", got, "a😀…")
 	}

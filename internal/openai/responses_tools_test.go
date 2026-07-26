@@ -9,6 +9,7 @@ import (
 )
 
 func TestNormalizeToolSearchOutputToolsRejectsRawPayloadTooLarge(t *testing.T) {
+	t.Parallel()
 	desc := strings.Repeat("x", toolcatalog.MaxLoadedRawToolsBytes)
 	raw, _ := json.Marshal([]map[string]any{{"type": "function", "name": "lookup", "description": desc}})
 	if _, err := NormalizeToolSearchOutputTools(raw, "input.0.tools"); err == nil || !strings.Contains(err.Error(), "too large") {
@@ -17,6 +18,7 @@ func TestNormalizeToolSearchOutputToolsRejectsRawPayloadTooLarge(t *testing.T) {
 }
 
 func TestNormalizeToolSearchOutputToolsRejectsMixedFunctionShapes(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[{"type":"function","name":"ignored_but_large","function":{"name":"lookup"}}]`)
 	if _, err := NormalizeToolSearchOutputTools(raw, "input.0.tools"); err == nil || !strings.Contains(err.Error(), "cannot mix") {
 		t.Fatalf("error = %v, want mixed function shape rejection", err)
@@ -24,6 +26,7 @@ func TestNormalizeToolSearchOutputToolsRejectsMixedFunctionShapes(t *testing.T) 
 }
 
 func TestNormalizeToolSearchOutputToolsRejectsHostedFields(t *testing.T) {
+	t.Parallel()
 	raw := json.RawMessage(`[{"type":"function","name":"lookup","server_url":"https://example.com","parameters":{"type":"object"}}]`)
 	if _, err := NormalizeToolSearchOutputTools(raw, "input.0.tools"); err == nil || !strings.Contains(err.Error(), "unsupported field") {
 		t.Fatalf("error = %v, want unsupported field rejection", err)
@@ -31,6 +34,7 @@ func TestNormalizeToolSearchOutputToolsRejectsHostedFields(t *testing.T) {
 }
 
 func TestNormalizeToolSearchOutputToolsCanonicalKeyIgnoresJSONOrder(t *testing.T) {
+	t.Parallel()
 	a, err := NormalizeToolSearchOutputTools(json.RawMessage(`[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]`), "input.0.tools")
 	if err != nil {
 		t.Fatal(err)

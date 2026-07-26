@@ -8,6 +8,7 @@ import (
 )
 
 func TestToolCatalogMergeLoadedNamespacePersistsCanonicalCatalog(t *testing.T) {
+	t.Parallel()
 	base, err := NewToolCatalog([]NormalizedTool{{Kind: ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +40,7 @@ func TestToolCatalogMergeLoadedNamespacePersistsCanonicalCatalog(t *testing.T) {
 }
 
 func TestToolCatalogMergeLoadedRejectsConflictingDefinition(t *testing.T) {
+	t.Parallel()
 	base, err := NewToolCatalog([]NormalizedTool{{Kind: ToolKindFunction, Name: "lookup", Description: "old"}})
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +54,7 @@ func TestToolCatalogMergeLoadedRejectsConflictingDefinition(t *testing.T) {
 }
 
 func TestNewToolCatalogRejectsOversizedInitialCatalog(t *testing.T) {
+	t.Parallel()
 	_, err := NewToolCatalog([]NormalizedTool{{Kind: ToolKindFunction, Name: "lookup", Description: strings.Repeat("x", MaxLoadedCatalogBytes)}})
 	if err == nil || !strings.Contains(err.Error(), "catalog is too large") {
 		t.Fatalf("error = %v, want initial catalog size rejection", err)
@@ -59,6 +62,7 @@ func TestNewToolCatalogRejectsOversizedInitialCatalog(t *testing.T) {
 }
 
 func TestNewToolCatalogRejectsEmptyNamespace(t *testing.T) {
+	t.Parallel()
 	_, err := NewToolCatalog([]NormalizedTool{{Kind: ToolKindNamespace, Name: "empty"}})
 	if err == nil || !strings.Contains(err.Error(), "at least one child") {
 		t.Fatalf("error = %v, want empty namespace rejection", err)
@@ -66,6 +70,7 @@ func TestNewToolCatalogRejectsEmptyNamespace(t *testing.T) {
 }
 
 func TestNewToolCatalogRejectsDuplicateNamespaces(t *testing.T) {
+	t.Parallel()
 	_, err := NewToolCatalog([]NormalizedTool{
 		{Kind: ToolKindNamespace, Name: "duplicate", Children: []NormalizedTool{{Kind: ToolKindFunction, Name: "one"}}},
 		{Kind: ToolKindNamespace, Name: "duplicate", Children: []NormalizedTool{{Kind: ToolKindFunction, Name: "two"}}},
@@ -76,6 +81,7 @@ func TestNewToolCatalogRejectsDuplicateNamespaces(t *testing.T) {
 }
 
 func TestToolCatalogMergeLoadedRejectsCumulativeToolCountLimit(t *testing.T) {
+	t.Parallel()
 	baseTools := make([]NormalizedTool, 0, MaxInstalledToolCount)
 	for i := 0; i < MaxInstalledToolCount; i++ {
 		baseTools = append(baseTools, NormalizedTool{Kind: ToolKindFunction, Name: fmt.Sprintf("base_%03d", i)})

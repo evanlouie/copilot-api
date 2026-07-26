@@ -54,6 +54,7 @@ var responsesFieldSamples = map[string]string{
 }
 
 func TestRawFieldPresentTreatsNullAsAbsent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		raw  string
 		want bool
@@ -77,9 +78,11 @@ func TestRawFieldPresentTreatsNullAsAbsent(t *testing.T) {
 }
 
 func TestChatNullFieldsAreTreatedAsAbsent(t *testing.T) {
+	t.Parallel()
 	requireSampleCoverage(t, chatFieldSamples, alwaysRejectChatFields, strictOnlyChatFields)
 	for _, field := range alwaysRejectChatFields {
 		t.Run("always_reject/"+field.name, func(t *testing.T) {
+			t.Parallel()
 			req := decodeChatRequest(t, chatBody(field.name, `null`))
 			if _, present := req.Raw[field.name]; present {
 				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
@@ -94,6 +97,7 @@ func TestChatNullFieldsAreTreatedAsAbsent(t *testing.T) {
 	}
 	for _, field := range strictOnlyChatFields {
 		t.Run("strict_only/"+field.name, func(t *testing.T) {
+			t.Parallel()
 			req := decodeChatRequest(t, chatBody(field.name, `null`))
 			if _, present := req.Raw[field.name]; present {
 				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
@@ -109,9 +113,11 @@ func TestChatNullFieldsAreTreatedAsAbsent(t *testing.T) {
 }
 
 func TestResponsesNullFieldsAreTreatedAsAbsent(t *testing.T) {
+	t.Parallel()
 	requireSampleCoverage(t, responsesFieldSamples, alwaysRejectResponseFields, strictOnlyResponseFields)
 	for _, field := range alwaysRejectResponseFields {
 		t.Run("always_reject/"+field.name, func(t *testing.T) {
+			t.Parallel()
 			req := decodeResponsesRequest(t, responsesBody(field.name, `null`))
 			if _, present := req.Raw[field.name]; present {
 				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
@@ -126,6 +132,7 @@ func TestResponsesNullFieldsAreTreatedAsAbsent(t *testing.T) {
 	}
 	for _, field := range strictOnlyResponseFields {
 		t.Run("strict_only/"+field.name, func(t *testing.T) {
+			t.Parallel()
 			req := decodeResponsesRequest(t, responsesBody(field.name, `null`))
 			if _, present := req.Raw[field.name]; present {
 				t.Fatalf("explicit null left %q in the presence map: %#v", field.name, req.Raw)
@@ -143,6 +150,7 @@ func TestResponsesNullFieldsAreTreatedAsAbsent(t *testing.T) {
 // TestChatNullFieldsFromOpenAIPythonExplicitNone is the reported reproduction:
 // openai-python turns an explicit `stop=None` into `"stop": null` on the wire.
 func TestChatNullFieldsFromOpenAIPythonExplicitNone(t *testing.T) {
+	t.Parallel()
 	req := decodeChatRequest(t, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"stop":null,"max_tokens":null,"response_format":null,"logit_bias":null,"n":null,"temperature":null,"user":null}`)
 	if len(req.Raw) != 0 {
 		t.Fatalf("all-null request produced presence entries: %#v", req.Raw)
@@ -160,6 +168,7 @@ func TestChatNullFieldsFromOpenAIPythonExplicitNone(t *testing.T) {
 // max_tokens and max_completion_tokens are accepted rather than rejected, so
 // their decoded values have to remain reachable for diagnostics.
 func TestRequestedMaxOutputTokensPrefersMaxCompletionTokens(t *testing.T) {
+	t.Parallel()
 	req := decodeChatRequest(t, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"max_completion_tokens":32}`)
 	if tokens, ok := req.RequestedMaxOutputTokens(); !ok || tokens != 32 {
 		t.Fatalf("RequestedMaxOutputTokens = %d, %t; want 32, true", tokens, ok)
@@ -181,6 +190,7 @@ func TestRequestedMaxOutputTokensPrefersMaxCompletionTokens(t *testing.T) {
 // parse `null` into a json.Number, so presence filtering (not the allow hook) is
 // what has to keep the request out of the 400 path.
 func TestChatNullNNeverReachesIsOne(t *testing.T) {
+	t.Parallel()
 	if isOne(json.RawMessage(`null`)) {
 		t.Fatal("isOne(null) = true; the null sub-case must be handled by presence filtering")
 	}
@@ -193,6 +203,7 @@ func TestChatNullNNeverReachesIsOne(t *testing.T) {
 // that internal/httpapi/responses.go builds from decoded requests: an explicit
 // null must read as "not set", not as "set to null".
 func TestNullPresenceDerivedBooleansAreUnset(t *testing.T) {
+	t.Parallel()
 	req := decodeResponsesRequest(t, `{"model":"gpt-5","input":"hi","stream":null,"store":null,"tools":null,"tool_choice":null,"parallel_tool_calls":null}`)
 	if _, toolsSet := req.Raw["tools"]; toolsSet {
 		t.Fatalf(`{"tools":null} marked tools as set: %#v`, req.Raw)
@@ -225,6 +236,7 @@ func TestNullPresenceDerivedBooleansAreUnset(t *testing.T) {
 // TestResponsesFieldDecoderMatchesJSONDecoderOnNull keeps the WebSocket
 // response.create path (ResponsesRequestFromFields) aligned with the HTTP path.
 func TestResponsesFieldDecoderMatchesJSONDecoderOnNull(t *testing.T) {
+	t.Parallel()
 	data := []byte(`{"model":"gpt-5","input":"hi","tools":null,"store":null,"temperature":null,"reasoning":null,"max_output_tokens":null}`)
 	var fromJSON ResponsesRequest
 	if err := json.Unmarshal(data, &fromJSON); err != nil {

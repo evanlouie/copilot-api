@@ -12,6 +12,7 @@ import (
 )
 
 func TestBuildChatHistoryTextAndToolEventsRoundTrip(t *testing.T) {
+	t.Parallel()
 	msgs := []openai.ChatMessage{
 		{Role: "user", Content: openai.NewTextContent("remember alpha")},
 		{Role: "assistant", Content: openai.NewTextContent("calling"), ToolCalls: []openai.ChatToolCall{{ID: "call_1", Type: "function", Function: openai.ToolCallFunction{Name: "lookup", Arguments: `{"q":"alpha"}`}}}},
@@ -36,6 +37,7 @@ func TestBuildChatHistoryTextAndToolEventsRoundTrip(t *testing.T) {
 }
 
 func TestBuildChatHistoryRejectsTrailingToolArgumentJSON(t *testing.T) {
+	t.Parallel()
 	_, err := BuildChatHistoryMessages([]Message{
 		{Role: "assistant", ToolCalls: []openai.ChatToolCall{{ID: "call_1", Type: "function", Function: openai.ToolCallFunction{Name: "lookup", Arguments: `{"q":"one"} {"q":"two"}`}}}},
 	}, Options{Model: "gpt-test"})
@@ -45,6 +47,7 @@ func TestBuildChatHistoryRejectsTrailingToolArgumentJSON(t *testing.T) {
 }
 
 func TestBuildChatHistoryRejectsUnknownToolResult(t *testing.T) {
+	t.Parallel()
 	_, err := BuildChatHistory([]openai.ChatMessage{{Role: "tool", ToolCallID: "missing", Content: openai.NewTextContent("x")}}, Options{})
 	if err == nil {
 		t.Fatal("expected unknown tool result rejection")
@@ -52,6 +55,7 @@ func TestBuildChatHistoryRejectsUnknownToolResult(t *testing.T) {
 }
 
 func TestBuildChatHistoryReplaysInboundReasoning(t *testing.T) {
+	t.Parallel()
 	assistant := openai.ChatMessage{Role: "assistant", Content: openai.NewTextContent("done")}
 	// Simulate a client round-tripping our own reasoning output back to us.
 	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning":"I considered the options"}`), &assistant); err != nil {
@@ -82,6 +86,7 @@ func TestBuildChatHistoryReplaysInboundReasoning(t *testing.T) {
 }
 
 func TestBuildChatHistoryPrefersReasoningOverReasoningContent(t *testing.T) {
+	t.Parallel()
 	var assistant openai.ChatMessage
 	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning":"canonical","reasoning_content":"alias"}`), &assistant); err != nil {
 		t.Fatal(err)
@@ -92,6 +97,7 @@ func TestBuildChatHistoryPrefersReasoningOverReasoningContent(t *testing.T) {
 }
 
 func TestBuildChatHistoryReplaysReasoningDetailsText(t *testing.T) {
+	t.Parallel()
 	var assistant openai.ChatMessage
 	// OpenRouter-style client that round-trips only reasoning_details.
 	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning_details":[{"type":"reasoning.text","text":"from details","signature":"sig"}]}`), &assistant); err != nil {
@@ -113,6 +119,7 @@ func TestBuildChatHistoryReplaysReasoningDetailsText(t *testing.T) {
 }
 
 func TestBuildChatHistoryReplaysReasoningDetailsSummaryBlocks(t *testing.T) {
+	t.Parallel()
 	var assistant openai.ChatMessage
 	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"done","reasoning_details":[{"type":"reasoning.summary","summary":"first "},{"type":"reasoning.text","text":"second"},{"type":"reasoning.encrypted","data":"enc"}]}`), &assistant); err != nil {
 		t.Fatal(err)
@@ -136,6 +143,7 @@ func TestBuildChatHistoryReplaysReasoningDetailsSummaryBlocks(t *testing.T) {
 }
 
 func TestBuildChatHistoryMessagesIncludesUserAttachments(t *testing.T) {
+	t.Parallel()
 	data := "AAAA"
 	mimeType := "image/png"
 	displayName := "image.png"

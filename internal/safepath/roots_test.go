@@ -7,6 +7,7 @@ import (
 )
 
 func TestResolveFollowsExistingSymlinkAncestorForMissingLeaf(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {

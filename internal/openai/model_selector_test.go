@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseModelSelector(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		raw       string
@@ -39,6 +40,7 @@ func TestParseModelSelector(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := ParseModelSelector(test.raw)
 			if test.wantErr {
 				if err == nil {
@@ -63,6 +65,7 @@ func TestParseModelSelector(t *testing.T) {
 // An unknown suffix must not reach the SDK as a reasoning effort by any route,
 // including the merge with the explicit request field.
 func TestUnknownModelSuffixIsNotForwardedAsEffort(t *testing.T) {
+	t.Parallel()
 	selector, err := ParseModelSelector("gpt-5:banana")
 	if err != nil {
 		t.Fatalf("ParseModelSelector: %v", err)
@@ -77,6 +80,7 @@ func TestUnknownModelSuffixIsNotForwardedAsEffort(t *testing.T) {
 }
 
 func TestMergeReasoningEffort(t *testing.T) {
+	t.Parallel()
 	naked := ModelSelector{Model: "gpt-5"}
 	suffixed := ModelSelector{Model: "gpt-5", ReasoningEffort: "xhigh", HasEffort: true}
 	tests := []struct {
@@ -96,6 +100,7 @@ func TestMergeReasoningEffort(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := MergeReasoningEffort(test.selector, test.explicit, "reasoning_effort")
 			if test.wantErr {
 				if err == nil {
@@ -115,6 +120,7 @@ func TestMergeReasoningEffort(t *testing.T) {
 }
 
 func TestResponsesReasoningEffortUsesNormalizedConflictComparison(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		body    string
@@ -140,6 +146,7 @@ func TestResponsesReasoningEffortUsesNormalizedConflictComparison(t *testing.T) 
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			var req ResponsesRequest
 			if err := json.Unmarshal([]byte(test.body), &req); err != nil {
 				t.Fatal(err)

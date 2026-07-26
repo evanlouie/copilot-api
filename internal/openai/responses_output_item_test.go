@@ -18,6 +18,7 @@ import (
 // None client-side and the append raises. These goldens fail loudly if the
 // keys ever go missing again.
 func TestResponseOutputItemGoldenJSON(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		item ResponseOutputItem
@@ -96,6 +97,7 @@ func TestResponseOutputItemGoldenJSON(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := json.Marshal(tc.item)
 			if err != nil {
 				t.Fatal(err)
@@ -112,6 +114,7 @@ func TestResponseOutputItemGoldenJSON(t *testing.T) {
 // items, where OpenAI does not declare them and `"content": null` would be its
 // own compatibility problem.
 func TestResponseOutputItemOmitsForeignRequiredFields(t *testing.T) {
+	t.Parallel()
 	items := []ResponseOutputItem{
 		{ID: "fc_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "lookup", Arguments: "{}"},
 		{ID: "ctc_1", Type: "custom_tool_call", Status: "completed", CallID: "call_2", Name: "apply_patch", Input: "diff"},
@@ -119,6 +122,7 @@ func TestResponseOutputItemOmitsForeignRequiredFields(t *testing.T) {
 	}
 	for _, item := range items {
 		t.Run(item.Type, func(t *testing.T) {
+			t.Parallel()
 			b, err := json.Marshal(item)
 			if err != nil {
 				t.Fatal(err)
@@ -135,6 +139,7 @@ func TestResponseOutputItemOmitsForeignRequiredFields(t *testing.T) {
 // TestResponseOutputItemRoundTrip confirms the forced keys stay decode-clean,
 // including the string-vs-object arguments split the marshaller special-cases.
 func TestResponseOutputItemRoundTrip(t *testing.T) {
+	t.Parallel()
 	items := []ResponseOutputItem{
 		{ID: "msg_1", Type: "message", Status: "completed", Role: "assistant", Content: []ResponseText{{Type: "output_text", Text: "hi", Annotations: []any{}}}},
 		{ID: "rs_1", Type: "reasoning", Status: "completed", Summary: []ResponseReasoningSummary{{Type: "summary_text", Text: "thinking"}}},
@@ -144,6 +149,7 @@ func TestResponseOutputItemRoundTrip(t *testing.T) {
 	}
 	for _, item := range items {
 		t.Run(item.Type, func(t *testing.T) {
+			t.Parallel()
 			b, err := json.Marshal(item)
 			if err != nil {
 				t.Fatal(err)
@@ -163,6 +169,7 @@ func TestResponseOutputItemRoundTrip(t *testing.T) {
 // through the enclosing Response and stream-event envelopes, which is how
 // clients actually see these items.
 func TestResponseOutputItemEmptyArraysSurviveResponseEnvelope(t *testing.T) {
+	t.Parallel()
 	added := ResponseOutputItem{ID: "msg_1", Type: "message", Status: "in_progress", Role: "assistant", Content: []ResponseText{}}
 	idx := 0
 	b, err := json.Marshal(ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &added})

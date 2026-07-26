@@ -7,6 +7,7 @@ import (
 )
 
 func TestResponsesRequestHTTPAndFieldDecodersStayEquivalent(t *testing.T) {
+	t.Parallel()
 	data := []byte(`{"model":"gpt-5","input":"hi","tools":[],"parallel_tool_calls":true,"store":false,"reasoning_effort":"high","include":["reasoning.encrypted_content"],"temperature":0.5}`)
 	var fromJSON ResponsesRequest
 	if err := json.Unmarshal(data, &fromJSON); err != nil {
@@ -29,6 +30,7 @@ func TestResponsesRequestHTTPAndFieldDecodersStayEquivalent(t *testing.T) {
 }
 
 func TestResolveReasoningEmission(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		policy               string
 		emitReasoning        bool
@@ -53,6 +55,7 @@ func TestResolveReasoningEmission(t *testing.T) {
 }
 
 func TestBuildReasoningDetailsAnthropicSignedAndEncrypted(t *testing.T) {
+	t.Parallel()
 	details := BuildReasoningDetails("thinking", "sig-blob", "enc-blob", "rid-1")
 	if len(details) != 2 {
 		t.Fatalf("details length = %d, want 2: %#v", len(details), details)
@@ -68,6 +71,7 @@ func TestBuildReasoningDetailsAnthropicSignedAndEncrypted(t *testing.T) {
 }
 
 func TestBuildReasoningDetailsPlaintextOnlyHasNoSignatureOrFormat(t *testing.T) {
+	t.Parallel()
 	details := BuildReasoningDetails("thinking", "", "", "")
 	if len(details) != 1 {
 		t.Fatalf("details length = %d, want 1: %#v", len(details), details)
@@ -83,12 +87,14 @@ func TestBuildReasoningDetailsPlaintextOnlyHasNoSignatureOrFormat(t *testing.T) 
 }
 
 func TestBuildReasoningDetailsEmptyReturnsNil(t *testing.T) {
+	t.Parallel()
 	if details := BuildReasoningDetails("", "", "", "rid"); details != nil {
 		t.Fatalf("expected nil details for empty reasoning, got %#v", details)
 	}
 }
 
 func TestChatMessageToleratesInboundReasoning(t *testing.T) {
+	t.Parallel()
 	var msg ChatMessage
 	body := []byte(`{"role":"assistant","content":"hello","reasoning":"because","reasoning_content":"because","reasoning_details":[{"type":"reasoning.text","text":"because","signature":"sig","format":"anthropic-claude-v1","index":0}]}`)
 	if err := json.Unmarshal(body, &msg); err != nil {
@@ -103,6 +109,7 @@ func TestChatMessageToleratesInboundReasoning(t *testing.T) {
 }
 
 func TestChatMessageInboundReasoningConcatenatesDetails(t *testing.T) {
+	t.Parallel()
 	var msg ChatMessage
 	body := []byte(`{"role":"assistant","content":"hello","reasoning_details":[{"type":"reasoning.text","text":"part one "},{"type":"reasoning.summary","summary":"part two"},{"type":"reasoning.encrypted","data":"enc"}]}`)
 	if err := json.Unmarshal(body, &msg); err != nil {
@@ -114,6 +121,7 @@ func TestChatMessageInboundReasoningConcatenatesDetails(t *testing.T) {
 }
 
 func TestValidateChatAcceptsParallelToolCalls(t *testing.T) {
+	t.Parallel()
 	for _, strict := range []bool{false, true} {
 		var req ChatCompletionRequest
 		body := []byte(`{"model":"gpt-5","parallel_tool_calls":true,"messages":[{"role":"user","content":"hi"}]}`)
