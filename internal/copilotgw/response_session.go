@@ -102,10 +102,20 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 				if !req.ForceSynthetic {
 					g.log.Warn("falling back to synthetic Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", prepared.sessionID, "streaming", streaming, "error", err)
 				}
-				prepared.prompt = g.responseContinuationPrompt(*previousRecord, prepared.prompt)
 				prepared.sessionID = "resp_sdk_" + uuid.NewString()
 				prepared.pinReleases = append(prepared.pinReleases, g.store.PinSession(prepared.sessionID))
-				prepared.session, err = g.createSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
+				if hydrateErr := g.hydrateResponseContinuation(prepared.sessionID, req.Model, *previousRecord); hydrateErr != nil {
+					if g.log != nil {
+						g.log.Warn("falling back to a prose transcript for a cold Responses continuation", "previous_response_id", req.PreviousResponseID, "error", hydrateErr)
+					}
+					prepared.prompt = g.responseContinuationPrompt(*previousRecord, prepared.prompt)
+					prepared.session, err = g.createSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
+				} else {
+					// The chain now lives in the synthetic session's events, so the
+					// prompt carries only this request's own input.
+					prepared.prompt = responseContinuationFollowUp(prepared.prompt)
+					prepared.session, err = g.resumeSession(ctx, prepared.sessionID, req.Model, req.Instructions, reasoningEffort, prepared.rt, streaming, prepared.events)
+				}
 			}
 		} else {
 			prepared.sessionID = "resp_sdk_" + uuid.NewString()

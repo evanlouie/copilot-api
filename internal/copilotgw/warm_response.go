@@ -197,11 +197,20 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 			if g.log != nil && !req.ForceSynthetic {
 				g.log.Warn("falling back to synthetic warm Responses continuation", "previous_response_id", req.PreviousResponseID, "sdk_session_id", sessionID, "error", err)
 			}
-			prompt = g.responseContinuationPrompt(*previousRecord, prompt)
-			req.Input.Text = prompt.Text
 			sessionID = "resp_sdk_" + uuid.NewString()
 			earlySessionPin = g.store.PinSession(sessionID)
-			session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+			if hydrateErr := g.hydrateResponseContinuation(sessionID, req.Model, *previousRecord); hydrateErr != nil {
+				if g.log != nil {
+					g.log.Warn("falling back to a prose transcript for a cold warm Responses continuation", "previous_response_id", req.PreviousResponseID, "error", hydrateErr)
+				}
+				prompt = g.responseContinuationPrompt(*previousRecord, prompt)
+				req.Input.Text = prompt.Text
+				session, err = g.createSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+			} else {
+				// The chain replayed as session events, so the warm session's primed
+				// prompt stays exactly what the client sent.
+				session, err = g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, true, events)
+			}
 		}
 	} else {
 		sessionID = "resp_sdk_" + uuid.NewString()

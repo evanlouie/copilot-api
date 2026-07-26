@@ -138,10 +138,15 @@ limitations and intentional differences are:
   not retained or exposed as OpenAI files.
 - **Cold fallback is synthetic, not exact provider-state replay.** When a live
   Copilot SDK session or pending tool batch is unavailable after restart or TTL
-  expiry, the proxy reconstructs a continuation prompt from stored response
-  records, tool outputs, and installed tool catalogs. This preserves practical
-  continuity but is not byte-for-byte equivalent to resuming an opaque OpenAI
-  provider session.
+  expiry, the proxy rebuilds the conversation from stored response records, tool
+  outputs, and installed tool catalogs and replays it into a fresh SDK session as
+  real session events — the same mechanism Chat Completions uses — so the model
+  resumes onto genuine prior turns. Responses vocabulary that has no session
+  event (custom/tool-search calls and their outputs, loaded tool catalogs, and
+  function calls the client never answered) degrades to text on the neighbouring
+  message, and a chain that cannot be expressed as events at all falls back to a
+  prose transcript. Either way this preserves practical continuity but is not
+  byte-for-byte equivalent to resuming an opaque OpenAI provider session.
 - **Usage fields are best-effort.** SDK usage events are mapped when available;
   unavailable token counts are omitted or emitted as `null` in streaming usage
   chunks where the OpenAI wire shape requires it.

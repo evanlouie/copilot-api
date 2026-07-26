@@ -194,24 +194,13 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 	}()
 	return ch, nil
 }
+
+// responseContinuationPrompt flattens a record chain into a single prose
+// prompt. It is the degraded fallback for a cold continuation: hydration
+// (responseContinuationHistory) replays the same chain as real SDK session
+// events and is used whenever it can express the chain.
 func (g *RealGateway) responseContinuationPrompt(previous sessionstore.ResponseRecord, current resolvedPrompt) resolvedPrompt {
-	records := []sessionstore.ResponseRecord{previous}
-	seen := map[string]struct{}{previous.ID: {}}
-	for id := previous.PreviousResponseID; id != "" && len(records) < 20; {
-		if _, ok := seen[id]; ok {
-			break
-		}
-		seen[id] = struct{}{}
-		record, err := g.store.LoadResponseForContinuation(id)
-		if err != nil || record.Deleted {
-			break
-		}
-		records = append(records, record)
-		id = record.PreviousResponseID
-	}
-	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
-		records[i], records[j] = records[j], records[i]
-	}
+	records := g.responseContinuationChain(previous)
 
 	var b strings.Builder
 	b.WriteString("Conversation so far from previous_response_id context:\n\n")
