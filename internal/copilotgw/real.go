@@ -33,6 +33,10 @@ type RealGateway struct {
 	// modelsFetcher overrides the upstream model fetch. It is nil in production
 	// (the SDK client is used) and set by tests to observe refresh behavior.
 	modelsFetcher func(context.Context) ([]Model, error)
+	// sessionOpener overrides how SDK sessions are opened. It is nil in
+	// production (the SDK client is used) and set by tests so the gateway's turn
+	// machinery can run without a live Copilot CLI subprocess.
+	sessionOpener sdkSessionOpener
 	pending       *pendingRunnerRegistry
 	active        *activeRunnerRegistry
 	// warm tracks warm Responses sessions, which own a live SDK session and

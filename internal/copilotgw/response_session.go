@@ -13,7 +13,7 @@ import (
 )
 
 type preparedResponseTurn struct {
-	session     *copilot.Session
+	session     copilotSession
 	sessionID   string
 	previous    *string
 	rt          *toolproxy.RequestTools
@@ -58,7 +58,7 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 			prepared.events = warmUse.events
 			prepared.retained = warmUse.retained
 			prepared.previous = warmUse.previous
-			prepared.sessionID = warmUse.session.SessionID
+			prepared.sessionID = warmUse.session.ID()
 			prepared.catalog, err = toolcatalog.NewToolCatalog(req.Tools)
 			if err != nil {
 				_ = prepared.session.Disconnect()

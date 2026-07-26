@@ -66,7 +66,7 @@ type turnRunner struct {
 	id             string
 	model          string
 	ctx            context.Context
-	session        *copilot.Session
+	session        copilotSession
 	rt             *toolproxy.RequestTools
 	events         <-chan copilot.SessionEvent
 	retained       string
@@ -121,7 +121,7 @@ type responseParams struct {
 	store        bool
 }
 
-func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session *copilot.Session, rt *toolproxy.RequestTools, events *sessionEventSink, retained string, kind string, responseID string) *turnRunner {
+func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session copilotSession, rt *toolproxy.RequestTools, events *sessionEventSink, retained string, kind string, responseID string) *turnRunner {
 	if id == "" {
 		if kind == "response" {
 			id = openai.NewID("resp_")
@@ -146,7 +146,7 @@ func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, sessi
 	// to stop waiting on a runner that has finished (or never started).
 	events.attach(r.closed)
 	if g.store != nil && session != nil {
-		r.addPin(g.store.PinSession(session.SessionID))
+		r.addPin(g.store.PinSession(session.ID()))
 	}
 	if kind == "response" && responseID != "" && g.store != nil {
 		r.addPin(g.store.PinResponse(responseID))
@@ -732,7 +732,7 @@ func (r *turnRunner) sessionID() string {
 	if r.session == nil {
 		return ""
 	}
-	return r.session.SessionID
+	return r.session.ID()
 }
 
 type byteCounter int64
@@ -1084,7 +1084,7 @@ func (r *turnRunner) result(text, reasoning string, usage *openai.Usage, finish 
 	r.mu.Lock()
 	id := r.id
 	r.mu.Unlock()
-	return &TurnResult{ID: id, Created: r.created, Model: r.model, SDKSessionID: r.session.SessionID, Text: text, Reasoning: reasoning, Usage: usage, FinishReason: finish, RetainedPath: r.retained}
+	return &TurnResult{ID: id, Created: r.created, Model: r.model, SDKSessionID: r.sessionID(), Text: text, Reasoning: reasoning, Usage: usage, FinishReason: finish, RetainedPath: r.retained}
 }
 
 // usageFromSDK maps an SDK usage event onto the Chat usage object. The mapping

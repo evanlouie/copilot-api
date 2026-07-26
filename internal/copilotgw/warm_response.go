@@ -9,7 +9,6 @@ import (
 	"github.com/evanlouie/copilot-api/internal/sessionstore"
 	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
-	copilot "github.com/github/copilot-sdk/go"
 	"github.com/google/uuid"
 )
 
@@ -28,7 +27,7 @@ type WarmResponseSession struct {
 	previous        *string
 	store           bool
 	retained        string
-	session         *copilot.Session
+	session         copilotSession
 	rt              *toolproxy.RequestTools
 	events          *sessionEventSink
 	disconnected    bool
@@ -99,7 +98,7 @@ func (w *WarmResponseSession) Disconnect() {
 }
 
 type warmResponseUse struct {
-	session     *copilot.Session
+	session     copilotSession
 	tools       *toolproxy.RequestTools
 	events      *sessionEventSink
 	retained    string
@@ -218,7 +217,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		return nil, apierr.InvalidRequest(err.Error(), "tools")
 	}
 	events := newSessionEventSink(g.log)
-	var session *copilot.Session
+	var session copilotSession
 	var sessionID string
 	var previous *string
 	var earlySessionPin func()

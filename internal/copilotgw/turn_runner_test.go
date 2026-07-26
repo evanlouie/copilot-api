@@ -104,7 +104,7 @@ func TestTurnRunnerRejectsOversizedToolRequestPayload(t *testing.T) {
 		events:         events,
 		updates:        make(chan toolproxy.TurnFinalResult, 1),
 		closed:         make(chan struct{}),
-		session:        &copilot.Session{SessionID: "sdk"},
+		session:        &fakeSDKSession{runtime: &fakeSDKRuntime{}, id: "sdk"},
 	}
 	runner.abortOnce.Do(func() {})
 	go runner.loop(&RealGateway{})
@@ -128,7 +128,7 @@ func newLoopTestRunner(events <-chan copilot.SessionEvent, idleTimeout time.Dura
 		ctx:            context.Background(),
 		model:          "gpt-test",
 		kind:           "response",
-		session:        &copilot.Session{SessionID: "sdk_test"},
+		session:        &fakeSDKSession{runtime: &fakeSDKRuntime{}, id: "sdk_test"},
 		events:         events,
 		maxOutputBytes: config.DefaultMaxTurnOutputBytes,
 		idleTimeout:    idleTimeout,
@@ -370,7 +370,7 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := newSessionEventSink(nil)
-	session := &copilot.Session{SessionID: "sdk_test"}
+	session := &fakeSDKSession{runtime: &fakeSDKRuntime{}, id: "sdk_test"}
 	runner := (&RealGateway{}).newTurnRunner(context.Background(), "resp_initial", "gpt-test", session, rt, events, t.TempDir(), "response", "resp_initial")
 	runner.setCurrentResponseID("resp_continuation")
 	events.send(copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{{ToolCallID: "call_next", Name: "lookup", Arguments: map[string]any{"q": "alpha"}}}}})

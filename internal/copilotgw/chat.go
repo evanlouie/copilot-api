@@ -21,7 +21,7 @@ type preparedChatTurn struct {
 	final      resolvedPrompt
 	rt         *toolproxy.RequestTools
 	events     *sessionEventSink
-	session    *copilot.Session
+	session    copilotSession
 	pinRelease func()
 }
 

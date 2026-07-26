@@ -95,7 +95,7 @@ func (g *RealGateway) StreamContinueChatToolCalls(ctx context.Context, req ChatC
 			if result.PendingBatchID != "" {
 				g.rememberRunner(result.PendingBatchID, runner)
 			}
-			g.saveChatSessionMetadata(runner.session.SessionID, runner.retained, runner.model, result)
+			g.saveChatSessionMetadata(runner.sessionID(), runner.retained, runner.model, result)
 			return nil
 		})
 	}); err != nil {

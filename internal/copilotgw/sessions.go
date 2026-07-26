@@ -9,14 +9,79 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 )
 
-func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) (*copilot.Session, error) {
+// copilotSession is the slice of an SDK session this gateway actually drives.
+//
+// It exists so the gateway's turn machinery can be exercised without a live
+// Copilot CLI subprocess. *copilot.Session is a concrete struct whose transport
+// is an unexported jsonrpc2 client, so a test cannot construct one that does
+// anything: every method it has goes through that client. Nothing about the
+// call path changes - RealGateway still builds the same SessionConfig and still
+// receives events through the same OnEvent callback - only the static type of
+// the handle does.
+//
+// The id is exposed as ID() rather than a SessionID field because
+// *copilot.Session already has a field by that name, and a type cannot have
+// both. sdkSession below is the adapter that closes that gap.
+type copilotSession interface {
+	ID() string
+	Send(ctx context.Context, options copilot.MessageOptions) (string, error)
+	Abort(ctx context.Context) error
+	Disconnect() error
+}
+
+// sdkSession adapts a real *copilot.Session to copilotSession.
+type sdkSession struct{ *copilot.Session }
+
+func (s sdkSession) ID() string { return s.Session.SessionID }
+
+// sdkSessionOpener opens SDK sessions from a session config this gateway has
+// already built. It is the seam the fake in the tests plugs into; production
+// uses clientSessionOpener, a direct pass-through to *copilot.Client.
+type sdkSessionOpener interface {
+	CreateSession(ctx context.Context, cfg *copilot.SessionConfig) (copilotSession, error)
+	ResumeSession(ctx context.Context, sessionID string, cfg *copilot.ResumeSessionConfig) (copilotSession, error)
+}
+
+type clientSessionOpener struct{ client *copilot.Client }
+
+func (c clientSessionOpener) CreateSession(ctx context.Context, cfg *copilot.SessionConfig) (copilotSession, error) {
+	return wrapSDKSession(c.client.CreateSession(ctx, cfg))
+}
+
+func (c clientSessionOpener) ResumeSession(ctx context.Context, sessionID string, cfg *copilot.ResumeSessionConfig) (copilotSession, error) {
+	return wrapSDKSession(c.client.ResumeSession(ctx, sessionID, cfg))
+}
+
+// wrapSDKSession keeps "no session and no error" a nil interface. Wrapping a nil
+// *copilot.Session would produce a non-nil copilotSession and silently defeat
+// every `session == nil` guard the callers rely on.
+func wrapSDKSession(s *copilot.Session, err error) (copilotSession, error) {
+	if err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, nil
+	}
+	return sdkSession{s}, nil
+}
+
+// sessions resolves the SDK session opener, defaulting to the real client so
+// that gateways built as struct literals (which the tests do) still work.
+func (g *RealGateway) sessions() sdkSessionOpener {
+	if g.sessionOpener != nil {
+		return g.sessionOpener
+	}
+	return clientSessionOpener{client: g.client}
+}
+
+func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) (copilotSession, error) {
 	if err := g.fs.EnsureSession(sessionID); err != nil {
 		return nil, fmt.Errorf("ensure session fs: %w", err)
 	}
 	var lastErr error
 	for _, candidate := range openai.InstructionCandidates(instructions) {
 		cfg := g.newCreateSessionConfig(sessionID, model, candidate, reasoning, rt, streaming, events)
-		s, err := g.client.CreateSession(ctx, cfg)
+		s, err := g.sessions().CreateSession(ctx, cfg)
 		if err == nil {
 			return s, nil
 		}
@@ -24,14 +89,14 @@ func (g *RealGateway) createSession(ctx context.Context, sessionID, model, instr
 	}
 	return nil, lastErr
 }
-func (g *RealGateway) resumeSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) (*copilot.Session, error) {
+func (g *RealGateway) resumeSession(ctx context.Context, sessionID, model, instructions, reasoning string, rt *toolproxy.RequestTools, streaming bool, events *sessionEventSink) (copilotSession, error) {
 	if err := g.fs.EnsureSession(sessionID); err != nil {
 		return nil, fmt.Errorf("ensure session fs: %w", err)
 	}
 	var lastErr error
 	for _, candidate := range openai.InstructionCandidates(instructions) {
 		cfg := g.newResumeSessionConfig(model, candidate, reasoning, rt, streaming, events)
-		s, err := g.client.ResumeSession(ctx, sessionID, cfg)
+		s, err := g.sessions().ResumeSession(ctx, sessionID, cfg)
 		if err == nil {
 			return s, nil
 		}
