@@ -994,7 +994,7 @@ func newToolCallStream(call toolproxy.StreamingCall) *toolCallStream {
 	if call.Kind != toolcatalog.ToolKindFunction {
 		return &toolCallStream{}
 	}
-	item := &openai.ResponseOutputItem{ID: responseToolItemID(call.Kind, call.CallID), Type: "function_call", Status: "in_progress", CallID: call.CallID, Name: call.Name}
+	item := &openai.ResponseOutputItem{ID: responseToolItemID(call.Kind, call.CallID), Type: "function_call", Status: "in_progress", CallID: call.CallID, Namespace: call.Namespace, Name: call.Name}
 	return &toolCallStream{call: call, item: item}
 }
 

@@ -521,11 +521,14 @@ type UnenforceableStrictTool struct {
 }
 
 // StreamingCall is the client-visible identity of a tool call whose arguments
-// may be forwarded fragment by fragment, before the call itself exists.
+// may be forwarded fragment by fragment, before the call itself exists. It
+// carries everything the in-progress output item needs, because that item is
+// announced from here and has to match the one the finished turn produces.
 type StreamingCall struct {
-	CallID string
-	Kind   toolcatalog.ResponsesToolKind
-	Name   string
+	CallID    string
+	Kind      toolcatalog.ResponsesToolKind
+	Name      string
+	Namespace string
 }
 
 // ReserveStreamingCall decides whether a tool call's arguments may be streamed
@@ -567,12 +570,20 @@ func (rt *RequestTools) ReserveStreamingCall(sdkID, sdkName string, custom bool)
 	if call, ok := rt.reserved[sdkID]; ok {
 		return call, true
 	}
-	// A batch that already published a call under this id owns it. Copilot's
-	// backends emit low-entropy ids such as "call_1" (see ensureCall), so one can
-	// come round again inside a still-open batch - where ensureCall answers with
-	// the call it already minted and would ignore anything reserved here. The
-	// fragments would then accumulate under an id the client never receives.
-	if rt.batch != nil {
+	// A batch that is still open and already published a call under this id owns
+	// it. Copilot's backends emit low-entropy ids such as "call_1" (see
+	// ensureCall), so one can come round again inside the same batch - where
+	// ensureCall answers with the call it already minted and would ignore
+	// anything reserved here, leaving the fragments accumulating under an id the
+	// client never receives.
+	//
+	// The isOpen check is what keeps this from disabling streaming outright on
+	// those same backends. rt.batch is not cleared at a turn boundary, only
+	// replaced by the next CaptureRequests, so without it every turn after the
+	// first would still see turn one's completed batch holding "call_1" and
+	// decline. A closed batch cannot receive another call and has no claim on the
+	// id.
+	if rt.batch != nil && rt.batch.isOpen() {
 		if _, published := rt.batch.callBySDKID(sdkID); published {
 			return StreamingCall{}, false
 		}
@@ -595,7 +606,7 @@ func (rt *RequestTools) ReserveStreamingCall(sdkID, sdkName string, custom bool)
 	if name == "" {
 		name = sdkName
 	}
-	call := StreamingCall{CallID: "call_" + uuid.NewString(), Kind: kind, Name: name}
+	call := StreamingCall{CallID: "call_" + uuid.NewString(), Kind: kind, Name: name, Namespace: meta.Namespace}
 	if rt.reserved == nil {
 		rt.reserved = map[string]StreamingCall{}
 	}

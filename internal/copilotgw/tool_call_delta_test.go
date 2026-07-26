@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,14 +13,19 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 )
 
-// The acceptance criterion for streamed tool-call arguments is that they
-// reconcile with the call the client is finally handed. The payload here is
-// chosen to break a byte-wise test on purpose: toolproxy.rawArgs re-encodes the
-// SDK's decoded map[string]any, so encoding/json sorts the keys, escapes the
-// angle brackets and reformats the float. The fragments are the model's own
-// bytes and none of those normalizations apply to them, so the two agree as
-// JSON values and disagree as bytes - which is exactly the property the HTTP
-// layer's toolArgumentsSuffix has to be built on.
+// This is a premise test, not a regression guard for the reconciler. It proves
+// the thing toolArgumentsSuffix is built on: that a streamed fragment stream
+// and the finished arguments genuinely do diverge byte-wise. toolproxy.rawArgs
+// re-encodes the SDK's decoded map[string]any, so encoding/json sorts the keys,
+// escapes the angle brackets and reformats the float, while the fragments are
+// the model's own bytes that none of that applies to. The payload is chosen to
+// trip every one of those normalizations at once.
+//
+// The reconciler itself is guarded in internal/httpapi, by the
+// toolArgumentsSuffix table in stream_reconcile_test.go and by the two
+// end-to-end "...MatchOnlyAsJSON" stream tests. This test would still pass if
+// the reconciler regressed, because it compares the two sides with its own
+// sameJSON helper rather than calling it.
 //
 // The strict call in the same turn asserts the other half: strict arguments are
 // validated before the client sees them, so a fragment of one is a promise this
@@ -171,15 +175,21 @@ func TestToolCallDeltasWithoutAToolNameAreNotForwarded(t *testing.T) {
 
 // The Responses surface needs the item a fragment extends, and that item has to
 // be the same one the terminal response carries - otherwise the client is left
-// holding an item that never completes.
+// holding an item that never completes, or one whose identity changes under it
+// between `added` and `done`. The tool here is namespaced because `namespace`
+// is exactly the kind of field that is easy to set on the terminal item and
+// forget on the announced one.
 func TestToolCallDeltasAnnounceTheItemTheTerminalResponseCarries(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
+	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindNamespace, Name: "repo", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}},
+	}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	sdkName := rt.Tools()[0].Name
 	events := make(chan copilot.SessionEvent, 4)
 	runner, unpinned := newLoopTestRunner(events, time.Minute)
 	runner.rt = rt
@@ -188,11 +198,12 @@ func TestToolCallDeltasAnnounceTheItemTheTerminalResponseCarries(t *testing.T) {
 	runner.enableResponseStream(stream, nil)
 
 	go runner.loop(&RealGateway{})
-	events <- copilot.SessionEvent{Data: toolCallDelta("sdk_1", "lookup", `{"q":"alpha"}`)}
+	events <- copilot.SessionEvent{Data: toolCallDelta("sdk_1", sdkName, `{"q":"alpha"}`)}
 	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{
-		{ToolCallID: "sdk_1", Name: "lookup", Arguments: map[string]any{"q": "alpha"}},
+		{ToolCallID: "sdk_1", Name: sdkName, Arguments: map[string]any{"q": "alpha"}},
 	}}}
 
+	var announced *openai.ResponseOutputItem
 	var itemID, fragments string
 	var resp *openai.Response
 	for ev := range stream {
@@ -201,6 +212,7 @@ func TestToolCallDeltasAnnounceTheItemTheTerminalResponseCarries(t *testing.T) {
 			if ev.Item == nil || ev.Item.ID != ev.ItemID || ev.Item.Status != "in_progress" {
 				t.Fatalf("tool call delta item = %#v, want the in-progress item named by item_id", ev.Item)
 			}
+			announced = ev.Item
 			itemID = ev.ItemID
 			fragments += ev.Delta
 		case "response":
@@ -209,8 +221,8 @@ func TestToolCallDeltasAnnounceTheItemTheTerminalResponseCarries(t *testing.T) {
 			t.Fatalf("stream failed: %v", ev.Error)
 		}
 	}
-	if resp == nil {
-		t.Fatal("stream produced no terminal response")
+	if resp == nil || announced == nil {
+		t.Fatalf("stream produced response=%v announced=%v", resp != nil, announced != nil)
 	}
 	var found *openai.ResponseOutputItem
 	for i := range resp.Output {
@@ -221,11 +233,20 @@ func TestToolCallDeltasAnnounceTheItemTheTerminalResponseCarries(t *testing.T) {
 	if found == nil {
 		t.Fatalf("terminal output %#v does not contain the streamed item %q", resp.Output, itemID)
 	}
-	if !strings.HasPrefix(found.Type, "function_call") {
-		t.Fatalf("streamed item type = %q, want function_call", found.Type)
-	}
 	if fragments != found.Arguments {
 		t.Fatalf("accumulated fragments = %q, want the item's arguments %q", fragments, found.Arguments)
+	}
+	// Everything that identifies the item has to survive from `added` to `done`.
+	// Only the status and the arguments are allowed to differ, because those are
+	// what the fragments fill in.
+	settled := *announced
+	settled.Status = found.Status
+	settled.Arguments = found.Arguments
+	if !reflect.DeepEqual(settled, *found) {
+		t.Fatalf("announced item %#v does not settle into the terminal item %#v", *announced, *found)
+	}
+	if found.Namespace != "repo" {
+		t.Fatalf("terminal item namespace = %q, want repo; the test tool is no longer namespaced", found.Namespace)
 	}
 
 	runner.abort()
@@ -237,8 +258,10 @@ func toolCallDelta(sdkID, toolName, fragment string) *copilot.AssistantToolCallD
 	return &copilot.AssistantToolCallDeltaData{ToolCallID: sdkID, ToolName: &toolName, ToolType: &toolType, InputDelta: fragment}
 }
 
-// sameJSON reports whether two JSON texts denote the same value, which is the
-// equality the HTTP layer reconciles streamed tool arguments on.
+// sameJSON reports whether two JSON texts denote the same value. It duplicates
+// what httpapi.sameJSONValue does rather than sharing it, because this package
+// is establishing the premise that reconciler rests on, and must not depend on
+// the reconciler being correct.
 func sameJSON(t *testing.T, a, b string) bool {
 	t.Helper()
 	var left, right any
