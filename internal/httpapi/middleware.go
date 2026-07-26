@@ -43,9 +43,20 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 	}
 	return nil
 }
+
+// requestContext derives the context a handler's gateway work runs under.
+//
+// The returned CancelFunc is always a real one, even when no timeout is
+// configured (the default). Cancellation is the only signal that releases a
+// gateway producer, and on the WebSocket surface the parent is the connection
+// context, which outlives every individual response: a no-op cancel there leaks
+// the producer goroutine and its buffered channel until the client disconnects.
+// On SSE net/http happens to cancel the request context when the handler
+// returns, but relying on that makes the same call site correct on one
+// transport and wrong on the other.
 func requestContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
-		return parent, func() {}
+		return context.WithCancel(parent)
 	}
 	return context.WithTimeout(parent, timeout)
 }

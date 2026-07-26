@@ -231,7 +231,9 @@ func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, apierr.NotFound("response not found", "not_found"))
 		return
 	}
-	resp, err := s.gw.GetResponse(r.Context(), id)
+	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+	resp, err := s.gw.GetResponse(ctx, id)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -246,7 +248,9 @@ func (s *Server) deleteResponse(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, apierr.NotFound("response not found", "not_found"))
 		return
 	}
-	if err := s.gw.DeleteResponse(r.Context(), id); err != nil {
+	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
+	defer cancel()
+	if err := s.gw.DeleteResponse(ctx, id); err != nil {
 		WriteError(w, err)
 		return
 	}
