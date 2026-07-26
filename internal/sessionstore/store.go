@@ -565,6 +565,12 @@ func (s *Store) readResponseHeader(id string) (responseHeader, error) {
 	return header, nil
 }
 
+// wantedHeaderFields is how many keys decodeResponseHeader's switch below
+// recognises. It is what lets the decode stop early, so it must be kept in step
+// with that switch: too high and the decode never short-circuits, too low and
+// it stops before reading a field it needs.
+const wantedHeaderFields = 4
+
 func decodeResponseHeader(r io.Reader) (responseHeader, error) {
 	var header responseHeader
 	dec := json.NewDecoder(r)
@@ -610,9 +616,32 @@ func decodeResponseHeader(r io.Reader) (responseHeader, error) {
 			return header, err
 		}
 		seen++
-		if seen == 4 {
+		if seen == wantedHeaderFields {
+			// Every wanted field has been read, so the rest of the document cannot
+			// change the answer and is deliberately left unparsed. That early stop is
+			// the whole point of streaming: it finishes within the first few hundred
+			// bytes of a record of any size.
 			return header, nil
 		}
+	}
+	// Reaching here means the document was walked to its end without finding
+	// everything, so require that end to be well formed.
+	//
+	// json.Decoder.More swallows the reader's error and reports "no more values"
+	// identically for a document that closed and one whose reader died mid-way.
+	// Trusting it let a truncated record decode as a complete header carrying
+	// whatever prefix happened to survive, with a nil error. A tombstone
+	// truncated ahead of its "deleted" key therefore read as deleted:false, which
+	// passed SaveResponse's tombstone guard and resurrected a deleted response;
+	// truncation ahead of "sdk_session_id" left a stale retention link pinning a
+	// session forever. Consuming the closing brace is what separates the two
+	// cases, and it is free here because this path already read to EOF.
+	closing, err := dec.Token()
+	if err != nil {
+		return header, err
+	}
+	if delim, ok := closing.(json.Delim); !ok || delim != '}' {
+		return header, fmt.Errorf("expected the record object to close, got %v", closing)
 	}
 	return header, nil
 }
