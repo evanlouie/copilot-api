@@ -18,6 +18,7 @@ import (
 
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 )
 
@@ -38,6 +39,101 @@ type ClientTool struct {
 	Strict       *bool
 	DeferLoading *bool
 	Execution    string
+
+	// strictSchema is the compiled form of Parameters, present only when the
+	// client asked for strict: true. It is what makes strict mean something here:
+	// see validateStrictArguments.
+	strictSchema *jsonschema.Resolved
+}
+
+// strictEnabled reports whether the client asked for schema-constrained
+// arguments on this tool.
+func (t ClientTool) strictEnabled() bool { return t.Strict != nil && *t.Strict }
+
+// deferMode maps the OpenAI/Copilot `defer_loading` flag onto the SDK's tool
+// deferral control. The SDK honours copilot.Tool.Defer, so the flag is forwarded
+// rather than dropped: true asks for lazy loading through tool search, false
+// asks for the tool to always be pre-loaded, and an absent flag leaves the
+// runtime's own choice alone.
+func (t ClientTool) deferMode() copilot.ToolDefer {
+	if t.DeferLoading == nil {
+		return ""
+	}
+	if *t.DeferLoading {
+		return copilot.ToolDeferAuto
+	}
+	return copilot.ToolDeferNever
+}
+
+// resolveStrictSchema compiles a strict tool's declared parameters so the
+// arguments the model emits can be checked against them. A strict tool whose
+// schema cannot be compiled is rejected at request time, which is what OpenAI
+// does with a strict function tool it cannot honour: failing now is far better
+// than discovering mid-turn that the guarantee was never enforceable.
+func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, error) {
+	if !t.strictEnabled() {
+		return nil, nil
+	}
+	// A freeform custom tool describes its input with a grammar in `format`, not
+	// with a JSON Schema, and this proxy hands the SDK a synthetic single-string
+	// schema for it. There is therefore nothing client-declared to constrain, so
+	// strict is refused here rather than checked against a schema the client never
+	// wrote.
+	if t.ResponseKind == toolcatalog.ToolKindCustom {
+		return nil, strictSchemaError(t.ResponseName, "are freeform: a custom tool declares its input with `format`, which cannot be schema-constrained")
+	}
+	raw, err := json.Marshal(t.Parameters)
+	if err != nil {
+		return nil, strictSchemaError(t.ResponseName, "cannot be encoded: "+err.Error())
+	}
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil, strictSchemaError(t.ResponseName, "are not a usable JSON Schema: "+err.Error())
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return nil, strictSchemaError(t.ResponseName, "are not a usable JSON Schema: "+err.Error())
+	}
+	return resolved, nil
+}
+
+func strictSchemaError(toolName, problem string) error {
+	if toolName == "" {
+		return apierr.InvalidRequest("a tool sets strict: true but its parameters "+problem, "tools")
+	}
+	return apierr.InvalidRequest(fmt.Sprintf("tool %q sets strict: true but its parameters %s", toolName, problem), "tools")
+}
+
+// errStrictArguments is returned when the model emits arguments that do not
+// satisfy a strict tool's declared schema.
+var errStrictArguments = errors.New("strict tool arguments did not match the declared schema")
+
+// validateStrictArguments is where strict: true stops being decoration. The
+// Copilot SDK exposes no constrained-decoding control (copilot.Tool carries a
+// name, a description, parameters, a defer mode and a handler, and nothing that
+// bounds the model's output), so the guarantee OpenAI provides by construction
+// is provided here by refusing to hand the client a call that does not satisfy
+// the schema it declared. A client that sets strict: true and skips its own
+// validation - which is the entire point of setting it - never sees arguments
+// this proxy could not verify.
+//
+// The refusal is deliberate rather than a retry: this proxy does not own the
+// model's decoding loop, so the honest outcome is an explicit failure naming
+// the tool, not a silently different call.
+func validateStrictArguments(meta ClientTool, args json.RawMessage) error {
+	if meta.strictSchema == nil {
+		return nil
+	}
+	var instance any
+	if len(args) == 0 {
+		instance = map[string]any{}
+	} else if err := json.Unmarshal(args, &instance); err != nil {
+		return fmt.Errorf("%w: tool %q emitted arguments that are not valid JSON: %v", errStrictArguments, meta.ResponseName, err)
+	}
+	if err := meta.strictSchema.Validate(instance); err != nil {
+		return fmt.Errorf("%w: tool %q: %v", errStrictArguments, meta.ResponseName, err)
+	}
+	return nil
 }
 
 type CapturedCall struct {
@@ -238,6 +334,11 @@ func newRequestToolsFromClientTools(broker *Broker, clientTools []ClientTool, ch
 		if _, exists := rt.client[ct.SDKName]; exists {
 			return nil, fmt.Errorf("duplicate SDK tool name %q", ct.SDKName)
 		}
+		strictSchema, err := ct.resolveStrictSchema()
+		if err != nil {
+			return nil, err
+		}
+		ct.strictSchema = strictSchema
 		rt.client[ct.SDKName] = ct
 		rt.permitted[ct.SDKName] = struct{}{}
 		ctCopy := ct
@@ -246,6 +347,7 @@ func newRequestToolsFromClientTools(broker *Broker, clientTools []ClientTool, ch
 			Description:          ct.Description,
 			Parameters:           ct.Parameters,
 			OverridesBuiltInTool: true,
+			Defer:                ct.deferMode(),
 			Handler: func(inv copilot.ToolInvocation) (copilot.ToolResult, error) {
 				inv.ToolName = ctCopy.SDKName
 				return rt.handleInvocation(inv)
@@ -276,6 +378,13 @@ func FlattenResponsesTools(tools []toolcatalog.NormalizedTool) ([]ClientTool, er
 		case toolcatalog.ToolKindNamespace:
 			for _, child := range tool.Children {
 				child.Namespace = tool.Name
+				// The namespace is what the client asked to defer, and the namespace
+				// does not survive flattening, so its flag has to travel with the
+				// children that replace it. A child that states its own preference
+				// keeps it.
+				if child.DeferLoading == nil {
+					child.DeferLoading = tool.DeferLoading
+				}
 				ct, err := clientToolFromNormalized(child, tool.Name)
 				if err != nil {
 					return nil, err
@@ -494,6 +603,9 @@ func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolReque
 		if req.Type != nil && string(*req.Type) == "custom" && meta.ResponseKind == toolcatalog.ToolKindFunction {
 			meta.ResponseKind = toolcatalog.ToolKindCustom
 		}
+		if err := validateStrictArguments(meta, args); err != nil {
+			return nil, nil, err
+		}
 		input := ""
 		if meta.ResponseKind == toolcatalog.ToolKindCustom {
 			input = customInput(req.Arguments, args)
@@ -517,6 +629,10 @@ func (rt *RequestTools) handleInvocation(inv copilot.ToolInvocation) (copilot.To
 	if !ok {
 		rt.mu.Unlock()
 		return copilot.ToolResult{}, fmt.Errorf("unconfigured SDK tool invocation %q", inv.ToolName)
+	}
+	if err := validateStrictArguments(meta, args); err != nil {
+		rt.mu.Unlock()
+		return copilot.ToolResult{}, err
 	}
 	input := ""
 	if meta.ResponseKind == toolcatalog.ToolKindCustom {
