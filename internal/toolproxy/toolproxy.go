@@ -66,8 +66,22 @@ func NewBroker(ttl time.Duration) *Broker {
 	return &Broker{batches: map[string]*Batch{}, byCall: map[string]*Batch{}, ttl: ttl}
 }
 
+// Register makes batch reachable by its call ids and arranges for the broker to
+// forget it when it closes.
+//
+// Register is called once by CaptureRequests and again by every
+// handleInvocation, so an N-tool turn registers the same batch N+1 times.
+// Registration is idempotent, and removal is scheduled by binding the broker to
+// the batch rather than by appending a hook: a field holds one broker, so
+// "remove exactly once" is a property of the structure and not of how carefully
+// callers count their Register calls.
 func (b *Broker) Register(batch *Batch) {
-	batch.OnExpire(func(expired *Batch) { b.Remove(expired) })
+	if !batch.bindBroker(b) {
+		// The batch closed before this registration, so its close has already run
+		// and will not run again. Drop any lookup entries it still owns here.
+		b.Remove(batch)
+		return
+	}
 	if !batch.isOpen() {
 		return
 	}
@@ -582,6 +596,10 @@ type Batch struct {
 	completed   bool
 	timer       *time.Timer
 	expireHooks []func(*Batch)
+	// broker is the broker that must forget this batch when it closes. It is a
+	// single field rather than one expiry hook per Register call, which is what
+	// keeps closing an N-tool turn linear in N instead of quadratic.
+	broker *Broker
 }
 
 func newBatch(ttl time.Duration, responseID string, kind string, model string, done <-chan TurnFinalResult, abort func(), parent context.Context) *Batch {
@@ -625,6 +643,25 @@ func (b *Batch) Context() context.Context {
 	return b.ctx
 }
 
+// bindBroker records the broker that must forget this batch when it closes.
+// Re-binding the same broker is the normal case (every handleInvocation
+// registers again) and costs nothing.
+//
+// It reports false when the batch has already closed: close has run, so nothing
+// this call records would ever be acted on, and the caller must clean up
+// directly instead.
+func (b *Batch) bindBroker(broker *Broker) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.expired {
+		return false
+	}
+	b.broker = broker
+	return true
+}
+
+// OnExpire registers an additional close callback. Broker removal does not go
+// through here; see Batch.broker.
 func (b *Batch) OnExpire(hook func(*Batch)) {
 	if hook == nil {
 		return
@@ -751,6 +788,7 @@ func (b *Batch) closeBatch(err error, runAbort bool) {
 	}
 	abort := b.abort
 	cancel := b.cancel
+	broker := b.broker
 	hooks := append([]func(*Batch){}, b.expireHooks...)
 	b.mu.Unlock()
 	for _, call := range calls {
@@ -761,6 +799,9 @@ func (b *Batch) closeBatch(err error, runAbort bool) {
 	}
 	if runAbort && abort != nil {
 		abort()
+	}
+	if broker != nil {
+		broker.Remove(b)
 	}
 	for _, hook := range hooks {
 		hook(b)
