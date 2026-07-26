@@ -102,8 +102,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	s.mux.HandleFunc("POST /v1/responses", s.responses)
 	s.mux.HandleFunc("GET /v1/responses", s.responsesWebSocket)
-	s.mux.HandleFunc("GET /v1/responses/", s.getResponse)
-	s.mux.HandleFunc("DELETE /v1/responses/", s.deleteResponse)
+	// Wildcard patterns rather than a /v1/responses/ subtree: ServeMux matches on
+	// the escaped path, so {id} is the only way a handler can be handed the
+	// segment that was actually routed instead of re-deriving one from the
+	// decoded path.
+	s.mux.HandleFunc("GET /v1/responses/{id}", s.getResponse)
+	s.mux.HandleFunc("DELETE /v1/responses/{id}", s.deleteResponse)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC().Format(time.RFC3339Nano)})

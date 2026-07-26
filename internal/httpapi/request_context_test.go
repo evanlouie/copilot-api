@@ -152,3 +152,45 @@ func TestStoredResponseHandlersApplyTheRequestTimeout(t *testing.T) {
 		t.Fatal("deleteResponse passed the gateway a context with no deadline despite RequestTimeout")
 	}
 }
+
+// idCaptureGateway records whatever response id the transport handed it.
+type idCaptureGateway struct {
+	copilotgw.Gateway
+	sawID string
+}
+
+func (g *idCaptureGateway) GetResponse(_ context.Context, id string) (*openai.Response, error) {
+	g.sawID = id
+	return nil, apierr.NotFound("response not found", "not_found")
+}
+
+func (g *idCaptureGateway) DeleteResponse(_ context.Context, id string) error {
+	g.sawID = id
+	return apierr.NotFound("response not found", "not_found")
+}
+
+// The stored-response handlers used to slice the id out of r.URL.Path, which is
+// the *decoded* path, while ServeMux routes on EscapedPath. That let a
+// percent-encoded traversal segment through to the gateway, where only
+// sessionstore.safeName stopped it — an invariant the transport does not own.
+func TestStoredResponseHandlersRejectIDsTheProxyCannotHaveMinted(t *testing.T) {
+	for _, path := range []string{
+		"/v1/responses/%2E%2E",
+		"/v1/responses/resp_%2E%2E",
+		"/v1/responses/resp_%2E%2E%2E",
+		"/v1/responses/notaresponse",
+		"/v1/responses/resp_has%20space",
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodDelete} {
+			gateway := &idCaptureGateway{}
+			rec := httptest.NewRecorder()
+			New(config.Config{}, gateway, slog.Default()).Handler().ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s %s status = %d, want 400: %s", method, path, rec.Code, rec.Body.String())
+			}
+			if gateway.sawID != "" {
+				t.Fatalf("%s %s reached the gateway as id %q", method, path, gateway.sawID)
+			}
+		}
+	}
+}

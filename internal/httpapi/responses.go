@@ -2,8 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
@@ -237,10 +237,36 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 	}
 }
+
+// responsePathID reads the response id out of the routed path segment.
+//
+// ServeMux routes on r.URL.EscapedPath(), so an id must be taken from what the
+// pattern actually matched. Slicing it out of r.URL.Path instead reads the
+// decoded path, which means a segment the pattern never saw — %2E%2E, say —
+// arrives at the gateway looking like an ordinary id, and the transport ends up
+// relying on sessionstore.safeName, an invariant it does not own, to be safe.
+func responsePathID(r *http.Request) (string, error) {
+	id := r.PathValue("id")
+	if openai.ValidResponseID(id) {
+		return id, nil
+	}
+	return "", apierr.InvalidRequest(fmt.Sprintf("Invalid 'response_id': '%s'. Expected an ID that begins with '%s'.", boundedID(id), openai.ResponseIDPrefix), "response_id")
+}
+
+// boundedID caps what a rejected id contributes to an error message, so a
+// multi-kilobyte path segment cannot be echoed back in full.
+func boundedID(id string) string {
+	const max = 64
+	if len(id) <= max {
+		return id
+	}
+	return id[:max] + "\u2026"
+}
+
 func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")
-	if id == "" || strings.Contains(id, "/") {
-		WriteError(w, apierr.NotFound("response not found", "not_found"))
+	id, err := responsePathID(r)
+	if err != nil {
+		WriteError(w, err)
 		return
 	}
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
@@ -255,9 +281,9 @@ func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filterResponseReasoning(resp, s.suppressReasoning()))
 }
 func (s *Server) deleteResponse(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")
-	if id == "" || strings.Contains(id, "/") {
-		WriteError(w, apierr.NotFound("response not found", "not_found"))
+	id, err := responsePathID(r)
+	if err != nil {
+		WriteError(w, err)
 		return
 	}
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)

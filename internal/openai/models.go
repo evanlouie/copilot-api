@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,25 @@ const (
 
 func NewID(prefix string) string { return prefix + uuid.NewString() }
 func UnixNow() int64             { return time.Now().Unix() }
+
+// ResponseIDPrefix is the prefix every response id this proxy mints carries.
+// Every mint goes through NewID(ResponseIDPrefix); see the call sites in
+// internal/httpapi and internal/copilotgw.
+const ResponseIDPrefix = "resp_"
+
+// responseIDRE is the grammar NewID(ResponseIDPrefix) can produce: the fixed
+// prefix followed by a UUID. The body is matched as a character class rather
+// than parsed as a UUID so a future change to the id body does not silently
+// start rejecting live ids, but the class is deliberately the URL-safe one —
+// no dot and no slash — which makes an id that satisfies it incapable of
+// naming anything but itself on disk, independently of what sessionstore does
+// with it.
+var responseIDRE = regexp.MustCompile(`^` + ResponseIDPrefix + `[A-Za-z0-9_-]{1,128}$`)
+
+// ValidResponseID reports whether id has the shape this proxy mints. It is the
+// grammar the transport validates a path segment against; nothing else can
+// name a stored response.
+func ValidResponseID(id string) bool { return responseIDRE.MatchString(id) }
 
 type ModelList struct {
 	Object string  `json:"object"`
