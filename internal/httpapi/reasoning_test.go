@@ -58,11 +58,9 @@ func (g *reasoningChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest
 
 type reasoningResponseGateway struct {
 	copilotgw.Gateway
-	got copilotgw.ResponseRequest
 }
 
 func (g *reasoningResponseGateway) CreateResponse(_ context.Context, req copilotgw.ResponseRequest) (*copilotgw.ResponseResult, error) {
-	g.got = req
 	turn := &copilotgw.TurnResult{Text: "answer", Reasoning: "thinking", ReasoningEncrypted: "enc-blob", ReasoningID: "rid-1"}
 	resp := &openai.Response{
 		ID:                req.ResponseID,
@@ -302,9 +300,6 @@ func TestResponsesNonStreamingReasoningEmissionOffSuppressesReasoning(t *testing
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
-	}
-	if !gw.got.SuppressReasoning {
-		t.Fatal("Responses gateway request should suppress reasoning when policy is off")
 	}
 	var resp openai.Response
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {

@@ -112,13 +112,12 @@ type turnRunner struct {
 // produces. It is set before the turn can complete and is the only input
 // responseFromTurn takes besides the turn itself.
 type responseParams struct {
-	id                string
-	created           int64
-	model             string
-	instructions      string
-	previous          *string
-	store             bool
-	suppressReasoning bool
+	id           string
+	created      int64
+	model        string
+	instructions string
+	previous     *string
+	store        bool
 }
 
 func (g *RealGateway) newTurnRunner(ctx context.Context, id, model string, session *copilot.Session, rt *toolproxy.RequestTools, events *sessionEventSink, retained string, kind string, responseID string) *turnRunner {
@@ -1152,10 +1151,12 @@ func responseFromTurn(p responseParams, turn *TurnResult) *openai.Response {
 		created = openai.UnixNow()
 	}
 	resp := &openai.Response{ID: id, Object: openai.ObjectResponse, CreatedAt: created, Status: "completed", Model: p.model, Instructions: p.instructions, Output: []openai.ResponseOutputItem{}, OutputText: turn.Text, ParallelToolCalls: true, PreviousResponseID: p.previous, Store: p.store, Usage: openai.NewResponseUsage(turn.Usage), Error: nil, IncompleteDetails: nil}
-	if !p.suppressReasoning {
-		if item, ok := reasoningOutputItem(turn); ok {
-			resp.Output = append(resp.Output, item)
-		}
+	// The response is always built complete. Reasoning-emission policy is a
+	// presentation concern applied at the edge (internal/httpapi), never here:
+	// this object is also the persisted record, so filtering it would make an
+	// operator's current display preference permanently destroy stored data.
+	if item, ok := reasoningOutputItem(turn); ok {
+		resp.Output = append(resp.Output, item)
 	}
 	calls := turn.ResponseToolCalls
 	if len(calls) == 0 && len(turn.ToolCalls) > 0 {

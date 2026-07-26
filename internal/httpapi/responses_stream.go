@@ -85,7 +85,11 @@ func writeWarmResponseEvents(writer responseEventWriter, resp *openai.Response) 
 // openai.Response, assigns its output-item IDs before the first delta carries
 // them here, and persists that same object. This function only decides which
 // lifecycle events describe it.
-func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, req copilotgw.ResponseRequest, maxOutputBytes int64, ch <-chan copilotgw.ResponseStreamEvent) responseStreamWriteResult {
+//
+// suppressReasoning is the server's reasoning-emission policy. It is a pure
+// rendering filter: it drops reasoning from the events and from the terminal
+// response copy this function writes, and never touches the gateway's object.
+func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, req copilotgw.ResponseRequest, maxOutputBytes int64, suppressReasoning bool, ch <-chan copilotgw.ResponseStreamEvent) responseStreamWriteResult {
 	writer = newResponseStreamEncoder(writer)
 	if _, err := writeResponseLifecycleStart(writer, req, "in_progress"); err != nil {
 		return responseStreamWriteResult{Err: err, WriteFailed: true}
@@ -345,7 +349,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 			}
 			switch ev.Kind {
 			case "reasoning_delta":
-				if req.SuppressReasoning {
+				if suppressReasoning {
 					continue
 				}
 				if ev.Delta == "" {
@@ -404,8 +408,10 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 				// Reasoning-emission filtering is the one presentation concern
 				// applied at the edge: it hides reasoning items the operator asked
-				// not to emit without changing anything the gateway stored.
-				ev.Response = filterResponseReasoning(ev.Response, req.SuppressReasoning)
+				// not to emit without changing anything the gateway stored. The
+				// gateway memoises one response object per turn, so this must never
+				// filter in place - see filterResponseReasoning.
+				ev.Response = filterResponseReasoning(ev.Response, suppressReasoning)
 				if err := reconcileStreamedReasoning(ev.Response); err != nil {
 					return writeFailure(err)
 				}
@@ -540,6 +546,10 @@ func finalReasoningItem(resp *openai.Response) (openai.ResponseOutputItem, bool)
 	return openai.ResponseOutputItem{}, false
 }
 
+// filterResponseReasoning renders resp without its reasoning items. It is
+// copy-on-write on purpose: the gateway memoises a single *openai.Response per
+// turn and persists that same object, so filtering in place would let a display
+// preference destroy stored data. The caller's response is never modified.
 func filterResponseReasoning(resp *openai.Response, suppress bool) *openai.Response {
 	if !suppress || resp == nil {
 		return resp

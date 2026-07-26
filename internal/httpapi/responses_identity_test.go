@@ -395,7 +395,7 @@ func TestResponseStreamRejectsDeltaWithoutGatewayItemID(t *testing.T) {
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", Delta: "answer"}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_no_id", Model: "gpt-5"}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_no_id", Model: "gpt-5"}, 0, false, channel)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "missing its output item id") {
 		t.Fatalf("result = %#v, want a missing item id failure", result)
 	}
@@ -419,7 +419,7 @@ func TestResponseStreamRejectsRenamedTerminalMessageItem(t *testing.T) {
 	}}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_renamed", Model: "gpt-5"}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_renamed", Model: "gpt-5"}, 0, false, channel)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "does not match the streamed item") {
 		t.Fatalf("result = %#v, want a terminal item id mismatch failure", result)
 	}

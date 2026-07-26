@@ -225,7 +225,7 @@ func TestPrematureResponseStreamClosureEmitsFailure(t *testing.T) {
 	channel := make(chan copilotgw.ResponseStreamEvent)
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_closed", Model: "gpt-5"}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_closed", Model: "gpt-5"}, 0, false, channel)
 	if result.Err == nil || result.WriteFailed || !result.FailureWritten {
 		t.Fatalf("result = %#v, want emitted upstream failure", result)
 	}
@@ -253,7 +253,7 @@ func TestResponseStreamReconcilesTerminalReasoningAfterSummaryDone(t *testing.T)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, false, channel)
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -281,7 +281,7 @@ func TestResponseStreamDeadlineClosesPartialItemsAndUsesTimeoutError(t *testing.
 	channel := make(chan copilotgw.ResponseStreamEvent, 1)
 	channel <- copilotgw.ResponseStreamEvent{Kind: "delta", ItemID: "msg_timeout", Delta: "partial"}
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(ctx, writer, copilotgw.ResponseRequest{ResponseID: "resp_timeout", Model: "gpt-5"}, 1024, channel)
+	result := writeResponseStreamEvents(ctx, writer, copilotgw.ResponseRequest{ResponseID: "resp_timeout", Model: "gpt-5"}, 1024, false, channel)
 	if result.Err == nil || result.WriteFailed || !result.FailureWritten {
 		t.Fatalf("result = %#v, want emitted timeout failure", result)
 	}
@@ -304,7 +304,7 @@ func TestResponseStreamClientCancellationDoesNotAttemptTerminalFrame(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(ctx, writer, copilotgw.ResponseRequest{ResponseID: "resp_cancel", Model: "gpt-5"}, 0, make(chan copilotgw.ResponseStreamEvent))
+	result := writeResponseStreamEvents(ctx, writer, copilotgw.ResponseRequest{ResponseID: "resp_cancel", Model: "gpt-5"}, 0, false, make(chan copilotgw.ResponseStreamEvent))
 	if !errors.Is(result.Err, context.Canceled) || !result.WriteFailed {
 		t.Fatalf("result = %#v", result)
 	}
@@ -322,7 +322,7 @@ func TestResponseStreamStopsAfterCompletedResponse(t *testing.T) {
 	channel <- copilotgw.ResponseStreamEvent{Kind: "error", Error: apierr.Upstream("late")}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, false, channel)
 	if result.Err != nil || result.Response != response {
 		t.Fatalf("result = %#v", result)
 	}
@@ -340,7 +340,7 @@ func TestResponseStreamEmitsTerminalTextSuffix(t *testing.T) {
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, false, channel)
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -368,7 +368,7 @@ func TestResponseStreamAcceptsMultiMessageTurnTerminalText(t *testing.T) {
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, false, channel)
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -398,7 +398,7 @@ func TestResponseStreamRejectsTerminalTextMissingStreamedContent(t *testing.T) {
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, false, channel)
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "terminal text does not match streamed content") {
 		t.Fatalf("result = %#v, want a terminal text mismatch failure", result)
 	}
@@ -424,7 +424,7 @@ func TestTerminalOnlyResponseHonorsStreamOutputLimit(t *testing.T) {
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 4, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 4, false, channel)
 	if result.Err == nil || !result.FailureWritten || writer.events[len(writer.events)-1].Type != "response.failed" {
 		t.Fatalf("result=%#v events=%#v", result, writer.events)
 	}
@@ -436,7 +436,7 @@ func TestTerminalOnlyResponseMessageHasCompleteLifecycle(t *testing.T) {
 	channel <- copilotgw.ResponseStreamEvent{Kind: "response", Response: response}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: response.ID, Model: response.Model}, 0, false, channel)
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -479,7 +479,7 @@ func TestContentFirstTerminalReasoningHasCompleteLifecycle(t *testing.T) {
 	}}
 	close(channel)
 	writer := &captureResponseEventWriter{}
-	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_reasoning", Model: "gpt-5"}, 0, channel)
+	result := writeResponseStreamEvents(context.Background(), writer, copilotgw.ResponseRequest{ResponseID: "resp_reasoning", Model: "gpt-5"}, 0, false, channel)
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}

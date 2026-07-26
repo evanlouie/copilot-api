@@ -15,7 +15,7 @@ func TestResponseFromTurnRehydratesExtendedToolCallItems(t *testing.T) {
 		{Kind: toolcatalog.ToolKindCustom, CallID: "call_patch", ResponseName: "apply_patch", Input: "*** Begin Patch\n*** End Patch"},
 		{Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", ArgumentsJSON: json.RawMessage(`{"query":"grep"}`)},
 	}}
-	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-test", store: true, suppressReasoning: false}, turn)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-test", store: true}, turn)
 	if len(resp.Output) != 4 {
 		t.Fatalf("output = %#v, want four tool items", resp.Output)
 	}

@@ -38,7 +38,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	// WebSocket serialize, folded back into a response. It is not an independent
 	// rendering of the gateway result.
 	folder := &foldingResponseEventWriter{}
-	result := foldResponseResult(ctx, folder, gwReq, s.cfg.MaxTurnOutputBytes, res)
+	result := foldResponseResult(ctx, folder, gwReq, s.cfg.MaxTurnOutputBytes, s.suppressReasoning(), res)
 	if result.Err != nil {
 		WriteError(w, result.Err)
 		return
@@ -53,11 +53,20 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 // foldResponseResult replays a non-streaming gateway result through the shared
 // Responses event sequence so the JSON body, the SSE stream and the WebSocket
 // stream all describe the turn the same way.
-func foldResponseResult(ctx context.Context, writer responseEventWriter, req copilotgw.ResponseRequest, maxOutputBytes int64, res *copilotgw.ResponseResult) responseStreamWriteResult {
+func foldResponseResult(ctx context.Context, writer responseEventWriter, req copilotgw.ResponseRequest, maxOutputBytes int64, suppressReasoning bool, res *copilotgw.ResponseResult) responseStreamWriteResult {
 	ch := make(chan copilotgw.ResponseStreamEvent, 1)
 	ch <- copilotgw.ResponseStreamEvent{Kind: "response", Response: res.Response}
 	close(ch)
-	return writeResponseStreamEvents(ctx, writer, req, maxOutputBytes, ch)
+	return writeResponseStreamEvents(ctx, writer, req, maxOutputBytes, suppressReasoning, ch)
+}
+
+// suppressReasoning reports whether the configured reasoning-emission policy
+// hides reasoning from what this server writes. It is deliberately resolved
+// here and nowhere deeper: the gateway always builds and persists a complete
+// response, so this is a per-request rendering decision that can be flipped at
+// any time without rewriting history.
+func (s *Server) suppressReasoning() bool {
+	return !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled()
 }
 
 type preparedResponseLogFields struct {
@@ -185,7 +194,6 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 		DefaultReasoningEffort:             s.cfg.DefaultReasoningEffort,
 		ResolvedReasoningEffort:            resolvedEffort,
 		ReasoningEffortResolved:            resolved,
-		SuppressReasoning:                  !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled(),
 	}
 	return gwReq, preparedResponseLogFields{reasoningEffort: reasoningEffort, resolvedEffort: resolvedEffort, resolved: resolved, continuation: continuation}, nil
 }
@@ -212,7 +220,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 			_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 		}
 	})
-	result := writeResponseStreamEvents(ctx, responseWriter, req, s.cfg.MaxTurnOutputBytes, ch)
+	result := writeResponseStreamEvents(ctx, responseWriter, req, s.cfg.MaxTurnOutputBytes, s.suppressReasoning(), ch)
 	if !result.WriteFailed {
 		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
 	}
@@ -228,7 +236,9 @@ func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, filterResponseReasoning(resp, !openai.ResolveReasoningEmission(s.cfg.ReasoningEmission).Enabled()))
+	// Stored records are complete; the emission policy only decides what this
+	// read renders, so it is applied here and never on the way in.
+	writeJSON(w, http.StatusOK, filterResponseReasoning(resp, s.suppressReasoning()))
 }
 func (s *Server) deleteResponse(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")

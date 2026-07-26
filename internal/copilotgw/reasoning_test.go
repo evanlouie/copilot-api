@@ -44,7 +44,7 @@ func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 		ReasoningID:        "rid-7",
 		FinishReason:       "stop",
 	}
-	resp := responseFromTurn(responseParams{id: "resp_1", model: "claude-sonnet-4.6", store: true, suppressReasoning: false}, turn)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "claude-sonnet-4.6", store: true}, turn)
 	if len(resp.Output) != 2 {
 		t.Fatalf("output length = %d, want reasoning + message: %#v", len(resp.Output), resp.Output)
 	}
@@ -62,7 +62,7 @@ func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 
 func TestResponseFromTurnWithoutReasoningHasNoReasoningItem(t *testing.T) {
 	turn := &TurnResult{Text: "hi", FinishReason: "stop"}
-	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true, suppressReasoning: false}, turn)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true}, turn)
 	for _, item := range resp.Output {
 		if item.Type == "reasoning" {
 			t.Fatalf("unexpected reasoning item: %#v", resp.Output)
@@ -70,16 +70,21 @@ func TestResponseFromTurnWithoutReasoningHasNoReasoningItem(t *testing.T) {
 	}
 }
 
-func TestResponseFromTurnSuppressesReasoningItem(t *testing.T) {
+// TestResponseFromTurnAlwaysIncludesReasoningItem pins the durable half of the
+// reasoning-emission split: responseFromTurn builds the object that is both
+// returned and persisted, so it always carries the turn's reasoning. Hiding
+// reasoning is the edge's job - see the wire-level coverage in
+// internal/httpapi (TestResponsesNonStreamingReasoningEmissionOffSuppressesReasoning,
+// TestResponsesStreamReasoningEmissionOffSuppressesReasoning and
+// TestReasoningEmissionOffFiltersStoredRecordOnRead).
+func TestResponseFromTurnAlwaysIncludesReasoningItem(t *testing.T) {
 	turn := &TurnResult{Text: "hi", Reasoning: "hidden", ReasoningEncrypted: "enc", FinishReason: "stop"}
-	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true, suppressReasoning: true}, turn)
-	for _, item := range resp.Output {
-		if item.Type == "reasoning" {
-			t.Fatalf("reasoning item should be suppressed: %#v", resp.Output)
-		}
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true}, turn)
+	if len(resp.Output) != 2 || resp.Output[0].Type != "reasoning" || resp.Output[1].Type != "message" {
+		t.Fatalf("output = %#v, want reasoning then message", resp.Output)
 	}
-	if len(resp.Output) != 1 || resp.Output[0].Type != "message" {
-		t.Fatalf("output = %#v, want only message", resp.Output)
+	if resp.Output[0].EncryptedContent != "enc" {
+		t.Fatalf("reasoning item = %#v, want encrypted content preserved for the stored record", resp.Output[0])
 	}
 }
 
@@ -94,7 +99,7 @@ func TestResponseFromTurnReasoningPrecedesToolCalls(t *testing.T) {
 			Function: openai.ToolCallFunction{Name: "lookup", Arguments: `{"q":"x"}`},
 		}},
 	}
-	resp := responseFromTurn(responseParams{id: "resp_1", model: "claude-sonnet-4.6", store: true, suppressReasoning: false}, turn)
+	resp := responseFromTurn(responseParams{id: "resp_1", model: "claude-sonnet-4.6", store: true}, turn)
 	if len(resp.Output) != 2 || resp.Output[0].Type != "reasoning" || resp.Output[1].Type != "function_call" {
 		t.Fatalf("output = %#v, want reasoning then function_call", resp.Output)
 	}
@@ -162,7 +167,7 @@ func TestResponsesPersistReasoningItemRoundTrip(t *testing.T) {
 		ReasoningID:        "rid-7",
 		FinishReason:       "stop",
 	}
-	resp := responseFromTurn(responseParams{id: "resp_persist", model: "claude-sonnet-4.6", store: true, suppressReasoning: false}, turn)
+	resp := responseFromTurn(responseParams{id: "resp_persist", model: "claude-sonnet-4.6", store: true}, turn)
 	record := recordFromResponse(resp, "sdk-session", "")
 	if err := store.SaveResponse(record); err != nil {
 		t.Fatal(err)

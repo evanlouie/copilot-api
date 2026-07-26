@@ -377,7 +377,7 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 		state.evict(gwReq.PreviousResponseID)
 		return
 	}
-	result := writeResponseStreamEvents(ctx, newLoggedResponseEventWriter(s, ctx, writer), gwReq, s.cfg.MaxTurnOutputBytes, ch)
+	result := writeResponseStreamEvents(ctx, newLoggedResponseEventWriter(s, ctx, writer), gwReq, s.cfg.MaxTurnOutputBytes, s.suppressReasoning(), ch)
 	if result.Err != nil {
 		state.evict(gwReq.PreviousResponseID)
 		if result.WriteFailed {
