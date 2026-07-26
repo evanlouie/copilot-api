@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,43 @@ func TestOversizedJSONBodyReturns413(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"code":"request_too_large"`) {
 		t.Fatalf("body = %s, want request_too_large", response.Body.String())
+	}
+}
+
+// repeatingReader yields an endless stream of one byte so oversized-body tests
+// can stream past the limit without materialising the payload in the test.
+type repeatingReader byte
+
+func (r repeatingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(r)
+	}
+	return len(p), nil
+}
+
+// The shipped default must actually bound HTTP bodies; before the default was a
+// real number, POST bodies were unbounded while WebSocket frames were capped at
+// the coder/websocket library default of 32 KiB.
+func TestHTTPBodyOverDefaultLimitReturns413(t *testing.T) {
+	server := New(config.Config{MaxRequestBodyBytes: config.DefaultMaxRequestBodyBytes}, &captureChatGateway{}, slog.Default())
+	body := io.MultiReader(
+		strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"`),
+		io.LimitReader(repeatingReader('x'), config.DefaultMaxRequestBodyBytes+1),
+		strings.NewReader(`"}]}`),
+	)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(response.Body.String(), `"code":"request_too_large"`) {
+		t.Fatalf("body = %s, want request_too_large", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"type":"invalid_request_error"`) {
+		t.Fatalf("body = %s, want an OpenAI-shaped error envelope", response.Body.String())
 	}
 }
 
@@ -422,6 +460,84 @@ func TestServerShutdownClosesActiveWebSockets(t *testing.T) {
 	}
 	if status := websocket.CloseStatus(err); status != websocket.StatusGoingAway && status != websocket.StatusNormalClosure {
 		t.Fatalf("close status = %v, error=%v", status, err)
+	}
+}
+
+// coder/websocket applies a 32 KiB read limit unless SetReadLimit is called, so
+// the server must always pin the limit explicitly. A response.create frame
+// carrying a tool catalog and a multi-turn transcript routinely exceeds 32 KiB.
+func TestResponsesWebSocketAcceptsFrameLargerThanLibraryDefaultReadLimit(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		limit int64
+	}{
+		{"shipped default", config.DefaultMaxRequestBodyBytes},
+		{"explicitly unlimited", 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gateway := &websocketStreamGateway{text: "big-ok"}
+			server := New(config.Config{MaxRequestBodyBytes: test.limit}, gateway, slog.Default())
+			httpServer := httptest.NewServer(server.Handler())
+			defer httpServer.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/v1/responses", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.CloseNow() }()
+
+			// 64 KiB of input puts the frame well past the library default.
+			input := strings.Repeat("x", 64<<10)
+			if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": input}); err != nil {
+				t.Fatal(err)
+			}
+			response := readUntilResponseCompleted(t, ctx, conn)
+			if response == nil || response.OutputText != "big-ok" {
+				t.Fatalf("response = %#v, want a completed response", response)
+			}
+			requests := gateway.requests()
+			if len(requests) != 1 || len(requests[0].Input.Text) != len(input) {
+				t.Fatalf("gateway input length = %d, want %d", len(requests[0].Input.Text), len(input))
+			}
+		})
+	}
+}
+
+// A frame past the configured limit cannot be recovered from (coder/websocket
+// abandons the message and has already sent its own close frame), so the
+// connection must end with an informative StatusMessageTooBig close rather than
+// a bare teardown.
+func TestResponsesWebSocketOversizedFrameClosesWithMessageTooBig(t *testing.T) {
+	gateway := &websocketStreamGateway{}
+	server := New(config.Config{MaxRequestBodyBytes: 1024}, gateway, slog.Default())
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.CloseNow() }()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "response.create", "model": "gpt-5", "input": strings.Repeat("x", 4096)}); err != nil {
+		// The server may close mid-write; the close status assertion below is
+		// the real signal.
+		t.Logf("write returned %v", err)
+	}
+
+	var event json.RawMessage
+	err = wsjson.Read(ctx, conn, &event)
+	if status := websocket.CloseStatus(err); status != websocket.StatusMessageTooBig {
+		t.Fatalf("close status = %v (err = %v), want %v", status, err, websocket.StatusMessageTooBig)
+	}
+	var closeErr websocket.CloseError
+	if !errors.As(err, &closeErr) || !strings.Contains(closeErr.Reason, "limit") {
+		t.Fatalf("close reason = %q, want a reason naming the limit", closeErr.Reason)
+	}
+	if requests := gateway.requests(); len(requests) != 0 {
+		t.Fatalf("gateway requests = %d, want the oversized frame to never reach the gateway", len(requests))
 	}
 }
 

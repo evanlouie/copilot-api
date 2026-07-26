@@ -53,6 +53,33 @@ func TestStrictCompatDefaultsFalse(t *testing.T) {
 	}
 }
 
+func TestMaxRequestBodyBytesDefaultsToRealLimitAndAllowsExplicitOptOut(t *testing.T) {
+	setLoadEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxRequestBodyBytes != DefaultMaxRequestBodyBytes {
+		t.Fatalf("MaxRequestBodyBytes default = %d, want %d", cfg.MaxRequestBodyBytes, DefaultMaxRequestBodyBytes)
+	}
+	// The shipped default must bound requests on every transport; leaving it at
+	// zero made HTTP unbounded while WebSocket frames fell back to the
+	// coder/websocket library default of 32 KiB.
+	if DefaultMaxRequestBodyBytes <= 32<<10 {
+		t.Fatalf("DefaultMaxRequestBodyBytes = %d, want a real limit above the 32 KiB websocket library default", DefaultMaxRequestBodyBytes)
+	}
+
+	t.Setenv("COPILOT_MAX_REQUEST_BODY_BYTES", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxRequestBodyBytes != 0 {
+		t.Fatalf("MaxRequestBodyBytes override = %d, want 0 to stay an explicit unlimited opt-out", cfg.MaxRequestBodyBytes)
+	}
+}
+
 func TestStrictCompatEnvOverrideTrue(t *testing.T) {
 	setLoadEnv(t)
 	t.Setenv("COPILOT_STRICT_COMPAT", "true")

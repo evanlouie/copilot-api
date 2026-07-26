@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -162,9 +163,16 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	if s.cfg.MaxRequestBodyBytes > 0 {
-		conn.SetReadLimit(s.cfg.MaxRequestBodyBytes)
+	// Always pin the read limit explicitly. coder/websocket applies a 32 KiB
+	// message limit unless SetReadLimit is called, which is far below a
+	// realistic response.create payload, so leaving the library default in
+	// effect implicitly would reject ordinary traffic. -1 is the library's
+	// documented "unlimited" sentinel (see (*websocket.Conn).SetReadLimit).
+	readLimit := s.cfg.MaxRequestBodyBytes
+	if readLimit <= 0 {
+		readLimit = -1
 	}
+	conn.SetReadLimit(readLimit)
 
 	parent := r.Context()
 	if s.cfg.WebSocketMaxLifetime > 0 {
@@ -205,7 +213,22 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		var raw json.RawMessage
 		if err := wsjson.Read(connCtx, conn, &raw); err != nil {
 			if errors.Is(err, websocket.ErrMessageTooBig) {
-				_ = writer.writeError(&openai.APIError{Status: http.StatusRequestEntityTooLarge, Message: "websocket message exceeds maximum request body size", Type: "invalid_request_error", Code: "request_too_large"}, "")
+				// The limit is enforced inside coder/websocket's message
+				// reader, and by the time the error surfaces the connection is
+				// already unrecoverable: the library has written its own
+				// StatusMessageTooBig close frame (so every subsequent data
+				// write fails with net.ErrClosed, and a correlated error event
+				// can no longer be delivered), and it abandoned the message
+				// mid-stream, leaving the reader unfinished and the rest of the
+				// payload unread, so the next read fails with "previous message
+				// not read to completion". There is also no event_id to
+				// correlate against, because the frame was never parsed. Close
+				// deliberately with a status and reason naming the limit rather
+				// than letting the deferred normal-closure win.
+				if s.log != nil {
+					s.log.Warn("websocket message exceeded the request body limit", "limit_bytes", readLimit)
+				}
+				closeWith(websocket.StatusMessageTooBig, fmt.Sprintf("websocket message exceeds the %d byte request body limit", readLimit))
 				break
 			}
 			if websocket.CloseStatus(err) != -1 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -370,14 +393,6 @@ func webSocketEnvelopeFields(fields map[string]json.RawMessage) (string, string,
 		}
 	}
 	return eventType, eventID, nil
-}
-
-func decodeWebSocketResponseCreate(raw json.RawMessage) (openai.ResponsesRequest, string, bool, error) {
-	fields := map[string]json.RawMessage{}
-	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return openai.ResponsesRequest{}, "", true, openai.InvalidRequest("invalid response.create event", "body")
-	}
-	return decodeWebSocketResponseCreateFields(fields)
 }
 
 func decodeWebSocketResponseCreateFields(fields map[string]json.RawMessage) (openai.ResponsesRequest, string, bool, error) {

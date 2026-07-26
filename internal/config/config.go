@@ -17,10 +17,21 @@ import (
 const AppName = "copilot-api"
 
 const (
-	DefaultAddr                        = "127.0.0.1:8080"
-	DefaultModelsCacheTTL              = 10 * time.Minute
-	DefaultToolCallTTL                 = 5 * time.Minute
-	DefaultMaxRequestBodyBytes         = 0
+	DefaultAddr           = "127.0.0.1:8080"
+	DefaultModelsCacheTTL = 10 * time.Minute
+	DefaultToolCallTTL    = 5 * time.Minute
+	// DefaultMaxRequestBodyBytes bounds a single inbound request on every
+	// transport: HTTP JSON bodies and Responses WebSocket frames alike. Real
+	// agent traffic is large — a multi-turn transcript plus a full tool catalog
+	// plus base64-encoded image attachments runs to tens of megabytes — so the
+	// cap has to be generous, and it is deliberately the same budget as
+	// DefaultMaxTurnOutputBytes so one turn's input and output are bounded
+	// symmetrically. It is not unbounded because the decode path copies the
+	// payload roughly three times (decoder buffer, per-field json.RawMessage,
+	// then the trimmed input string), so this cap costs on the order of 100 MiB
+	// of transient memory per in-flight request. Set
+	// COPILOT_MAX_REQUEST_BODY_BYTES=0 to opt out of the cap entirely.
+	DefaultMaxRequestBodyBytes   int64 = 32 << 20
 	DefaultMaxTurnOutputBytes          = 32 << 20
 	DefaultRetentionMaxAge             = 30 * 24 * time.Hour
 	DefaultRetentionMaxResponses       = 10_000
