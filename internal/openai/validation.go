@@ -48,8 +48,6 @@ var alwaysRejectChatFields = []unsupportedField{
 	{name: "function_call", message: "legacy function_call is not supported; use tools"},
 	{name: "functions", message: "legacy functions are not supported; use tools"},
 	{name: "logit_bias", message: "logit_bias is not supported"},
-	{name: "logprobs", message: "logprobs is not supported", allow: isFalse},
-	{name: "top_logprobs", message: "top_logprobs is not supported"},
 	{name: "modalities", message: "modalities are not supported"},
 	{name: "prediction", message: "prediction is not supported"},
 	{name: "response_format", message: structuredOutputMessage("response_format"), allow: isDefaultOutputFormat},
@@ -60,6 +58,15 @@ var alwaysRejectChatFields = []unsupportedField{
 var strictOnlyChatFields = []unsupportedField{
 	{name: "temperature", message: "temperature is not forwarded by this proxy in MVP"},
 	{name: "top_p", message: "top_p is not forwarded by this proxy in MVP"},
+	// logprobs/top_logprobs are the Chat counterpart of the Responses include
+	// value message.output_text.logprobs: they ask for an extra per-token
+	// annotation next to the reply, not for a different reply. The Copilot SDK
+	// surfaces no token probabilities, so ignoring them costs the caller an
+	// optional field and nothing else, which is the graceful degradation the
+	// policy above accepts. logprobs:false asks for nothing at all, so it stays
+	// acceptable even in strict mode.
+	{name: "logprobs", message: "logprobs is ignored by this proxy in permissive mode", allow: isFalse},
+	{name: "top_logprobs", message: "top_logprobs is ignored by this proxy in permissive mode"},
 	{name: "presence_penalty", message: "presence_penalty is not forwarded by this proxy in MVP"},
 	{name: "frequency_penalty", message: "frequency_penalty is not forwarded by this proxy in MVP"},
 	{name: "seed", message: "seed is not supported"},
@@ -264,6 +271,18 @@ func (r *ChatCompletionRequest) RequestedMaxOutputTokens() (int, bool) {
 		return *r.MaxTokens, true
 	}
 	return 0, false
+}
+
+// RequestedLogprobs reports whether the client asked for token logprobs, via
+// either logprobs:true or top_logprobs. Both are accepted and ignored in
+// permissive mode (see strictOnlyChatFields), so the HTTP layer uses this to
+// record the gap at debug level rather than failing the request.
+func (r *ChatCompletionRequest) RequestedLogprobs() bool {
+	if raw, ok := r.Raw["logprobs"]; ok && !isFalse(raw) {
+		return true
+	}
+	_, ok := r.Raw["top_logprobs"]
+	return ok
 }
 
 // ResponsesMaxOutputTokens is the Responses counterpart of

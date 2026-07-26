@@ -240,11 +240,6 @@ func TestPermissiveChatRejectsUnsafeUnsupportedFields(t *testing.T) {
 			body:  `{"model":"gpt-5","n":2,"messages":[{"role":"user","content":"hi"}]}`,
 			param: "n",
 		},
-		{
-			name:  "logprobs true",
-			body:  `{"model":"gpt-5","logprobs":true,"messages":[{"role":"user","content":"hi"}]}`,
-			param: "logprobs",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -260,6 +255,38 @@ func TestPermissiveChatRejectsUnsafeUnsupportedFields(t *testing.T) {
 			if !ok || apiErr.Param != tt.param {
 				t.Fatalf("error = %#v, want param %q", err, tt.param)
 			}
+		})
+	}
+}
+
+// logprobs and top_logprobs are the Chat Completions counterparts of the
+// Responses include value "message.output_text.logprobs": all three ask for
+// extra per-token detail alongside the reply, none of them change its shape.
+// Ignoring them yields the same prose minus an optional annotation, which is
+// exactly the graceful degradation the policy accepts, so permissive mode must
+// take them and only strict mode may reject.
+func TestChatPermissiveAcceptsAndIgnoresLogprobs(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  string
+		param string
+	}{
+		{
+			name:  "logprobs true",
+			body:  `{"model":"gpt-5","logprobs":true,"messages":[{"role":"user","content":"hi"}]}`,
+			param: "logprobs",
+		},
+		{
+			name:  "top_logprobs",
+			body:  `{"model":"gpt-5","top_logprobs":5,"messages":[{"role":"user","content":"hi"}]}`,
+			param: "top_logprobs",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := decodeChatRequest(t, tt.body)
+			assertChatAccepted(t, req, false)
+			assertChatRejected(t, req, true, tt.param)
 		})
 	}
 }

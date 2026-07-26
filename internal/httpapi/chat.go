@@ -306,6 +306,9 @@ func (s *Server) logUnhonoredChatControls(ctx context.Context, req *openai.ChatC
 	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
 		s.debugStream(ctx, "parallel_tool_calls=false is not enforced by the Copilot SDK", "surface", "chat.completions")
 	}
+	if req.RequestedLogprobs() {
+		s.debugStream(ctx, "logprobs are not produced by the Copilot SDK", "surface", "chat.completions")
+	}
 	s.logUnhonoredToolChoice(ctx, "chat.completions", req.ToolChoice)
 }
 
