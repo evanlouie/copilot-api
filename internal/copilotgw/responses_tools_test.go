@@ -9,6 +9,7 @@ import (
 )
 
 func TestResponseFromTurnRehydratesExtendedToolCallItems(t *testing.T) {
+	t.Parallel()
 	turn := &TurnResult{FinishReason: "tool_calls", ResponseToolCalls: []toolproxy.CapturedCall{
 		{Kind: toolcatalog.ToolKindFunction, CallID: "call_fn", ResponseName: "multi_tool_use.parallel", ArgumentsJSON: json.RawMessage(`{"tool_uses":[]}`)},
 		{Kind: toolcatalog.ToolKindFunction, CallID: "call_mcp", Namespace: "mcp__grep_app", ResponseName: "searchGitHub", ArgumentsJSON: json.RawMessage(`{"query":"x"}`)},

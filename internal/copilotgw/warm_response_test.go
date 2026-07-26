@@ -20,6 +20,7 @@ import (
 // walked only the runner registries and left the SDK session connected with its
 // pins still held.
 func TestStopDisconnectsWarmSessions(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	var releases atomic.Int32
@@ -50,6 +51,7 @@ func TestStopDisconnectsWarmSessions(t *testing.T) {
 // so registration must fail loudly rather than accept a session that would never
 // be cleaned up.
 func TestTrackWarmSessionAfterStopIsRejected(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	if err := gw.Stop(); err != nil {
@@ -71,6 +73,7 @@ func TestTrackWarmSessionAfterStopIsRejected(t *testing.T) {
 // use transfers the SDK session to a turnRunner, which the active registry
 // already accounts for, so Stop must not disconnect it a second time.
 func TestWarmSessionUseDeregistersFromGatewayShutdown(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	var releases atomic.Int32
@@ -101,6 +104,7 @@ func TestWarmSessionUseDeregistersFromGatewayShutdown(t *testing.T) {
 // disconnect with gateway shutdown, which is the exact race the disconnected
 // flag exists to make safe: pins must be released exactly once.
 func TestWarmSessionDisconnectIsIdempotentUnderConcurrentStop(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	var releases atomic.Int32
@@ -138,6 +142,7 @@ func TestWarmSessionDisconnectIsIdempotentUnderConcurrentStop(t *testing.T) {
 }
 
 func TestWarmResponseSessionUseInheritsWarmRequestState(t *testing.T) {
+	t.Parallel()
 	warm := &WarmResponseSession{
 		responseID:      "resp_warm",
 		model:           "gpt-5",
@@ -168,6 +173,7 @@ func TestWarmResponseSessionUseInheritsWarmRequestState(t *testing.T) {
 }
 
 func TestWarmResponseSessionTransfersResolvedImagesAndModelCount(t *testing.T) {
+	t.Parallel()
 	data := "aW1hZ2U="
 	attachment := copilot.AttachmentBlob{Data: &data, MIMEType: "image/png"}
 	budget := &imageRequestBudget{configured: true, maxImages: 2, remainingImages: 1}
@@ -193,6 +199,7 @@ func TestWarmResponseSessionTransfersResolvedImagesAndModelCount(t *testing.T) {
 }
 
 func TestRejectedWarmResponseDisconnectReleasesPins(t *testing.T) {
+	t.Parallel()
 	pinReleased := false
 	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", pinReleases: []func(){func() { pinReleased = true }}}
 	req := ResponseRequest{Model: "other", PreviousResponseID: "resp_warm"}
@@ -206,6 +213,7 @@ func TestRejectedWarmResponseDisconnectReleasesPins(t *testing.T) {
 }
 
 func TestWarmResponseSessionUseInheritsResolvedDynamicCatalog(t *testing.T) {
+	t.Parallel()
 	warm := &WarmResponseSession{
 		responseID: "resp_warm",
 		model:      "gpt-5",
@@ -225,6 +233,7 @@ func TestWarmResponseSessionUseInheritsResolvedDynamicCatalog(t *testing.T) {
 }
 
 func TestWarmResponseSessionUseAcceptsSemanticEquivalentToolCatalog(t *testing.T) {
+	t.Parallel()
 	warm := &WarmResponseSession{
 		responseID: "resp_warm",
 		model:      "gpt-5",
@@ -243,6 +252,7 @@ func TestWarmResponseSessionUseAcceptsSemanticEquivalentToolCatalog(t *testing.T
 }
 
 func TestWarmResponseSessionUseRejectsSemanticToolCatalogMismatch(t *testing.T) {
+	t.Parallel()
 	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", tools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"lark"}`)}}}
 	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Tools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch", Format: json.RawMessage(`{"type":"grammar","syntax":"regex"}`)}}}
 	if _, ok := warm.use(&req); ok {
@@ -251,6 +261,7 @@ func TestWarmResponseSessionUseRejectsSemanticToolCatalogMismatch(t *testing.T) 
 }
 
 func TestWarmResponseSessionUseAcceptsEquivalentExplicitReasoningEffort(t *testing.T) {
+	t.Parallel()
 	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", reasoningEffort: "low"}
 	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", ReasoningEffort: " LOW "}
 	if _, ok := warm.use(&req); !ok {
@@ -259,6 +270,7 @@ func TestWarmResponseSessionUseAcceptsEquivalentExplicitReasoningEffort(t *testi
 }
 
 func TestWarmResponseSessionUseRejectsMismatchedReasoningEffort(t *testing.T) {
+	t.Parallel()
 	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", reasoningEffort: "low"}
 	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", ReasoningEffort: "high"}
 	if _, ok := warm.use(&req); ok {
@@ -267,6 +279,7 @@ func TestWarmResponseSessionUseRejectsMismatchedReasoningEffort(t *testing.T) {
 }
 
 func TestWarmResponseSessionUseRejectsMismatchedInstructions(t *testing.T) {
+	t.Parallel()
 	warm := &WarmResponseSession{responseID: "resp_warm", model: "gpt-5", instructions: "original"}
 	req := ResponseRequest{Model: "gpt-5", PreviousResponseID: "resp_warm", Instructions: "changed"}
 	if _, ok := warm.use(&req); ok {
@@ -279,6 +292,7 @@ func TestWarmResponseSessionUseRejectsMismatchedInstructions(t *testing.T) {
 // before it generates, the resumed SDK session has never seen that input. The
 // record marks it undelivered so the resume replays it ahead of the new turn.
 func TestPendingWarmInputSurvivesResume(t *testing.T) {
+	t.Parallel()
 	record := sessionstore.ResponseRecord{ID: "resp_warm", InputText: "Warm context", InputPending: true}
 	combined := combineResolvedPrompts(pendingInputPrompt(record), resolvedPrompt{Text: "Current turn"})
 	if combined.Text != "Warm context\n\nCurrent turn" {
@@ -291,11 +305,13 @@ func TestPendingWarmInputSurvivesResume(t *testing.T) {
 // again. Records written before input_pending existed decode as false and so
 // take this path.
 func TestDeliveredInputIsNotReplayedOnResume(t *testing.T) {
+	t.Parallel()
 	for name, record := range map[string]sessionstore.ResponseRecord{
 		"delivered":     {ID: "resp_prev", InputText: "Already sent"},
 		"pending blank": {ID: "resp_warm", InputText: "   ", InputPending: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			combined := combineResolvedPrompts(pendingInputPrompt(record), resolvedPrompt{Text: "Current turn"})
 			if combined.Text != "Current turn" {
 				t.Fatalf("resumed prompt = %q, want only the current turn", combined.Text)

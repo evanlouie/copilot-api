@@ -16,6 +16,7 @@ import (
 // serde failure rather than a smaller payload. The SDK reports input and output
 // tokens independently, so "output tokens only" is a reachable upstream shape.
 func TestUsageFromSDKEmitsCompleteUsageObject(t *testing.T) {
+	t.Parallel()
 	output := int64(12)
 	usage := usageFromSDK(&copilot.AssistantUsageData{OutputTokens: &output})
 	if usage == nil {
@@ -40,6 +41,7 @@ func TestUsageFromSDKEmitsCompleteUsageObject(t *testing.T) {
 // A usage event with no token counts at all carries nothing a client can use,
 // so the gate is absence of the whole object rather than a partial one.
 func TestUsageFromSDKDropsCountlessUsage(t *testing.T) {
+	t.Parallel()
 	reasoning := int64(4)
 	if usage := usageFromSDK(&copilot.AssistantUsageData{ReasoningTokens: &reasoning}); usage != nil {
 		t.Fatalf("usageFromSDK = %#v, want nil for a usage event with no token counts", usage)

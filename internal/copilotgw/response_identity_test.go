@@ -26,6 +26,7 @@ func newResponseIdentityRunner(stream chan ResponseStreamEvent, params responseP
 // where the persistence callback and the stream each called responseFromTurn -
 // fails this test.
 func TestRunnerBuildsOneResponsePerTurn(t *testing.T) {
+	t.Parallel()
 	stream := make(chan ResponseStreamEvent, 8)
 	runner := newResponseIdentityRunner(stream, responseParams{id: "resp_identity", model: "gpt-test", store: true})
 	var persisted *openai.Response
@@ -55,6 +56,7 @@ func TestRunnerBuildsOneResponsePerTurn(t *testing.T) {
 // source: the IDs the client sees on deltas are the IDs the built (and
 // therefore persisted) response carries.
 func TestRunnerAssignsOutputItemIDsBeforeStreamingThem(t *testing.T) {
+	t.Parallel()
 	stream := make(chan ResponseStreamEvent, 8)
 	runner := newResponseIdentityRunner(stream, responseParams{id: "resp_ids", model: "gpt-test", store: true})
 	runner.emitReasoningDelta("think", "rid-1")
@@ -89,6 +91,7 @@ func TestRunnerAssignsOutputItemIDsBeforeStreamingThem(t *testing.T) {
 // of re-reading the clock at emission time and disagreeing with the
 // response.created frame.
 func TestResponseCreatedAtComesFromTheTurn(t *testing.T) {
+	t.Parallel()
 	turn := &TurnResult{ID: "resp_created", Created: 1_700_000_042, Text: "answer", FinishReason: "stop"}
 	resp := responseFromTurn(responseParams{id: turn.ID, model: "gpt-test", store: true}, turn)
 	if resp.CreatedAt != turn.Created {
@@ -101,6 +104,7 @@ func TestResponseCreatedAtComesFromTheTurn(t *testing.T) {
 // the items, so a reasoning item that only materialised after content follows
 // the message instead of silently taking index 0.
 func TestTerminalOutputFollowsStreamedItemOrder(t *testing.T) {
+	t.Parallel()
 	stream := make(chan ResponseStreamEvent, 8)
 	runner := newResponseIdentityRunner(stream, responseParams{id: "resp_order", model: "gpt-test", store: true})
 	runner.emitDelta("ans")
@@ -117,6 +121,7 @@ func TestTerminalOutputFollowsStreamedItemOrder(t *testing.T) {
 // client-owned tool-call continuation depends on: the continuation turn must
 // get its own output items rather than reusing the emitted turn's IDs.
 func TestToolCallTurnResetsOutputItemIdentity(t *testing.T) {
+	t.Parallel()
 	stream := make(chan ResponseStreamEvent, 8)
 	runner := newResponseIdentityRunner(stream, responseParams{id: "resp_tools", model: "gpt-test", store: true})
 	runner.emitDelta("first")

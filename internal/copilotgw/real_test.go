@@ -18,6 +18,7 @@ import (
 )
 
 func TestModelMetadataIncludesTokenLimits(t *testing.T) {
+	t.Parallel()
 	contextWindow := int64(200000)
 	prompt := int64(180000)
 	output := int64(8192)
@@ -52,6 +53,7 @@ func TestModelMetadataIncludesTokenLimits(t *testing.T) {
 }
 
 func TestRPCTokenLimits(t *testing.T) {
+	t.Parallel()
 	contextWindow := int64(128000)
 	prompt := int64(120000)
 	output := int64(4096)
@@ -76,6 +78,7 @@ func TestRPCTokenLimits(t *testing.T) {
 }
 
 func TestSDKTokenLimits(t *testing.T) {
+	t.Parallel()
 	prompt := 120000
 
 	limits := sdkTokenLimits(copilot.ModelLimits{
@@ -97,6 +100,7 @@ func TestSDKTokenLimits(t *testing.T) {
 }
 
 func TestSDKTokenLimitsNilContextWindow(t *testing.T) {
+	t.Parallel()
 	prompt := 8192
 
 	limits := sdkTokenLimits(copilot.ModelLimits{
@@ -115,6 +119,7 @@ func TestSDKTokenLimitsNilContextWindow(t *testing.T) {
 }
 
 func TestSDKTokenLimitsZeroContextWindowSuppressed(t *testing.T) {
+	t.Parallel()
 	// A pointer to zero must be treated as "unknown" for context-window
 	// limits, matching the pre-v1.0.0 SDK semantics where the field was a
 	// plain int and v <= 0 was suppressed.
@@ -128,12 +133,14 @@ func TestSDKTokenLimitsZeroContextWindowSuppressed(t *testing.T) {
 }
 
 func TestSDKTokenLimitsAllNil(t *testing.T) {
+	t.Parallel()
 	if got := sdkTokenLimits(copilot.ModelLimits{}); got != nil {
 		t.Fatalf("expected nil token limits when all fields are nil, got %#v", got)
 	}
 }
 
 func TestEffectiveReasoningEffortUsesExplicitRequest(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:                        "gpt-5",
 		ReasoningEffortKnown:      true,
@@ -152,6 +159,7 @@ func TestEffectiveReasoningEffortUsesExplicitRequest(t *testing.T) {
 }
 
 func TestEffectiveReasoningEffortUsesClosestSupportedDefault(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		def       string
@@ -169,6 +177,7 @@ func TestEffectiveReasoningEffortUsesClosestSupportedDefault(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			gw := cachedModelGateway(Model{
 				ID:                        "gpt-5",
 				ReasoningEffortKnown:      true,
@@ -189,6 +198,7 @@ func TestEffectiveReasoningEffortUsesClosestSupportedDefault(t *testing.T) {
 }
 
 func TestEffectiveReasoningEffortOmitsDefaultWhenUnsupported(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:                      "gpt-4.1",
 		ReasoningEffortKnown:    true,
@@ -206,6 +216,7 @@ func TestEffectiveReasoningEffortOmitsDefaultWhenUnsupported(t *testing.T) {
 }
 
 func TestEffectiveReasoningEffortUsesDefaultWhenSupportKnownWithoutEffortList(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:                      "gpt-5",
 		ReasoningEffortKnown:    true,
@@ -223,6 +234,7 @@ func TestEffectiveReasoningEffortUsesDefaultWhenSupportKnownWithoutEffortList(t 
 }
 
 func TestEffectiveReasoningEffortUsesModelDefaultWhenSupportListMissing(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:                      "claude-opus-4.8",
 		ReasoningEffortKnown:    true,
@@ -241,6 +253,7 @@ func TestEffectiveReasoningEffortUsesModelDefaultWhenSupportListMissing(t *testi
 }
 
 func TestEffectiveReasoningEffortNoneOmitsModelDefaultWhenSupportListMissing(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:                      "claude-opus-4.8",
 		ReasoningEffortKnown:    true,
@@ -259,6 +272,7 @@ func TestEffectiveReasoningEffortNoneOmitsModelDefaultWhenSupportListMissing(t *
 }
 
 func TestRealClientOptionsUseV1ModeEmpty(t *testing.T) {
+	t.Parallel()
 	cfg := config.Config{
 		CLIPath:     "/tmp/copilot",
 		StateDir:    "/tmp/state",
@@ -288,6 +302,7 @@ func TestRealClientOptionsUseV1ModeEmpty(t *testing.T) {
 }
 
 func TestSessionConfigBuildersApplyV1Hardening(t *testing.T) {
+	t.Parallel()
 	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), nil, false)
 	if err != nil {
 		t.Fatal(err)
@@ -317,6 +332,7 @@ func TestSessionConfigBuildersApplyV1Hardening(t *testing.T) {
 }
 
 func TestSessionConfigBuildersExposePublicCustomToolNames(t *testing.T) {
+	t.Parallel()
 	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), []openai.Tool{
 		{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}},
 		{Type: "function", Function: openai.FunctionTool{Name: "grep"}},
@@ -454,6 +470,7 @@ func assertBoolPtr(t *testing.T, name string, got *bool, want bool) {
 }
 
 func TestCloneModelsDeepClonesNestedMetadata(t *testing.T) {
+	t.Parallel()
 	pointer := int64(7)
 	original := []Model{{Metadata: map[string]any{"nested": []any{[]any{map[string]any{"value": "before"}}, &pointer}}}}
 	cloned := cloneModels(original)
@@ -470,6 +487,7 @@ func TestCloneModelsDeepClonesNestedMetadata(t *testing.T) {
 }
 
 func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gateway := NewReal(config.Config{ToolCallTTL: time.Minute}, store, nil)
 	closed := make(chan struct{})
@@ -506,6 +524,7 @@ func TestStopDrainsPendingRunnersAndBrokerBatches(t *testing.T) {
 }
 
 func TestNewRealNormalizesNilLogger(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{}, store, nil)
 	if gw.log == nil {
@@ -516,6 +535,7 @@ func TestNewRealNormalizesNilLogger(t *testing.T) {
 }
 
 func TestFindModelThrottlesSequentialForcedRefreshes(t *testing.T) {
+	t.Parallel()
 	var calls int32
 	gw := &RealGateway{
 		modelCache: newModelCacheWithModels([]Model{{ID: "known"}}, time.Hour),
@@ -535,6 +555,7 @@ func TestFindModelThrottlesSequentialForcedRefreshes(t *testing.T) {
 }
 
 func TestRefreshModelsDeduplicatesConcurrentForcedRefreshes(t *testing.T) {
+	t.Parallel()
 	// synctest.Wait below replaces a "sleep 50ms and hope every caller got there"
 	// budget: inside a bubble it returns only once every other goroutine is
 	// durably blocked, which for this test means every caller is provably parked

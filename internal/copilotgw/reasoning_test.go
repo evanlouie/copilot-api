@@ -10,6 +10,7 @@ import (
 )
 
 func TestResolveReasoningPrefersConsolidated(t *testing.T) {
+	t.Parallel()
 	if got := resolveReasoning("final", "deltas"); got != "final" {
 		t.Fatalf("resolveReasoning(final, deltas) = %q, want final", got)
 	}
@@ -22,6 +23,7 @@ func TestResolveReasoningPrefersConsolidated(t *testing.T) {
 }
 
 func TestTurnRunnerDetachPreventsRequestCancelAbort(t *testing.T) {
+	t.Parallel()
 	r := &turnRunner{}
 	if !r.shouldAbortForRequestContext() {
 		t.Fatal("fresh runner should abort on request cancellation")
@@ -37,6 +39,7 @@ func TestTurnRunnerDetachPreventsRequestCancelAbort(t *testing.T) {
 }
 
 func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
+	t.Parallel()
 	turn := &TurnResult{
 		Text:               "the answer",
 		Reasoning:          "let me think",
@@ -61,6 +64,7 @@ func TestResponseFromTurnPrependsReasoningItem(t *testing.T) {
 }
 
 func TestResponseFromTurnWithoutReasoningHasNoReasoningItem(t *testing.T) {
+	t.Parallel()
 	turn := &TurnResult{Text: "hi", FinishReason: "stop"}
 	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true}, turn)
 	for _, item := range resp.Output {
@@ -78,6 +82,7 @@ func TestResponseFromTurnWithoutReasoningHasNoReasoningItem(t *testing.T) {
 // TestResponsesStreamReasoningEmissionOffSuppressesReasoning and
 // TestReasoningEmissionOffFiltersStoredRecordOnRead).
 func TestResponseFromTurnAlwaysIncludesReasoningItem(t *testing.T) {
+	t.Parallel()
 	turn := &TurnResult{Text: "hi", Reasoning: "hidden", ReasoningEncrypted: "enc", FinishReason: "stop"}
 	resp := responseFromTurn(responseParams{id: "resp_1", model: "gpt-5", store: true}, turn)
 	if len(resp.Output) != 2 || resp.Output[0].Type != "reasoning" || resp.Output[1].Type != "message" {
@@ -89,6 +94,7 @@ func TestResponseFromTurnAlwaysIncludesReasoningItem(t *testing.T) {
 }
 
 func TestResponseFromTurnReasoningPrecedesToolCalls(t *testing.T) {
+	t.Parallel()
 	turn := &TurnResult{
 		Reasoning:    "consider the tool",
 		ReasoningID:  "rid-9",
@@ -109,6 +115,7 @@ func TestResponseFromTurnReasoningPrecedesToolCalls(t *testing.T) {
 // invariant: the runner loop is reused across the client-owned tool-call
 // continuation, so reasoning state must not leak (or concatenate) between turns.
 func TestReasoningAccumulatorResetPreventsTurnLeak(t *testing.T) {
+	t.Parallel()
 	var acc reasoningAccumulator
 
 	// Turn 1: consolidated reasoning "A" plus streaming deltas, then a tool call.
@@ -157,6 +164,7 @@ func TestReasoningAccumulatorResetPreventsTurnLeak(t *testing.T) {
 // reasoning item (summary + encrypted content + output order) through
 // SaveResponse -> GetResponse.
 func TestResponsesPersistReasoningItemRoundTrip(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	gw := NewReal(config.Config{}, store, nil)
 

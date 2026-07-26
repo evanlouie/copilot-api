@@ -17,6 +17,7 @@ import (
 )
 
 func TestFunctionOutputsWithContinuationInputAppendsFollowupDeterministically(t *testing.T) {
+	t.Parallel()
 	outputs := map[string]string{"call_b": `{"ok":true}`, "call_a": "alpha"}
 	out, err := functionOutputsWithContinuationInput(outputs, openai.PromptContent{Text: "Now optimize it."})
 	if err != nil {
@@ -34,6 +35,7 @@ func TestFunctionOutputsWithContinuationInputAppendsFollowupDeterministically(t 
 }
 
 func TestFunctionOutputsWithContinuationInputRejectsImages(t *testing.T) {
+	t.Parallel()
 	_, err := functionOutputsWithContinuationInput(map[string]string{"call_1": "ok"}, openai.PromptContent{Images: []openai.ImageInput{{URL: "data:image/png;base64,AAAA"}}})
 	if err == nil {
 		t.Fatal("expected image follow-up rejection")
@@ -65,6 +67,7 @@ func captureResponseBatch(t *testing.T, rt *toolproxy.RequestTools, requests []c
 }
 
 func TestResponseContinuationBatchSelectsLiveSubsetFromCodexHistory(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -89,6 +92,7 @@ func TestResponseContinuationBatchSelectsLiveSubsetFromCodexHistory(t *testing.T
 }
 
 func TestResponseContinuationBatchKeepsAllLiveParallelOutputs(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -116,6 +120,7 @@ func TestResponseContinuationBatchKeepsAllLiveParallelOutputs(t *testing.T) {
 }
 
 func TestResponseContinuationBatchRejectsAmbiguousLiveBatches(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -140,6 +145,7 @@ func TestResponseContinuationBatchRejectsAmbiguousLiveBatches(t *testing.T) {
 }
 
 func TestResponseFallbackWithoutPreviousResponseUsesTranscriptInput(t *testing.T) {
+	t.Parallel()
 	g := &RealGateway{}
 	fallback, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{
 		Model:                              "gpt-test",
@@ -164,6 +170,7 @@ func TestResponseFallbackWithoutPreviousResponseUsesTranscriptInput(t *testing.T
 }
 
 func TestStreamingResponseContinuationDefaultsMissingResponseID(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -202,6 +209,7 @@ func TestStreamingResponseContinuationDefaultsMissingResponseID(t *testing.T) {
 }
 
 func TestResponseFallbackWithPreviousResponseUsesExtendedToolLabels(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -251,6 +259,7 @@ func TestResponseFallbackWithPreviousResponseUsesExtendedToolLabels(t *testing.T
 }
 
 func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalog(t *testing.T) {
+	t.Parallel()
 	store := sessionstore.New(t.TempDir(), t.TempDir(), t.TempDir())
 	if err := store.Ensure(); err != nil {
 		t.Fatal(err)
@@ -288,6 +297,7 @@ func TestResponseFallbackWithToolSearchOutputInstallsLoadedToolsFromStoredCatalo
 }
 
 func TestResponseContinuationPromptIncludesStructuredToolState(t *testing.T) {
+	t.Parallel()
 	g := &RealGateway{}
 	previous := sessionstore.ResponseRecord{
 		ID:        "resp_prev",
@@ -317,6 +327,7 @@ func TestResponseContinuationPromptIncludesStructuredToolState(t *testing.T) {
 }
 
 func TestResponseFallbackWithoutPreviousResponseRejectsUnavailableTranscript(t *testing.T) {
+	t.Parallel()
 	g := &RealGateway{}
 	_, err := g.responseFallbackRequestFromFunctionOutputs(ResponseRequest{
 		Model:       "gpt-test",
@@ -328,6 +339,7 @@ func TestResponseFallbackWithoutPreviousResponseRejectsUnavailableTranscript(t *
 }
 
 func TestChatRequestFromContinuationDoesNotDuplicateToolOutputs(t *testing.T) {
+	t.Parallel()
 	req := ChatContinuationRequest{
 		Model: "gpt-5",
 		Messages: []openai.ChatMessage{

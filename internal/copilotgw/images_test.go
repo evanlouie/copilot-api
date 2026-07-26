@@ -26,6 +26,7 @@ func cachedModelGateway(model Model) *RealGateway {
 }
 
 func TestPublicIPRejectsSpecialUseRanges(t *testing.T) {
+	t.Parallel()
 	for _, address := range []string{
 		"0.0.0.1", "100.64.0.1", "100.100.100.200", "192.0.0.1", "192.0.2.1",
 		"192.88.99.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "240.0.0.1",
@@ -43,6 +44,7 @@ func TestPublicIPRejectsSpecialUseRanges(t *testing.T) {
 }
 
 func TestResolvePromptDataURLAttachment(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:             "vision",
 		VisionKnown:    true,
@@ -85,6 +87,7 @@ func TestResolvePromptDataURLAttachment(t *testing.T) {
 }
 
 func TestResolvePromptRejectsNonVisionModel(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{ID: "text", VisionKnown: true, SupportsVision: false})
 	_, err := gw.resolvePrompt(context.Background(), "text", openai.PromptContent{
 		Text:   "describe",
@@ -95,6 +98,9 @@ func TestResolvePromptRejectsNonVisionModel(t *testing.T) {
 	}
 }
 
+// Not parallel: this test swaps the package-level imageHTTPClient. Go runs
+// every sequential test to completion before releasing the parallel ones, so
+// keeping this one sequential is what keeps the swap invisible to them.
 func TestResolvePromptFetchesRemoteImage(t *testing.T) {
 	pngBytes, err := base64.StdEncoding.DecodeString(tinyPNG)
 	if err != nil {
@@ -135,6 +141,7 @@ func TestResolvePromptFetchesRemoteImage(t *testing.T) {
 	}
 }
 
+// Not parallel: swaps the package-level imageHTTPClient, as above.
 func TestWarmResolvedImageIsReusedWithoutRefetch(t *testing.T) {
 	pngBytes, err := base64.StdEncoding.DecodeString(tinyPNG)
 	if err != nil {
@@ -170,6 +177,7 @@ func TestWarmResolvedImageIsReusedWithoutRefetch(t *testing.T) {
 }
 
 func TestResolvePromptRejectsUnknownVisionSupport(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{ID: "unknown", VisionKnown: false})
 	_, err := gw.resolvePrompt(context.Background(), "unknown", openai.PromptContent{
 		Images: []openai.ImageInput{{URL: "data:image/png;base64," + tinyPNG}},
@@ -180,6 +188,7 @@ func TestResolvePromptRejectsUnknownVisionSupport(t *testing.T) {
 }
 
 func TestResolvePromptRejectsPrivateRemoteImageHost(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{ID: "vision", VisionKnown: true, SupportsVision: true})
 	_, err := gw.resolvePrompt(context.Background(), "vision", openai.PromptContent{
 		Images: []openai.ImageInput{{URL: "http://127.0.0.1/image.png"}},
@@ -190,6 +199,7 @@ func TestResolvePromptRejectsPrivateRemoteImageHost(t *testing.T) {
 }
 
 func TestResolvePromptRejectsModelImageSizeLimit(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:             "vision",
 		VisionKnown:    true,
@@ -205,6 +215,7 @@ func TestResolvePromptRejectsModelImageSizeLimit(t *testing.T) {
 }
 
 func TestResolvePromptEnforcesImageCountAcrossMessages(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID: "vision", VisionKnown: true, SupportsVision: true,
 		Vision: &VisionLimits{SupportedMediaTypes: []string{"image/png"}, MaxPromptImages: 1},
@@ -220,6 +231,7 @@ func TestResolvePromptEnforcesImageCountAcrossMessages(t *testing.T) {
 }
 
 func TestResolvePromptDoesNotAddImageCountWithoutModelLimit(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{ID: "vision", VisionKnown: true, SupportsVision: true, Vision: &VisionLimits{SupportedMediaTypes: []string{"image/png"}}})
 	images := make([]openai.ImageInput, 21)
 	for i := range images {
@@ -231,6 +243,7 @@ func TestResolvePromptDoesNotAddImageCountWithoutModelLimit(t *testing.T) {
 }
 
 func TestResolvePromptRejectsUnsupportedMIME(t *testing.T) {
+	t.Parallel()
 	gw := cachedModelGateway(Model{
 		ID:             "vision",
 		VisionKnown:    true,

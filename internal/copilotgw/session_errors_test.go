@@ -14,6 +14,7 @@ func statusPtr(v int32) *int32 { return &v }
 // on 429 and retry a 502 on a generic schedule, so the classification decides
 // whether a client waits out a Copilot rate limit or hammers through it.
 func TestUpstreamSessionErrorClassifiesRateLimits(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		data *copilot.SessionErrorData
@@ -58,6 +59,7 @@ func TestUpstreamSessionErrorClassifiesRateLimits(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			err := upstreamSessionError(test.data)
 			if err.Kind != test.kind || err.Code != test.code {
 				t.Fatalf("upstreamSessionError = %#v, want kind %q code %q", err, test.kind, test.code)
@@ -72,6 +74,7 @@ func TestUpstreamSessionErrorClassifiesRateLimits(t *testing.T) {
 // The SDK exposes no retry-after on a session error, so the wait is genuinely
 // unknown and must stay unset rather than be invented.
 func TestUpstreamRateLimitCarriesNoInventedRetryAfter(t *testing.T) {
+	t.Parallel()
 	err := upstreamSessionError(&copilot.SessionErrorData{ErrorType: "rate_limit", Message: "slow down"})
 	if err.RetryAfter != 0 {
 		t.Fatalf("RetryAfter = %s, want 0: the Copilot SDK does not report one on this event", err.RetryAfter)

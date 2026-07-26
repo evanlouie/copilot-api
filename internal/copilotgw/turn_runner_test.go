@@ -21,6 +21,7 @@ import (
 // of emitting from the Send goroutine. This is what keeps emitError loop-owned
 // and free of the send-on-closed race.
 func TestFailSendDeliversSessionError(t *testing.T) {
+	t.Parallel()
 	events := newSessionEventSink(nil)
 	r := &turnRunner{closed: make(chan struct{})}
 
@@ -45,6 +46,7 @@ func TestFailSendDeliversSessionError(t *testing.T) {
 // event channel and it is already full). The sink must absorb the event and
 // return.
 func TestFailSendUnblocksWhenRunnerClosed(t *testing.T) {
+	t.Parallel()
 	closed := make(chan struct{})
 	close(closed)
 	events := newSessionEventSink(nil)
@@ -66,6 +68,7 @@ func TestFailSendUnblocksWhenRunnerClosed(t *testing.T) {
 }
 
 func TestStaleRequestGenerationCannotAbortReattachedRunner(t *testing.T) {
+	t.Parallel()
 	r := &turnRunner{}
 	oldGeneration := r.requestGeneration
 	r.detachFromRequestContext()
@@ -79,6 +82,7 @@ func TestStaleRequestGenerationCannotAbortReattachedRunner(t *testing.T) {
 }
 
 func TestOnResultCallbackIsConsumedByOneTurn(t *testing.T) {
+	t.Parallel()
 	r := &turnRunner{updates: make(chan toolproxy.TurnFinalResult, 2)}
 	calls := 0
 	r.setOnResult(func(*TurnResult) error {
@@ -93,6 +97,7 @@ func TestOnResultCallbackIsConsumedByOneTurn(t *testing.T) {
 }
 
 func TestTurnRunnerRejectsOversizedToolRequestPayload(t *testing.T) {
+	t.Parallel()
 	events := make(chan copilot.SessionEvent, 1)
 	runner := &turnRunner{
 		maxOutputBytes: 128,
@@ -210,6 +215,7 @@ func awaitStreamedText(t *testing.T, stream <-chan ResponseStreamEvent) string {
 // would strand the goroutine, the active-registry entry, the client's stream and
 // the sessionstore pins that block retention.
 func TestOnResultErrorTerminatesLoop(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
@@ -234,6 +240,7 @@ func TestOnResultErrorTerminatesLoop(t *testing.T) {
 // plus Disconnect stops event delivery, so abort has to be an exit gate for the
 // loop. RealGateway.Stop relies on this to drain runners inside its deadline.
 func TestAbortTerminatesLoop(t *testing.T) {
+	t.Parallel()
 	runner, unpinned := newLoopTestRunner(make(chan copilot.SessionEvent), time.Minute)
 
 	go runner.loop(&RealGateway{})
@@ -247,6 +254,7 @@ func TestAbortTerminatesLoop(t *testing.T) {
 // session: nothing else bounds the wait, so the idle ceiling must fail the turn
 // with a real error rather than let the client hang.
 func TestTurnRunnerIdleTimeoutFailsTurn(t *testing.T) {
+	t.Parallel()
 	runner, unpinned := newLoopTestRunner(make(chan copilot.SessionEvent), 20*time.Millisecond)
 
 	go runner.loop(&RealGateway{})
@@ -256,6 +264,7 @@ func TestTurnRunnerIdleTimeoutFailsTurn(t *testing.T) {
 }
 
 func TestTurnRunnerIdleTimeoutStaysAboveToolCallTTL(t *testing.T) {
+	t.Parallel()
 	if got := (&RealGateway{}).idleTimeoutForTurns(); got != turnRunnerIdleTimeout {
 		t.Fatalf("default idle timeout = %s, want %s", got, turnRunnerIdleTimeout)
 	}
@@ -268,6 +277,7 @@ func TestTurnRunnerIdleTimeoutStaysAboveToolCallTTL(t *testing.T) {
 // TestRequestCancelTerminatesAttachedLoop covers the originating request going
 // away while the runner still belongs to it.
 func TestRequestCancelTerminatesAttachedLoop(t *testing.T) {
+	t.Parallel()
 	runner, unpinned := newLoopTestRunner(make(chan copilot.SessionEvent), time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	runner.ctx = ctx
@@ -287,6 +297,7 @@ func TestRequestCancelTerminatesAttachedLoop(t *testing.T) {
 // is then the only remaining exit gate, which also covers the "ended before
 // idle" branch.
 func TestRequestCancelDoesNotTerminateDetachedLoop(t *testing.T) {
+	t.Parallel()
 	events := make(chan copilot.SessionEvent)
 	runner, unpinned := newLoopTestRunner(events, time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -310,6 +321,7 @@ func TestRequestCancelDoesNotTerminateDetachedLoop(t *testing.T) {
 }
 
 func TestToolRequestPayloadSizeIncludesArguments(t *testing.T) {
+	t.Parallel()
 	requests := []copilot.AssistantMessageToolRequest{{ToolCallID: "call_1", Name: "lookup", Arguments: map[string]any{"payload": strings.Repeat("x", 1024)}}}
 	size, err := toolRequestPayloadSize(requests)
 	if err != nil {
@@ -321,6 +333,7 @@ func TestToolRequestPayloadSizeIncludesArguments(t *testing.T) {
 }
 
 func TestReasoningAccumulatorReplacesDeltaBufferWithConsolidatedText(t *testing.T) {
+	t.Parallel()
 	var accumulator reasoningAccumulator
 	accumulator.addDelta(strings.Repeat("a", 64), "reasoning")
 	accumulator.addConsolidated("final", "reasoning")
@@ -333,6 +346,7 @@ func TestReasoningAccumulatorReplacesDeltaBufferWithConsolidatedText(t *testing.
 }
 
 func TestCurrentResponseIDUsesContinuationMetadata(t *testing.T) {
+	t.Parallel()
 	r := &turnRunner{responseID: "resp_initial"}
 	if got := r.currentResponseID(); got != "resp_initial" {
 		t.Fatalf("currentResponseID without meta = %q, want resp_initial", got)
@@ -349,6 +363,7 @@ func TestCurrentResponseIDUsesContinuationMetadata(t *testing.T) {
 }
 
 func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
 	if err != nil {
@@ -400,6 +415,7 @@ func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 // disconnects the SDK session, and a runner built for tests has no live
 // JSON-RPC client behind its session handle.
 func TestTurnAccumulatesTextAcrossAssistantMessages(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
@@ -439,6 +455,7 @@ func TestTurnAccumulatesTextAcrossAssistantMessages(t *testing.T) {
 // the next turn. The continuation here arrives without an AssistantTurnStart
 // event, which makes the tool boundary the only reset keeping the turns apart.
 func TestToolCallBoundaryResetsAccumulatedText(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
@@ -463,6 +480,7 @@ func TestToolCallBoundaryResetsAccumulatedText(t *testing.T) {
 }
 
 func TestTurnDebugStatsObserve(t *testing.T) {
+	t.Parallel()
 	s := newTurnDebugStats()
 	s.observeContentDelta("abc")
 	d := s.observeContentDelta("de")
@@ -493,6 +511,7 @@ func TestTurnDebugStatsObserve(t *testing.T) {
 }
 
 func TestReasoningAccumulatorPrefersConsolidated(t *testing.T) {
+	t.Parallel()
 	var a reasoningAccumulator
 	a.addDelta("think ", "r1")
 	a.addDelta("more", "r1")
@@ -509,6 +528,7 @@ func TestReasoningAccumulatorPrefersConsolidated(t *testing.T) {
 // reasoning reset: after a tool boundary, the just-emitted turn's late final
 // reasoning block must not seed the next turn, but a genuinely new turn must.
 func TestReasoningAccumulatorMarkToolBoundaryDropsLateFinal(t *testing.T) {
+	t.Parallel()
 	var a reasoningAccumulator
 	a.addDelta("turn1", "r1")
 	a.markToolBoundary()
@@ -525,6 +545,7 @@ func TestReasoningAccumulatorMarkToolBoundaryDropsLateFinal(t *testing.T) {
 // TestDebugDeltaContentGating asserts per-delta debug logs include sizes but only
 // include the raw delta text when COPILOT_LOG_CONTENT (cfg.LogContent) is set.
 func TestDebugDeltaContentGating(t *testing.T) {
+	t.Parallel()
 	const secret = "SECRET_DELTA_CONTENT"
 	cases := []struct {
 		name        string
@@ -536,6 +557,7 @@ func TestDebugDeltaContentGating(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			g := &RealGateway{cfg: config.Config{LogContent: tc.logContent}, log: logger}

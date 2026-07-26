@@ -48,6 +48,7 @@ func fillSessionEventSink(s *sessionEventSink) {
 // has to travel back over that very read loop - and the callback must still
 // return.
 func TestSessionEventCallbackNeverBlocksStalledConsumer(t *testing.T) {
+	t.Parallel()
 	logs := &syncBuffer{}
 	sink := newSessionEventSink(slog.New(slog.NewJSONHandler(logs, nil)))
 	done := make(chan struct{})
@@ -85,6 +86,7 @@ func TestSessionEventCallbackNeverBlocksStalledConsumer(t *testing.T) {
 // silent: the consumer is handed a terminal session error so the runner fails
 // the turn instead of waiting for events it will never see.
 func TestSessionEventSinkFailsTurnAfterOverflow(t *testing.T) {
+	t.Parallel()
 	sink := newSessionEventSink(nil)
 	done := make(chan struct{})
 	defer close(done)
@@ -117,6 +119,7 @@ func TestSessionEventSinkFailsTurnAfterOverflow(t *testing.T) {
 // WarmResponseSession: its channel has no reader until the follow-up request
 // attaches a runner, so events must be buffered rather than dropped.
 func TestSessionEventSinkBuffersWhileConsumerIsAbsent(t *testing.T) {
+	t.Parallel()
 	sink := newSessionEventSink(nil)
 	const total = sessionEventBuffer + 64
 
@@ -159,6 +162,7 @@ func TestSessionEventSinkBuffersWhileConsumerIsAbsent(t *testing.T) {
 // terminal state: once the runner loop is gone nothing can consume the spill,
 // so it is released and the loss is logged instead of stalling the read loop.
 func TestSessionEventSinkReportsDropsAfterConsumerFinished(t *testing.T) {
+	t.Parallel()
 	logs := &syncBuffer{}
 	sink := newSessionEventSink(slog.New(slog.NewJSONHandler(logs, nil)))
 	done := make(chan struct{})

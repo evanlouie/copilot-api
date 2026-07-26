@@ -51,6 +51,7 @@ func readHydratedEvents(t *testing.T, g *RealGateway, sessionID string) []copilo
 // as real Copilot session events (the mechanism Chat Completions already used)
 // rather than flattening it into a prose blob inside one user prompt.
 func TestResponseColdContinuationReplaysChainAsSessionEvents(t *testing.T) {
+	t.Parallel()
 	g := newHydrationGateway(t)
 	first := sessionstore.ResponseRecord{
 		ID:        "resp_a",
@@ -145,6 +146,7 @@ func TestResponseColdContinuationReplaysChainAsSessionEvents(t *testing.T) {
 // vocabulary that has no session-event equivalent. Those items must survive as
 // text instead of becoming SDK tool requests that nothing ever answers.
 func TestResponseContinuationHistoryDegradesUnreplayableItems(t *testing.T) {
+	t.Parallel()
 	records := []sessionstore.ResponseRecord{
 		{
 			ID:        "resp_prev",
@@ -198,6 +200,7 @@ func TestResponseContinuationHistoryDegradesUnreplayableItems(t *testing.T) {
 }
 
 func TestResponseContinuationFollowUpKeepsClientInput(t *testing.T) {
+	t.Parallel()
 	if got := responseContinuationFollowUp(resolvedPrompt{Text: "next question"}); got.Text != "next question" {
 		t.Fatalf("prompt = %q, want the client's own input", got.Text)
 	}

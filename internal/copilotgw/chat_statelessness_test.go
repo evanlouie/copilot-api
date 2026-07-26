@@ -26,6 +26,7 @@ import (
 // for a chat turn would also start consuming the responses retention quota and
 // would make `GET /v1/responses/{id}` answer for ids Chat never handed out.
 func TestChatTurnPersistsNoResponseRecord(t *testing.T) {
+	t.Parallel()
 	dataDir, stateDir := t.TempDir(), t.TempDir()
 	store := sessionstore.New(dataDir, stateDir, t.TempDir())
 	if err := store.Ensure(); err != nil {
@@ -98,6 +99,7 @@ var responseStateOperations = []string{"SaveResponse", "PinResponse", "LoadRespo
 // future work, and this is the fence that keeps that work from quietly giving
 // Chat `store` semantics.
 func TestChatSurfaceNeverReachesResponseStore(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	funcs := map[string][]*ast.FuncDecl{}
 	entries, err := os.ReadDir(".")

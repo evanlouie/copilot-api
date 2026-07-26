@@ -13,6 +13,7 @@ import (
 )
 
 func TestLiveCopilotTextCompletion(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
 		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
 	}
@@ -50,6 +51,7 @@ func TestLiveCopilotTextCompletion(t *testing.T) {
 // reasoning deltas before any visible content delta. This is the live
 // counterpart to the deterministic encoder ordering tests.
 func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
 		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
 	}
@@ -134,6 +136,7 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 }
 
 func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
 		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
 	}

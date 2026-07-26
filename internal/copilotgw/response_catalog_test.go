@@ -14,6 +14,7 @@ import (
 )
 
 func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
 	if err != nil {
@@ -36,6 +37,7 @@ func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *
 }
 
 func TestValidateResponseToolOutputsRejectsFailedToolSearchWithTools(t *testing.T) {
+	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
 	if err != nil {
@@ -55,6 +57,7 @@ func TestValidateResponseToolOutputsRejectsFailedToolSearchWithTools(t *testing.
 }
 
 func TestMergeLoadedToolSearchOutputsUsesPreviousCatalogAndPersistsEvent(t *testing.T) {
+	t.Parallel()
 	base, err := toolcatalog.NewToolCatalog([]toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}})
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +103,7 @@ func containsString(values []string, want string) bool {
 }
 
 func TestResponseCatalogForContinuationMergesRequestToolsIntoStoredCatalog(t *testing.T) {
+	t.Parallel()
 	base, err := toolcatalog.NewToolCatalog([]toolcatalog.NormalizedTool{
 		{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
 		{Kind: toolcatalog.ToolKindNamespace, Name: "multi_agent_v1", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "spawn_agent"}}},
@@ -119,6 +123,7 @@ func TestResponseCatalogForContinuationMergesRequestToolsIntoStoredCatalog(t *te
 }
 
 func TestActiveResponseToolOutputsFromRecordRejectsSpoofedLoadedToolCallID(t *testing.T) {
+	t.Parallel()
 	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "tool_search_call", CallID: "call_real", Execution: "client"}}}
 	_, err := activeResponseToolOutputsFromRecord(record, map[string]toolcatalog.ResponseToolOutput{
 		"call_real":  {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_real", Execution: "client", Output: "none"},
@@ -130,6 +135,7 @@ func TestActiveResponseToolOutputsFromRecordRejectsSpoofedLoadedToolCallID(t *te
 }
 
 func TestActiveResponseToolOutputsFromRecordRejectsLoadedToolsForFunctionCall(t *testing.T) {
+	t.Parallel()
 	record := sessionstore.ResponseRecord{ID: "resp_prev", Output: []openai.ResponseOutputItem{{Type: "function_call", CallID: "call_lookup", Name: "lookup"}}}
 	_, err := activeResponseToolOutputsFromRecord(record, map[string]toolcatalog.ResponseToolOutput{
 		"call_lookup": {Kind: toolcatalog.ToolKindFunction, CallID: "call_lookup", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "evil"}}},
@@ -140,6 +146,7 @@ func TestActiveResponseToolOutputsFromRecordRejectsLoadedToolsForFunctionCall(t 
 }
 
 func TestMergeLoadedToolSearchOutputsRequiresCatalogForMigratedRecords(t *testing.T) {
+	t.Parallel()
 	outputs := map[string]toolcatalog.ResponseToolOutput{
 		"call_search": {Kind: toolcatalog.ToolKindToolSearch, CallID: "call_search", Execution: "client", Status: "completed", LoadedTools: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "loaded_tool"}}},
 	}

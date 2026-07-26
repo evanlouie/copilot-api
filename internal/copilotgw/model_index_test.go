@@ -72,6 +72,7 @@ func catalog(ids ...string) []Model {
 // replace cache.models and checks the index afterwards. A rebuild missed on any
 // one of them lets a lookup answer from a stale index against fresh models.
 func TestModelIndexStaysConsistentAcrossRefreshPaths(t *testing.T) {
+	t.Parallel()
 	var current []Model
 	var fetchErr error
 	gw := &RealGateway{
@@ -140,6 +141,7 @@ func TestModelIndexStaysConsistentAcrossRefreshPaths(t *testing.T) {
 // TestModelIndexResolvesDuplicateIDsLikeTheScanItReplaced pins the tie-break.
 // The linear scan returned the first match; so must the index.
 func TestModelIndexResolvesDuplicateIDsLikeTheScanItReplaced(t *testing.T) {
+	t.Parallel()
 	models := []Model{{ID: "dup", Name: "first"}, {ID: "other"}, {ID: "dup", Name: "second"}}
 	cache := newModelCacheWithModels(models, time.Hour)
 	got, ok := cache.lookupModelLocked("dup")
@@ -155,6 +157,7 @@ func TestModelIndexResolvesDuplicateIDsLikeTheScanItReplaced(t *testing.T) {
 // TestLookupModelReturnsAnIndependentCopy keeps the deep clone that callers
 // relied on when findModel handed out an entry from a freshly cloned catalog.
 func TestLookupModelReturnsAnIndependentCopy(t *testing.T) {
+	t.Parallel()
 	limit := int64(128_000)
 	gw := &RealGateway{modelCache: newModelCacheWithModels([]Model{{
 		ID:                        "gpt-5",
@@ -198,6 +201,7 @@ func TestLookupModelReturnsAnIndependentCopy(t *testing.T) {
 // id in a catalog plus the not-found and empty-id cases findModel handles
 // specially.
 func TestFindModelAgreesWithLinearScan(t *testing.T) {
+	t.Parallel()
 	models := catalog("a", "b", "c")
 	gw := &RealGateway{
 		modelCache:    newModelCacheWithModels(models, time.Hour),
