@@ -14,44 +14,41 @@ import (
 // chatFieldSamples pairs every validated chat field with a realistic non-null
 // value that must still be rejected once the field is genuinely present.
 var chatFieldSamples = map[string]string{
-	"audio":                 `{"voice":"alloy","format":"mp3"}`,
-	"function_call":         `"auto"`,
-	"functions":             `[{"name":"lookup","parameters":{"type":"object"}}]`,
-	"logit_bias":            `{"1234":-100}`,
-	"logprobs":              `true`,
-	"top_logprobs":          `3`,
-	"max_tokens":            `20`,
-	"max_completion_tokens": `20`,
-	"modalities":            `["text"]`,
-	"prediction":            `{"type":"content","content":"draft"}`,
-	"response_format":       `{"type":"json_object"}`,
-	"stop":                  `["done"]`,
-	"n":                     `2`,
-	"temperature":           `0.5`,
-	"top_p":                 `0.9`,
-	"presence_penalty":      `0.1`,
-	"frequency_penalty":     `0.2`,
-	"seed":                  `7`,
-	"metadata":              `{"trace":"abc"}`,
-	"service_tier":          `"auto"`,
-	"user":                  `"user-1"`,
+	"audio":             `{"voice":"alloy","format":"mp3"}`,
+	"function_call":     `"auto"`,
+	"functions":         `[{"name":"lookup","parameters":{"type":"object"}}]`,
+	"logit_bias":        `{"1234":-100}`,
+	"logprobs":          `true`,
+	"top_logprobs":      `3`,
+	"modalities":        `["text"]`,
+	"prediction":        `{"type":"content","content":"draft"}`,
+	"response_format":   `{"type":"json_object"}`,
+	"stop":              `["done"]`,
+	"n":                 `2`,
+	"temperature":       `0.5`,
+	"top_p":             `0.9`,
+	"presence_penalty":  `0.1`,
+	"frequency_penalty": `0.2`,
+	"seed":              `7`,
+	"metadata":          `{"trace":"abc"}`,
+	"service_tier":      `"auto"`,
+	"user":              `"user-1"`,
 }
 
 // responsesFieldSamples is the Responses equivalent of chatFieldSamples. Values
 // for strict-only fields are deliberately well-formed so that strict mode is
 // rejecting on presence rather than on content.
 var responsesFieldSamples = map[string]string{
-	"background":        `true`,
-	"max_output_tokens": `256`,
-	"truncation":        `"auto"`,
-	"temperature":       `0.5`,
-	"top_p":             `0.9`,
-	"include":           `["reasoning.encrypted_content"]`,
-	"reasoning":         `{"effort":"medium"}`,
-	"text":              `{"verbosity":"low"}`,
-	"metadata":          `{"trace":"abc"}`,
-	"service_tier":      `"auto"`,
-	"user":              `"user-1"`,
+	"background":   `true`,
+	"truncation":   `"auto"`,
+	"temperature":  `0.5`,
+	"top_p":        `0.9`,
+	"include":      `["reasoning.encrypted_content"]`,
+	"reasoning":    `{"effort":"medium"}`,
+	"text":         `{"verbosity":"low"}`,
+	"metadata":     `{"trace":"abc"}`,
+	"service_tier": `"auto"`,
+	"user":         `"user-1"`,
 }
 
 func TestRawFieldPresentTreatsNullAsAbsent(t *testing.T) {
@@ -151,8 +148,31 @@ func TestChatNullFieldsFromOpenAIPythonExplicitNone(t *testing.T) {
 	if req.MaxTokens != nil || req.Temperature != nil {
 		t.Fatalf("null typed fields decoded to non-nil: MaxTokens=%v Temperature=%v", req.MaxTokens, req.Temperature)
 	}
+	if _, ok := req.RequestedMaxOutputTokens(); ok {
+		t.Fatal(`{"max_tokens":null} reported a requested output cap`)
+	}
 	assertChatAccepted(t, req, false)
 	assertChatAccepted(t, req, true)
+}
+
+// max_tokens and max_completion_tokens are accepted rather than rejected, so
+// their decoded values have to remain reachable for diagnostics.
+func TestRequestedMaxOutputTokensPrefersMaxCompletionTokens(t *testing.T) {
+	req := decodeChatRequest(t, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"max_completion_tokens":32}`)
+	if tokens, ok := req.RequestedMaxOutputTokens(); !ok || tokens != 32 {
+		t.Fatalf("RequestedMaxOutputTokens = %d, %t; want 32, true", tokens, ok)
+	}
+	legacy := decodeChatRequest(t, chatBody("max_tokens", `16`))
+	if tokens, ok := legacy.RequestedMaxOutputTokens(); !ok || tokens != 16 {
+		t.Fatalf("RequestedMaxOutputTokens = %d, %t; want 16, true", tokens, ok)
+	}
+	responses := decodeResponsesRequest(t, responsesBody("max_output_tokens", `64`))
+	if tokens, ok := ResponsesMaxOutputTokens(responses); !ok || tokens != 64 {
+		t.Fatalf("ResponsesMaxOutputTokens = %d, %t; want 64, true", tokens, ok)
+	}
+	if _, ok := ResponsesMaxOutputTokens(decodeResponsesRequest(t, responsesBody("max_output_tokens", `null`))); ok {
+		t.Fatal(`{"max_output_tokens":null} reported a requested output cap`)
+	}
 }
 
 // TestChatNullNNeverReachesIsOne covers the {"n": null} sub-case: isOne cannot

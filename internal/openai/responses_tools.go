@@ -61,13 +61,42 @@ func NormalizeResponsesToolsWithMode(tools []Tool, strict bool) ([]NormalizedToo
 	return out, nil
 }
 
+// hostedResponsesToolTypes are the OpenAI-hosted or proxy-executed Responses
+// tools this proxy cannot run. They are enumerated so that permissive mode can
+// drop exactly these (with a debug log) while any other unrecognized type stays
+// a 400: a typo like {"type":"funcion"} must surface, not disappear.
+var hostedResponsesToolTypes = map[string]struct{}{
+	"web_search":           {},
+	"web_search_preview":   {},
+	"image_generation":     {},
+	"mcp":                  {},
+	"file_search":          {},
+	"computer_use_preview": {},
+	"code_interpreter":     {},
+}
+
 func canIgnoreUnsupportedResponsesTool(tool Tool) bool {
-	switch tool.Type {
-	case "", "function", "custom", "namespace", "tool_search":
-		return false
-	default:
-		return true
+	_, hosted := hostedResponsesToolTypes[tool.Type]
+	return hosted
+}
+
+// IgnoredResponsesToolTypes lists the hosted tool types that
+// NormalizeResponsesToolsWithMode drops in permissive mode, so the HTTP layer
+// can report them at debug level.
+func IgnoredResponsesToolTypes(tools []Tool) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, tool := range tools {
+		if !canIgnoreUnsupportedResponsesTool(tool) {
+			continue
+		}
+		if _, exists := seen[tool.Type]; exists {
+			continue
+		}
+		seen[tool.Type] = struct{}{}
+		out = append(out, tool.Type)
 	}
+	return out
 }
 
 func ValidateToolSearchOutputTools(raw json.RawMessage, param string) error {
@@ -187,11 +216,12 @@ func normalizeResponsesTool(tool Tool, param string, namespaceChild bool) (Norma
 			return NormalizedTool{}, err
 		}
 		return NormalizedTool{Kind: ToolKindToolSearch, Name: "tool_search", Description: tool.Description, Parameters: cloneRaw(tool.Parameters), Execution: execution, Raw: cloneRaw(tool.Raw)}, nil
-	case "web_search", "web_search_preview", "image_generation", "mcp", "file_search", "computer_use_preview", "code_interpreter":
-		return NormalizedTool{}, InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
 	case "":
 		return NormalizedTool{}, InvalidRequest("tool type is required", param+".type")
 	default:
+		if _, hosted := hostedResponsesToolTypes[typ]; hosted {
+			return NormalizedTool{}, InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
+		}
 		return NormalizedTool{}, InvalidRequest("unsupported Responses tool type", param+".type")
 	}
 }
@@ -214,9 +244,10 @@ func normalizeLoadableToolSearchTool(tool Tool, param string) (NormalizedTool, e
 		return normalizeResponsesTool(tool, param, false)
 	case "custom", "tool_search":
 		return NormalizedTool{}, InvalidRequest("tool_search_output.tools may only contain loadable function or namespace tools", param+".type")
-	case "web_search", "web_search_preview", "image_generation", "mcp", "file_search", "computer_use_preview", "code_interpreter":
-		return NormalizedTool{}, InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
 	default:
+		if _, hosted := hostedResponsesToolTypes[typ]; hosted {
+			return NormalizedTool{}, InvalidRequest("hosted or proxy-executed Responses tools are not supported", param+".type")
+		}
 		return NormalizedTool{}, InvalidRequest("unsupported tool_search_output tool type", param+".type")
 	}
 }

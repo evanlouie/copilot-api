@@ -421,6 +421,35 @@ func (c Content) Prompt() (PromptContent, error) {
 	return PromptContent{}, fmt.Errorf("content must be a string or content parts")
 }
 
+// ToolOutput renders tool-result content as the plain string the Copilot SDK
+// consumes. Clients send tool results as a string, as content parts, or - as
+// LangChain's ToolMessage and MCP bridges do - as an arbitrary JSON value; a
+// non-string JSON value round-trips as its compact encoding so nothing the
+// client meant is lost. This is the one definition of "valid tool output": both
+// request validation and the Chat Completions handler call it.
+func (c Content) ToolOutput() (string, error) {
+	if !c.Present || c.IsNull {
+		return "", nil
+	}
+	if s, err := c.Text(); err == nil {
+		return s, nil
+	}
+	var v any
+	if err := json.Unmarshal(c.Raw, &v); err != nil {
+		return "", fmt.Errorf("tool output must be a string, content parts, or a JSON value")
+	}
+	switch v.(type) {
+	case map[string]any, []any:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("tool output must be a string, content parts, or a JSON value")
+		}
+		return string(b), nil
+	default:
+		return string(bytes.TrimSpace(c.Raw)), nil
+	}
+}
+
 type ContentPart struct {
 	Type     string          `json:"type"`
 	Text     string          `json:"text,omitempty"`

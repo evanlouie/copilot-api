@@ -7,7 +7,25 @@ import (
 	"strings"
 )
 
-var functionNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+// Request validation follows a single policy on both surfaces:
+//
+//	Reject unknown. Accept-and-ignore known-but-unsupported. Never silently drop
+//	something the client could have meant.
+//
+// A parameter OpenAI documents but the Copilot SDK cannot honour (max_tokens,
+// parallel_tool_calls=false, a forcing tool_choice) is accepted here and
+// reported at debug level by the HTTP layer. A parameter, value, or tool type
+// OpenAI does not document is a 400 so client typos surface instead of being
+// dropped. COPILOT_STRICT_COMPAT may still reject more, but permissive mode is
+// the default and has to accept what real OpenAI clients send.
+
+// functionNameRE mirrors OpenAI's documented function-name grammar ("a-z, A-Z,
+// 0-9, underscores and dashes, with a maximum length of 64"), which allows a
+// leading digit such as 2fa_verify. It is deliberately not the same constraint
+// as ResponsesSDKToolNameRE: that one guards the identifiers handed to the
+// Copilot SDK, and names failing it are aliased by SafeResponsesSDKAlias rather
+// than rejected.
+var functionNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type unsupportedField struct {
 	name    string
@@ -20,10 +38,8 @@ var alwaysRejectChatFields = []unsupportedField{
 	{name: "function_call", message: "legacy function_call is not supported; use tools"},
 	{name: "functions", message: "legacy functions are not supported; use tools"},
 	{name: "logit_bias", message: "logit_bias is not supported"},
-	{name: "logprobs", message: "logprobs is not supported"},
+	{name: "logprobs", message: "logprobs is not supported", allow: isFalse},
 	{name: "top_logprobs", message: "top_logprobs is not supported"},
-	{name: "max_tokens", message: "max_tokens is not supported by this proxy in MVP"},
-	{name: "max_completion_tokens", message: "max_completion_tokens is not supported by this proxy in MVP"},
 	{name: "modalities", message: "modalities are not supported"},
 	{name: "prediction", message: "prediction is not supported"},
 	{name: "response_format", message: "response_format is not supported in MVP"},
@@ -44,7 +60,6 @@ var strictOnlyChatFields = []unsupportedField{
 
 var alwaysRejectResponseFields = []unsupportedField{
 	{name: "background", message: "background mode is not supported"},
-	{name: "max_output_tokens", message: "max_output_tokens is not supported by this proxy in MVP"},
 	{name: "truncation", message: "truncation controls are not supported in MVP"},
 }
 
@@ -74,9 +89,11 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 			return err
 		}
 	}
-	// The backend may produce a batch and cannot enforce serial planning.
-	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
-		return InvalidRequest("parallel_tool_calls=false is not supported", "parallel_tool_calls")
+	if err := validateMaxOutputTokens(req.MaxTokens, "max_tokens"); err != nil {
+		return err
+	}
+	if err := validateMaxOutputTokens(req.MaxCompletionTokens, "max_completion_tokens"); err != nil {
+		return err
 	}
 	if err := ValidateTools(req.Tools); err != nil {
 		return err
@@ -90,16 +107,22 @@ func ValidateChatRequest(req *ChatCompletionRequest, strict bool) error {
 		default:
 			return InvalidRequest(fmt.Sprintf("unsupported message role %q", msg.Role), fmt.Sprintf("messages.%d.role", i))
 		}
-		if msg.Role == "tool" && msg.ToolCallID == "" {
-			return InvalidRequest("tool messages require tool_call_id", fmt.Sprintf("messages.%d.tool_call_id", i))
-		}
 		if msg.Role != "assistant" && len(msg.ToolCalls) > 0 {
 			return InvalidRequest("tool_calls are only valid on assistant messages", fmt.Sprintf("messages.%d.tool_calls", i))
 		}
 		var err error
-		if msg.Role == "user" {
+		switch msg.Role {
+		case "tool":
+			if msg.ToolCallID == "" {
+				return InvalidRequest("tool messages require tool_call_id", fmt.Sprintf("messages.%d.tool_call_id", i))
+			}
+			// Tool results are data, not prose: LangChain's ToolMessage and MCP
+			// bridges routinely carry a JSON object or array, so they get their own
+			// branch instead of the text-only path.
+			_, err = msg.Content.ToolOutput()
+		case "user":
 			_, err = msg.Prompt()
-		} else {
+		default:
 			_, err = msg.Text()
 		}
 		if err != nil {
@@ -126,6 +149,9 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 			return err
 		}
 	}
+	if err := validateResponsesMaxOutputTokens(req.Raw); err != nil {
+		return err
+	}
 	if err := validateResponsesInclude(req.Include); err != nil {
 		return err
 	}
@@ -135,9 +161,6 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 	if err := validateResponsesText(req.Text); err != nil {
 		return err
 	}
-	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
-		return InvalidRequest("parallel_tool_calls=false is not supported for Responses through this backend", "parallel_tool_calls")
-	}
 	if err := ValidateResponsesTools(req.Tools, strict); err != nil {
 		return err
 	}
@@ -145,6 +168,22 @@ func ValidateResponsesRequest(req *ResponsesRequest, strict bool) error {
 		return err
 	}
 	return nil
+}
+
+// knownResponsesIncludeValues is OpenAI's documented include enum. Every entry
+// asks for extra output detail, so an entry this proxy cannot produce is simply
+// absent from the response rather than fatal — strict mode still rejects the
+// whole field, matching its "include is ignored by this proxy in permissive
+// mode" message. A value outside the enum is a typo and is rejected.
+var knownResponsesIncludeValues = map[string]struct{}{
+	"code_interpreter_call.outputs":         {},
+	"computer_call_output.output.image_url": {},
+	"file_search_call.results":              {},
+	"message.input_image.image_url":         {},
+	"message.output_text.logprobs":          {},
+	"reasoning.encrypted_content":           {},
+	"web_search_call.action.sources":        {},
+	"web_search_call.results":               {},
 }
 
 func validateResponsesInclude(raw json.RawMessage) error {
@@ -156,11 +195,62 @@ func validateResponsesInclude(raw json.RawMessage) error {
 		return InvalidRequest("include must be an array of strings", "include")
 	}
 	for _, value := range values {
-		if value != "reasoning.encrypted_content" {
-			return InvalidRequest("unsupported include value", "include")
+		if _, ok := knownResponsesIncludeValues[value]; !ok {
+			return InvalidRequest("unknown include value", "include")
 		}
 	}
 	return nil
+}
+
+// validateMaxOutputTokens accepts any positive cap. The Copilot SDK exposes no
+// per-request output cap for CAPI sessions (only ProviderConfig.MaxOutputTokens,
+// which applies to BYOK providers this proxy does not configure), so the value is
+// accepted, surfaced through RequestedMaxOutputTokens, and logged at debug.
+func validateMaxOutputTokens(value *int, param string) error {
+	if value != nil && *value < 1 {
+		return InvalidRequest(param+" must be a positive integer", param)
+	}
+	return nil
+}
+
+func validateResponsesMaxOutputTokens(raw map[string]json.RawMessage) error {
+	value, ok := raw["max_output_tokens"]
+	if !ok {
+		return nil
+	}
+	var tokens int
+	if err := json.Unmarshal(value, &tokens); err != nil || tokens < 1 {
+		return InvalidRequest("max_output_tokens must be a positive integer", "max_output_tokens")
+	}
+	return nil
+}
+
+// RequestedMaxOutputTokens reports the output cap the client asked for,
+// preferring max_completion_tokens over the deprecated max_tokens the way the
+// OpenAI API does. Callers use it for diagnostics only; see
+// validateMaxOutputTokens for why the value cannot be forwarded.
+func (r *ChatCompletionRequest) RequestedMaxOutputTokens() (int, bool) {
+	if r.MaxCompletionTokens != nil {
+		return *r.MaxCompletionTokens, true
+	}
+	if r.MaxTokens != nil {
+		return *r.MaxTokens, true
+	}
+	return 0, false
+}
+
+// ResponsesMaxOutputTokens is the Responses counterpart of
+// RequestedMaxOutputTokens.
+func ResponsesMaxOutputTokens(req *ResponsesRequest) (int, bool) {
+	raw, ok := req.Raw["max_output_tokens"]
+	if !ok {
+		return 0, false
+	}
+	var tokens int
+	if err := json.Unmarshal(raw, &tokens); err != nil {
+		return 0, false
+	}
+	return tokens, true
 }
 
 func validateResponsesReasoning(req *ResponsesRequest) error {
@@ -218,9 +308,56 @@ func validateResponsesText(raw json.RawMessage) error {
 		}
 	}
 	if raw, ok := fields["format"]; ok && string(raw) != "null" {
-		return InvalidRequest("text.format is not supported in MVP", "text.format")
+		if err := validateResponsesTextFormat(raw); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// validateResponsesTextFormat checks the shape of text.format only. Permissive
+// mode ignores text controls (strict mode rejects the whole field), so a known
+// format type this proxy cannot enforce is accepted and logged at debug rather
+// than rejected; "text" is the explicit default and always fine.
+func validateResponsesTextFormat(raw json.RawMessage) error {
+	fields, err := rawObject(raw, "text.format")
+	if err != nil {
+		return err
+	}
+	var formatType string
+	if err := json.Unmarshal(fields["type"], &formatType); err != nil || formatType == "" {
+		return InvalidRequest("text.format.type must be a string", "text.format.type")
+	}
+	switch formatType {
+	case "text", "json_object", "json_schema":
+		return nil
+	default:
+		return InvalidRequest("unknown text.format.type", "text.format.type")
+	}
+}
+
+// ResponsesTextFormatType reports the requested text.format.type, if any.
+func ResponsesTextFormatType(req *ResponsesRequest) string {
+	if len(req.Text) == 0 || string(req.Text) == "null" {
+		return ""
+	}
+	fields, err := rawObject(req.Text, "text")
+	if err != nil {
+		return ""
+	}
+	raw, ok := fields["format"]
+	if !ok {
+		return ""
+	}
+	formatFields, err := rawObject(raw, "text.format")
+	if err != nil {
+		return ""
+	}
+	var formatType string
+	if err := json.Unmarshal(formatFields["type"], &formatType); err != nil {
+		return ""
+	}
+	return formatType
 }
 
 func rawObject(raw json.RawMessage, param string) (map[string]json.RawMessage, error) {
@@ -287,7 +424,7 @@ func validateTools(tools []Tool, allowUnsupported bool) error {
 		}
 		fn := tool.Function
 		if !functionNameRE.MatchString(fn.Name) {
-			return InvalidRequest("function tool name must match ^[A-Za-z_][A-Za-z0-9_-]{0,63}$", fmt.Sprintf("tools.%d.function.name", i))
+			return InvalidRequest("function tool name must match ^[A-Za-z0-9_-]{1,64}$", fmt.Sprintf("tools.%d.function.name", i))
 		}
 		if _, ok := seen[fn.Name]; ok {
 			return InvalidRequest("duplicate function tool name", fmt.Sprintf("tools.%d.function.name", i))
@@ -313,34 +450,71 @@ func SupportedTools(tools []Tool) []Tool {
 	return out
 }
 
-func validateToolChoice(raw json.RawMessage) error {
+// ToolChoice is a decoded tool_choice value.
+type ToolChoice struct {
+	// Kind is "", "auto", "none", "required", "function", "custom", or
+	// "allowed_tools".
+	Kind string
+	// Name is the forced tool name for the "function" and "custom" kinds.
+	Name string
+}
+
+// Honored reports whether the Copilot SDK can enforce this choice. "auto" is
+// the backend's own behavior and "none" is emulated by withholding the tool
+// catalog; the forcing modes have no SDK equivalent, so they are accepted and
+// logged at debug instead of rejected. OpenAI's Structured Outputs guidance
+// alone makes rejecting them untenable.
+func (c ToolChoice) Honored() bool {
+	return c.Kind == "" || c.Kind == "auto" || c.Kind == "none"
+}
+
+// ParseToolChoice decodes tool_choice, rejecting only values OpenAI does not
+// define.
+func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return nil
+		return ToolChoice{}, nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		switch s {
-		case "auto", "none":
-			return nil
-		case "required":
-			return InvalidRequest("tool_choice=required is not supported by this backend", "tool_choice")
+		case "auto", "none", "required":
+			return ToolChoice{Kind: s}, nil
 		default:
-			return InvalidRequest("unsupported tool_choice", "tool_choice")
+			return ToolChoice{}, InvalidRequest("tool_choice must be auto, none, required, or a tool object", "tool_choice")
 		}
 	}
 	var obj struct {
 		Type     string `json:"type"`
+		Name     string `json:"name"`
 		Function struct {
 			Name string `json:"name"`
 		} `json:"function"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return InvalidRequest("tool_choice must be auto, none, required, or a function object", "tool_choice")
+		return ToolChoice{}, InvalidRequest("tool_choice must be auto, none, required, or a tool object", "tool_choice")
 	}
-	if obj.Type == "function" {
-		return InvalidRequest("forced function tool_choice is not supported by this backend", "tool_choice")
+	switch obj.Type {
+	case "function", "custom":
+		// Chat Completions nests the name under "function"; Responses puts it at
+		// the top level. Both spellings reach this proxy.
+		name := obj.Name
+		if name == "" {
+			name = obj.Function.Name
+		}
+		if name == "" {
+			return ToolChoice{}, InvalidRequest("forced tool_choice requires a tool name", "tool_choice")
+		}
+		return ToolChoice{Kind: obj.Type, Name: name}, nil
+	case "allowed_tools":
+		return ToolChoice{Kind: obj.Type}, nil
+	default:
+		return ToolChoice{}, InvalidRequest("unsupported tool_choice", "tool_choice")
 	}
-	return InvalidRequest("unsupported tool_choice", "tool_choice")
+}
+
+func validateToolChoice(raw json.RawMessage) error {
+	_, err := ParseToolChoice(raw)
+	return err
 }
 
 func ToolChoiceNone(raw json.RawMessage) bool {
@@ -357,33 +531,55 @@ func isOne(raw json.RawMessage) bool {
 	return err == nil && value == 1
 }
 
+func isFalse(raw json.RawMessage) bool {
+	var b bool
+	return json.Unmarshal(raw, &b) == nil && !b
+}
+
+// FoldChatInstructions hoists the leading system/developer messages into the
+// session instructions, preserving their order.
+//
+// A system/developer message that arrives after the conversation has started
+// (LangGraph injections between tool rounds, Cline/Roo Code "system reminders")
+// cannot be folded: the instructions are the session's opening system message,
+// so hoisting a mid-conversation reminder would reorder it relative to the turn
+// it annotates and make it permanent. Those messages are spliced into the
+// transcript instead, as the same "System:"/"Developer:" blocks the Responses
+// surface renders in internal/httpapi/responses_input.go. Either way nothing is
+// dropped and nothing is rejected on position alone — which is what
+// ValidateChatRequest has always assumed by accepting these roles anywhere.
 func FoldChatInstructions(messages []ChatMessage) (string, []ChatMessage, error) {
-	var parts []string
-	idx := 0
-	for idx < len(messages) {
-		role := messages[idx].Role
-		if role != "system" && role != "developer" {
-			break
+	var instructions []string
+	out := make([]ChatMessage, 0, len(messages))
+	leading := true
+	for i, msg := range messages {
+		if msg.Role != "system" && msg.Role != "developer" {
+			leading = false
+			out = append(out, msg)
+			continue
 		}
-		text, err := messages[idx].Text()
+		text, err := msg.Text()
 		if err != nil {
-			return "", nil, err
+			return "", nil, InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 		}
-		if strings.TrimSpace(text) != "" {
-			label := "System"
-			if role == "developer" {
-				label = "Developer"
-			}
-			parts = append(parts, label+":\n"+text)
+		if strings.TrimSpace(text) == "" {
+			continue
 		}
-		idx++
+		block := chatInstructionLabel(msg.Role) + ":\n" + text
+		if leading {
+			instructions = append(instructions, block)
+			continue
+		}
+		out = append(out, ChatMessage{Role: "user", Content: NewTextContent(block)})
 	}
-	for i := idx; i < len(messages); i++ {
-		if messages[i].Role == "system" || messages[i].Role == "developer" {
-			return "", nil, InvalidRequest("system/developer messages are only supported at the start of the conversation", fmt.Sprintf("messages.%d.role", i))
-		}
+	return strings.Join(instructions, "\n\n"), out, nil
+}
+
+func chatInstructionLabel(role string) string {
+	if role == "developer" {
+		return "Developer"
 	}
-	return strings.Join(parts, "\n\n"), messages[idx:], nil
+	return "System"
 }
 
 func InstructionCandidates(s string) []string {

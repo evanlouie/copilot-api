@@ -26,35 +26,180 @@ func TestInstructionCandidatesAvoidEmptySystemMessage(t *testing.T) {
 	}
 }
 
-func TestFoldChatInstructionsRejectsMidConversation(t *testing.T) {
+func TestFoldChatInstructionsSplicesMidConversationSystemMessages(t *testing.T) {
 	msgs := []ChatMessage{
 		{Role: "system", Content: NewTextContent("sys")},
 		{Role: "user", Content: NewTextContent("hi")},
 		{Role: "developer", Content: NewTextContent("late")},
+		{Role: "user", Content: NewTextContent("again")},
 	}
-	_, _, err := FoldChatInstructions(msgs)
-	if err == nil {
-		t.Fatal("expected mid-conversation developer message to be rejected")
+	instructions, rest, err := FoldChatInstructions(msgs)
+	if err != nil {
+		t.Fatalf("mid-conversation developer message must not be rejected: %v", err)
+	}
+	if instructions != "System:\nsys" {
+		t.Fatalf("instructions = %q, want only the leading system message", instructions)
+	}
+	if len(rest) != 3 {
+		t.Fatalf("messages = %#v, want three transcript messages", rest)
+	}
+	text, err := rest[1].Text()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rest[1].Role != "user" || text != "Developer:\nlate" {
+		t.Fatalf("spliced message = %q/%q, want a user-role Developer block", rest[1].Role, text)
+	}
+}
+
+func TestFoldChatInstructionsKeepsLeadingRunOrder(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "system", Content: NewTextContent("first")},
+		{Role: "developer", Content: NewTextContent("second")},
+		{Role: "user", Content: NewTextContent("hi")},
+	}
+	instructions, rest, err := FoldChatInstructions(msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instructions != "System:\nfirst\n\nDeveloper:\nsecond" {
+		t.Fatalf("instructions = %q, want both leading blocks in order", instructions)
+	}
+	if len(rest) != 1 || rest[0].Role != "user" {
+		t.Fatalf("messages = %#v, want only the user message", rest)
 	}
 }
 
 func TestValidateToolChoice(t *testing.T) {
-	var req ChatCompletionRequest
-	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tool_choice":"required"}`)
-	if err := json.Unmarshal(body, &req); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name     string
+		choice   string
+		accepted bool
+	}{
+		{name: "auto", choice: `"auto"`, accepted: true},
+		{name: "none", choice: `"none"`, accepted: true},
+		{name: "required", choice: `"required"`, accepted: true},
+		{name: "chat forced function", choice: `{"type":"function","function":{"name":"lookup"}}`, accepted: true},
+		{name: "responses forced function", choice: `{"type":"function","name":"lookup"}`, accepted: true},
+		{name: "allowed tools", choice: `{"mode":"auto","type":"allowed_tools","tools":[]}`, accepted: true},
+		{name: "unknown mode", choice: `"any"`, accepted: false},
+		{name: "unknown type", choice: `{"type":"web_search"}`, accepted: false},
+		{name: "forced function without a name", choice: `{"type":"function"}`, accepted: false},
 	}
-	if err := ValidateChatRequest(&req, true); err == nil {
-		t.Fatal("expected required tool_choice rejection")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := decodeChatRequest(t, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tool_choice":`+tt.choice+`}`)
+			err := ValidateChatRequest(req, true)
+			if tt.accepted && err != nil {
+				t.Fatalf("tool_choice %s should be accepted: %v", tt.choice, err)
+			}
+			if !tt.accepted && err == nil {
+				t.Fatalf("tool_choice %s should be rejected", tt.choice)
+			}
+		})
 	}
+}
 
-	body = []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tool_choice":"none"}`)
-	if err := json.Unmarshal(body, &req); err != nil {
+// The forcing modes are accepted but cannot be enforced by the Copilot SDK, so
+// the HTTP layer needs Honored to decide what to report at debug level.
+func TestToolChoiceHonored(t *testing.T) {
+	tests := map[string]bool{
+		``:                                       true,
+		`"auto"`:                                 true,
+		`"none"`:                                 true,
+		`"required"`:                             false,
+		`{"type":"function","name":"lookup"}`:    false,
+		`{"type":"custom","name":"apply_patch"}`: false,
+		`{"type":"allowed_tools","mode":"auto"}`: false,
+	}
+	for raw, want := range tests {
+		choice, err := ParseToolChoice(json.RawMessage(raw))
+		if err != nil {
+			t.Fatalf("ParseToolChoice(%s) = %v", raw, err)
+		}
+		if got := choice.Honored(); got != want {
+			t.Fatalf("ParseToolChoice(%s).Honored() = %t, want %t", raw, got, want)
+		}
+	}
+	if name := mustParseToolChoice(t, `{"type":"function","function":{"name":"lookup"}}`).Name; name != "lookup" {
+		t.Fatalf("nested forced tool name = %q, want lookup", name)
+	}
+}
+
+func mustParseToolChoice(t *testing.T, raw string) ToolChoice {
+	t.Helper()
+	choice, err := ParseToolChoice(json.RawMessage(raw))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateChatRequest(&req, true); err != nil {
-		t.Fatalf("tool_choice none should be accepted: %v", err)
+	return choice
+}
+
+// Every one of these is a valid OpenAI request that a widely-used client sends
+// by default, so permissive mode (and here even strict mode) must accept it.
+func TestValidateChatAcceptsCommonClientParameters(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "max_tokens", body: `{"model":"gpt-5","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "max_completion_tokens", body: `{"model":"gpt-5","max_completion_tokens":256,"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "parallel_tool_calls false", body: `{"model":"gpt-5","parallel_tool_calls":false,"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "tool_choice required", body: `{"model":"gpt-5","tool_choice":"required","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "logprobs false", body: `{"model":"gpt-5","logprobs":false,"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "stream false", body: `{"model":"gpt-5","stream":false,"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "digit leading tool name", body: `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"2fa_verify"}}]}`},
+		{name: "mid conversation system message", body: `{"model":"gpt-5","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"},{"role":"system","content":"reminder"},{"role":"user","content":"again"}]}`},
+		{name: "object tool result", body: `{"model":"gpt-5","messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":{"answer":42}}]}`},
+		{name: "array tool result", body: `{"model":"gpt-5","messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":[{"row":1}]}]}`},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := decodeChatRequest(t, tt.body)
+			assertChatAccepted(t, req, false)
+			assertChatAccepted(t, req, true)
+		})
+	}
+}
+
+func TestValidateChatRejectsInvalidMaxTokens(t *testing.T) {
+	for _, param := range []string{"max_tokens", "max_completion_tokens"} {
+		assertChatRejected(t, decodeChatRequest(t, chatBody(param, `0`)), false, param)
+		assertChatRejected(t, decodeChatRequest(t, chatBody(param, `-1`)), false, param)
+	}
+}
+
+func TestValidateChatRejectsUnusableToolNames(t *testing.T) {
+	for _, name := range []string{"", "has space", "dotted.name", strings.Repeat("a", 65)} {
+		req := decodeChatRequest(t, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"`+name+`"}}]}`)
+		if err := ValidateChatRequest(req, false); err == nil {
+			t.Fatalf("function tool name %q should be rejected", name)
+		}
+	}
+}
+
+func TestValidateResponsesAcceptsCommonClientParameters(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "max_output_tokens", body: `{"model":"gpt-5","max_output_tokens":256,"input":"hi"}`},
+		{name: "parallel_tool_calls false", body: `{"model":"gpt-5","parallel_tool_calls":false,"input":"hi"}`},
+		{name: "tool_choice required", body: `{"model":"gpt-5","tool_choice":"required","input":"hi"}`},
+		{name: "explicit default text format", body: `{"model":"gpt-5","text":{"format":{"type":"text"}},"input":"hi"}`},
+		{name: "json schema text format", body: `{"model":"gpt-5","text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"input":"hi"}`},
+		{name: "unsupported but documented include", body: `{"model":"gpt-5","include":["file_search_call.results"],"input":"hi"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertResponsesAccepted(t, decodeResponsesRequest(t, tt.body), false)
+		})
+	}
+}
+
+func TestValidateResponsesRejectsInvalidMaxOutputTokens(t *testing.T) {
+	assertResponsesRejected(t, decodeResponsesRequest(t, responsesBody("max_output_tokens", `0`)), false, "max_output_tokens")
+	assertResponsesRejected(t, decodeResponsesRequest(t, responsesBody("max_output_tokens", `"lots"`)), false, "max_output_tokens")
 }
 
 func TestChatPermissiveAllowsIgnoredSamplingFields(t *testing.T) {
@@ -88,14 +233,14 @@ func TestPermissiveChatRejectsUnsafeUnsupportedFields(t *testing.T) {
 			param: "stop",
 		},
 		{
-			name:  "max tokens",
-			body:  `{"model":"gpt-5","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`,
-			param: "max_tokens",
-		},
-		{
 			name:  "n greater than one",
 			body:  `{"model":"gpt-5","n":2,"messages":[{"role":"user","content":"hi"}]}`,
 			param: "n",
+		},
+		{
+			name:  "logprobs true",
+			body:  `{"model":"gpt-5","logprobs":true,"messages":[{"role":"user","content":"hi"}]}`,
+			param: "logprobs",
 		},
 	}
 	for _, tt := range tests {
@@ -137,9 +282,9 @@ func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 		param string
 	}{
 		{
-			name:  "text format",
-			body:  `{"model":"gpt-5","text":{"format":{"type":"json_object"}},"input":"hi"}`,
-			param: "text.format",
+			name:  "unknown text format type",
+			body:  `{"model":"gpt-5","text":{"format":{"type":"jsonschema"}},"input":"hi"}`,
+			param: "text.format.type",
 		},
 		{
 			name:  "unknown reasoning field",
@@ -147,14 +292,9 @@ func TestPermissiveResponsesRejectsUnsafeUnsupportedFields(t *testing.T) {
 			param: "reasoning.foo",
 		},
 		{
-			name:  "unsupported include value",
-			body:  `{"model":"gpt-5","include":["file_search_call.results"],"input":"hi"}`,
+			name:  "unknown include value",
+			body:  `{"model":"gpt-5","include":["reasoning.encryped_content"],"input":"hi"}`,
 			param: "include",
-		},
-		{
-			name:  "max output tokens",
-			body:  `{"model":"gpt-5","max_output_tokens":20,"input":"hi"}`,
-			param: "max_output_tokens",
 		},
 	}
 	for _, tt := range tests {
@@ -245,8 +385,32 @@ func TestResponsesIgnoresHostedToolsInPermissiveAndRejectsInStrict(t *testing.T)
 	if len(normalized) != 0 {
 		t.Fatalf("normalized hosted tools = %#v, want none", normalized)
 	}
+	if got := IgnoredResponsesToolTypes(req.Tools); len(got) != 1 || got[0] != "web_search" {
+		t.Fatalf("IgnoredResponsesToolTypes = %#v, want [web_search] so the drop can be logged", got)
+	}
 	if err := ValidateResponsesRequest(&req, true); err == nil {
 		t.Fatal("expected hosted web_search rejection in strict mode")
+	}
+}
+
+// A tool type that is neither supported nor a known hosted tool is a client
+// typo. Dropping it silently would ship a request with a missing capability, so
+// it is a 400 in both modes.
+func TestResponsesRejectsUnknownToolTypeInBothModes(t *testing.T) {
+	var req ResponsesRequest
+	body := []byte(`{"model":"gpt-5.5","tools":[{"type":"funcion","name":"lookup"}],"input":"hi"}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	for _, strict := range []bool{false, true} {
+		err := ValidateResponsesRequest(&req, strict)
+		apiErr, ok := err.(*APIError)
+		if !ok || apiErr.Param != "tools.0.type" {
+			t.Fatalf("ValidateResponsesRequest(strict=%t) = %#v, want a 400 on tools.0.type", strict, err)
+		}
+	}
+	if got := IgnoredResponsesToolTypes(req.Tools); len(got) != 0 {
+		t.Fatalf("IgnoredResponsesToolTypes = %#v, want none for an unknown type", got)
 	}
 }
 

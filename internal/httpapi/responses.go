@@ -63,6 +63,28 @@ func (s *Server) logResponsesToolSummary(ctx context.Context, tools []openai.Nor
 	s.log.DebugContext(ctx, "responses tool catalog", "tool_type_counts", counts, "tools", names)
 }
 
+// logUnhonoredResponseControls is the Responses counterpart of
+// logUnhonoredChatControls: these controls are accepted so real clients work,
+// but the Copilot SDK cannot act on them, so record them at debug level.
+func (s *Server) logUnhonoredResponseControls(ctx context.Context, req *openai.ResponsesRequest) {
+	if !s.debugEnabled(ctx) {
+		return
+	}
+	if tokens, ok := openai.ResponsesMaxOutputTokens(req); ok {
+		s.debugStream(ctx, "max output tokens is not forwarded to the Copilot SDK", "surface", "responses", "max_output_tokens", tokens)
+	}
+	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
+		s.debugStream(ctx, "parallel_tool_calls=false is not enforced by the Copilot SDK", "surface", "responses")
+	}
+	if format := openai.ResponsesTextFormatType(req); format != "" && format != "text" {
+		s.debugStream(ctx, "text.format is not enforced by this proxy", "surface", "responses", "text_format", format)
+	}
+	if ignored := openai.IgnoredResponsesToolTypes(req.Tools); len(ignored) > 0 {
+		s.debugStream(ctx, "hosted Responses tools were dropped", "surface", "responses", "tool_types", ignored)
+	}
+	s.logUnhonoredToolChoice(ctx, "responses", req.ToolChoice)
+}
+
 func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.ResponsesRequest, responseID string) (copilotgw.ResponseRequest, preparedResponseLogFields, error) {
 	selector, err := openai.ParseModelSelector(req.Model)
 	if err != nil {
@@ -78,6 +100,7 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 	}
 	reasoningEffort := openai.ResponsesReasoningEffort(req)
+	s.logUnhonoredResponseControls(ctx, req)
 	normalizedTools, err := openai.NormalizeResponsesToolsWithMode(req.Tools, s.cfg.StrictCompat)
 	if err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err

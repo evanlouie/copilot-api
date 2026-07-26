@@ -94,12 +94,15 @@ func TestHTTPBodyOverDefaultLimitReturns413(t *testing.T) {
 	}
 }
 
-func TestChatRejectsParallelToolCallsFalse(t *testing.T) {
+// parallel_tool_calls=false is what OpenAI's own Structured Outputs guidance
+// tells clients to send whenever a tool sets strict: true, so it has to reach
+// the gateway instead of 400ing; the backend simply cannot enforce it.
+func TestChatAcceptsParallelToolCallsFalse(t *testing.T) {
 	server := New(config.Config{}, &captureChatGateway{}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","parallel_tool_calls":false,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"param":"parallel_tool_calls"`) {
+	if response.Code != http.StatusOK {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
 }

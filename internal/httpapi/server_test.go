@@ -1571,22 +1571,22 @@ func TestHTTPValidationErrorsAreOpenAIShaped(t *testing.T) {
 		param string
 	}{
 		{
-			name:  "responses parallel tool calls false",
+			name:  "responses unknown tool type",
 			path:  "/v1/responses",
-			body:  `{"model":"gpt-5","parallel_tool_calls":false,"input":"hi"}`,
-			param: "parallel_tool_calls",
+			body:  `{"model":"gpt-5","tools":[{"type":"funcion","name":"lookup"}],"input":"hi"}`,
+			param: "tools.0.type",
 		},
 		{
-			name:  "forced function tool choice",
-			path:  "/v1/chat/completions",
-			body:  `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}],"tool_choice":{"type":"function","function":{"name":"lookup"}}}`,
+			name:  "unknown tool choice",
+			path:  "/v1/responses",
+			body:  `{"model":"gpt-5","tool_choice":"any","input":"hi"}`,
 			param: "tool_choice",
 		},
 		{
-			name:  "responses text format",
+			name:  "responses unknown text format type",
 			path:  "/v1/responses",
-			body:  `{"model":"gpt-5","text":{"format":{"type":"json_object"}},"input":"hi"}`,
-			param: "text.format",
+			body:  `{"model":"gpt-5","text":{"format":{"type":"jsonschema"}},"input":"hi"}`,
+			param: "text.format.type",
 		},
 		{
 			name:  "chat selector empty base",
@@ -1633,6 +1633,174 @@ func TestHTTPValidationErrorsAreOpenAIShaped(t *testing.T) {
 	}
 }
 
+// Every request below is a valid OpenAI call that a widely-used client emits by
+// default (Vercel AI SDK, LangChain/LangGraph, the OpenAI Agents SDK, Cline).
+// None of them can be honoured end to end by the Copilot SDK, and all of them
+// must still return 200 rather than a 400 the client cannot recover from.
+func TestHTTPAcceptsValidOpenAIClientRequests(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "chat max tokens",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "chat max completion tokens",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","max_completion_tokens":256,"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "chat parallel tool calls false",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","parallel_tool_calls":false,"tools":[{"type":"function","function":{"name":"lookup","strict":true,"parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "chat tool choice required",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","tool_choice":"required","tools":[{"type":"function","function":{"name":"lookup"}}],"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "chat forced function tool choice",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","tool_choice":{"type":"function","function":{"name":"lookup"}},"tools":[{"type":"function","function":{"name":"lookup"}}],"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "chat mid conversation system message",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"},{"role":"system","content":"stay on topic"},{"role":"user","content":"again"}]}`,
+		},
+		{
+			name: "chat digit leading tool name",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","tools":[{"type":"function","function":{"name":"2fa_verify","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "responses max output tokens",
+			path: "/v1/responses",
+			body: `{"model":"gpt-5","max_output_tokens":256,"input":"hi"}`,
+		},
+		{
+			name: "responses parallel tool calls false",
+			path: "/v1/responses",
+			body: `{"model":"gpt-5","parallel_tool_calls":false,"input":"hi"}`,
+		},
+		{
+			name: "responses tool choice required",
+			path: "/v1/responses",
+			body: `{"model":"gpt-5","tool_choice":"required","tools":[{"type":"function","name":"lookup"}],"input":"hi"}`,
+		},
+		{
+			name: "responses explicit default text format",
+			path: "/v1/responses",
+			body: `{"model":"gpt-5","text":{"format":{"type":"text"}},"input":"hi"}`,
+		},
+		{
+			name: "responses hosted tool alongside a function tool",
+			path: "/v1/responses",
+			body: `{"model":"gpt-5","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}],"input":"hi"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gw copilotgw.HTTPGateway = &resolvingChatGateway{}
+			if tc.path == "/v1/responses" {
+				gw = &captureResponseGateway{}
+			}
+			s := New(config.Config{}, gw, slog.Default())
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// A system message injected between turns keeps its position: it is spliced into
+// the transcript instead of being hoisted into the session instructions, where
+// it would outlive and outrank the turn it annotates.
+func TestChatSplicesMidConversationSystemMessageIntoHistory(t *testing.T) {
+	gw := &resolvingChatGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := `{"model":"gpt-5","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"},{"role":"system","content":"stay on topic"},{"role":"user","content":"again"}]}`
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if gw.got.Instructions != "System:\nbe brief" {
+		t.Fatalf("instructions = %q, want only the leading system message", gw.got.Instructions)
+	}
+	if len(gw.got.History) != 2 {
+		t.Fatalf("history = %#v, want the user turn plus the spliced reminder", gw.got.History)
+	}
+	text, err := gw.got.History[1].Text()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gw.got.History[1].Role != "user" || text != "System:\nstay on topic" {
+		t.Fatalf("spliced message = %q/%q, want a user-role System block", gw.got.History[1].Role, text)
+	}
+	if final, err := gw.got.FinalUser.Text(); err != nil || final != "again" {
+		t.Fatalf("final user message = %q, %v; want the trailing user turn", final, err)
+	}
+}
+
+// LangChain's ToolMessage and MCP bridges send tool results as JSON objects.
+func TestChatAcceptsJSONObjectToolResult(t *testing.T) {
+	gw := &resolvingChatGateway{}
+	s := New(config.Config{}, gw, slog.Default())
+	body := `{"model":"gpt-5","tools":[{"type":"function","function":{"name":"2fa_verify"}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"2fa_verify","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":{"ok":true,"code":"123456"}}]}`
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if !gw.continueCalled {
+		t.Fatal("tool continuation did not reach the gateway")
+	}
+	if got := gw.continueGot.Outputs["call_1"]; got != `{"code":"123456","ok":true}` {
+		t.Fatalf("tool output = %q, want the compact JSON object", got)
+	}
+}
+
+// Accepting a control this proxy cannot honour is only defensible if the gap is
+// observable, so the debug log has to name every one of them.
+func TestUnhonoredControlsAreLoggedAtDebug(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	s := New(config.Config{}, &resolvingChatGateway{}, logger)
+	chat := `{"model":"gpt-5","max_tokens":256,"parallel_tool_calls":false,"tool_choice":{"type":"function","function":{"name":"lookup"}},"tools":[{"type":"function","function":{"name":"lookup"}}],"messages":[{"role":"user","content":"hi"}]}`
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chat)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"max output tokens is not forwarded", "parallel_tool_calls=false is not enforced", "tool_choice is not enforced", `"tool_choice_name":"lookup"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("chat debug log missing %q: %s", want, buf.String())
+		}
+	}
+
+	buf.Reset()
+	responses := New(config.Config{}, &captureResponseGateway{}, logger)
+	body := `{"model":"gpt-5","max_output_tokens":256,"text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"}}},"tools":[{"type":"web_search"}],"input":"hi"}`
+	w = httptest.NewRecorder()
+	responses.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("responses status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"max output tokens is not forwarded", "text.format is not enforced", "hosted Responses tools were dropped", `"web_search"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("responses debug log missing %q: %s", want, buf.String())
+		}
+	}
+}
+
 func TestAuthMiddlewareProtectsV1ButNotHealth(t *testing.T) {
 	s := New(config.Config{APIKey: "secret"}, modelsGateway{models: []copilotgw.Model{{ID: "gpt-5"}}}, slog.Default())
 
@@ -1667,16 +1835,16 @@ func TestAuthMiddlewareProtectsV1ButNotHealth(t *testing.T) {
 
 func TestToolOutputsSerializeObjectsAndArrays(t *testing.T) {
 	objectContent := openai.Content{Present: true, Raw: json.RawMessage(`{"answer":42}`)}
-	if got, err := toolOutputFromContent(objectContent); err != nil || got != `{"answer":42}` {
-		t.Fatalf("toolOutputFromContent object = %q, %v; want compact object", got, err)
+	if got, err := objectContent.ToolOutput(); err != nil || got != `{"answer":42}` {
+		t.Fatalf("ToolOutput object = %q, %v; want compact object", got, err)
 	}
 	arrayContent := openai.Content{Present: true, Raw: json.RawMessage(`["a","b"]`)}
-	if got, err := toolOutputFromContent(arrayContent); err != nil || got != `["a","b"]` {
-		t.Fatalf("toolOutputFromContent array = %q, %v; want compact array", got, err)
+	if got, err := arrayContent.ToolOutput(); err != nil || got != `["a","b"]` {
+		t.Fatalf("ToolOutput array = %q, %v; want compact array", got, err)
 	}
 	scalarContent := openai.Content{Present: true, Raw: json.RawMessage(`42`)}
-	if _, err := toolOutputFromContent(scalarContent); err == nil {
-		t.Fatal("expected scalar tool output rejection")
+	if got, err := scalarContent.ToolOutput(); err != nil || got != "42" {
+		t.Fatalf("ToolOutput scalar = %q, %v; want the JSON literal", got, err)
 	}
 
 	_, outputs, _, err := parseResponsesInput(json.RawMessage(`[{"type":"function_call_output","call_id":"call_obj","output":{"ok":true}},{"type":"function_call_output","call_id":"call_arr","output":[1,2]}]`))

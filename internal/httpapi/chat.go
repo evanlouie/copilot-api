@@ -40,6 +40,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
+	s.logUnhonoredChatControls(ctx, &req)
 	if isToolContinuation(messages) {
 		s.logGenerationStarted(r, "chat.completions", req.Model, req.ReasoningEffort, "", false, true)
 		outputs, err := trailingToolOutputs(messages)
@@ -295,6 +296,36 @@ func (s *Server) chatReasoningDetails(turn *copilotgw.TurnResult) []openai.Reaso
 func isToolContinuation(messages []openai.ChatMessage) bool {
 	return len(messages) > 0 && messages[len(messages)-1].Role == "tool"
 }
+
+// logUnhonoredChatControls reports the request controls this proxy accepts but
+// cannot forward to the Copilot SDK. They are advisory rather than fatal because
+// every mainstream OpenAI client sets at least one of them, but a debug line
+// keeps the gap visible when a response does not match a client's expectation.
+func (s *Server) logUnhonoredChatControls(ctx context.Context, req *openai.ChatCompletionRequest) {
+	if !s.debugEnabled(ctx) {
+		return
+	}
+	if tokens, ok := req.RequestedMaxOutputTokens(); ok {
+		s.debugStream(ctx, "max output tokens is not forwarded to the Copilot SDK", "surface", "chat.completions", "max_output_tokens", tokens)
+	}
+	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
+		s.debugStream(ctx, "parallel_tool_calls=false is not enforced by the Copilot SDK", "surface", "chat.completions")
+	}
+	s.logUnhonoredToolChoice(ctx, "chat.completions", req.ToolChoice)
+}
+
+func (s *Server) logUnhonoredToolChoice(ctx context.Context, surface string, raw json.RawMessage) {
+	choice, err := openai.ParseToolChoice(raw)
+	if err != nil || choice.Honored() {
+		return
+	}
+	attrs := []any{"surface", surface, "tool_choice", choice.Kind}
+	if choice.Name != "" {
+		attrs = append(attrs, "tool_choice_name", choice.Name)
+	}
+	s.debugStream(ctx, "tool_choice is not enforced by the Copilot SDK", attrs...)
+}
+
 func trailingToolOutputs(messages []openai.ChatMessage) (map[string]string, error) {
 	outputs := map[string]string{}
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -304,30 +335,11 @@ func trailingToolOutputs(messages []openai.ChatMessage) (map[string]string, erro
 		if _, dup := outputs[messages[i].ToolCallID]; dup {
 			return nil, openai.InvalidRequest("duplicate tool_call_id in tool outputs", fmt.Sprintf("messages.%d.tool_call_id", i))
 		}
-		out, err := toolOutputFromContent(messages[i].Content)
+		out, err := messages[i].Content.ToolOutput()
 		if err != nil {
 			return nil, openai.InvalidRequest(err.Error(), fmt.Sprintf("messages.%d.content", i))
 		}
 		outputs[messages[i].ToolCallID] = out
 	}
 	return outputs, nil
-}
-func toolOutputFromContent(content openai.Content) (string, error) {
-	if !content.Present || content.IsNull {
-		return "", nil
-	}
-	if s, err := content.Text(); err == nil {
-		return s, nil
-	}
-	var v any
-	if err := json.Unmarshal(content.Raw, &v); err != nil {
-		return "", err
-	}
-	switch v.(type) {
-	case map[string]any, []any:
-		b, _ := json.Marshal(v)
-		return string(b), nil
-	default:
-		return "", fmt.Errorf("tool output must be string, text parts, JSON object, or JSON array")
-	}
 }
