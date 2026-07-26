@@ -2,10 +2,13 @@ package sessionstore
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -442,12 +445,12 @@ func TestBytePruneCreditsSessionOrphanedBySelectedResponse(t *testing.T) {
 			}
 		}
 	}
-	entries, fixed, err := store.retentionEntries()
+	scan, err := store.scanRetention()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var total, oldReclaim int64 = fixed, 0
-	for _, entry := range entries {
+	var total, oldReclaim int64 = scan.fixedBytes, 0
+	for _, entry := range scan.entries {
 		total += entry.bytes
 		if strings.Contains(entry.path, "resp_old_bytes") || strings.Contains(entry.path, "sdk_old_bytes") {
 			oldReclaim += entry.bytes
@@ -492,8 +495,14 @@ func TestResponseCountIncludesTombstones(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != safeName("resp_new_deleted")+".json" {
-		t.Fatalf("retained tombstones = %#v", entries)
+	var records []string
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			records = append(records, entry.Name())
+		}
+	}
+	if len(records) != 1 || records[0] != safeName("resp_new_deleted")+".json" {
+		t.Fatalf("retained tombstones = %#v", records)
 	}
 }
 
@@ -530,6 +539,258 @@ func TestPruneHonorsResponseCountAndDryRun(t *testing.T) {
 	}
 	if _, err := store.LoadResponse("resp_new"); err != nil {
 		t.Fatalf("new response pruned: %v", err)
+	}
+}
+
+func TestPruneSkipsUnreadableRecordsAndStillEnforcesQuota(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveResponse(ResponseRecord{ID: "resp_old", Stored: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveResponse(ResponseRecord{ID: "resp_new", Stored: true}); err != nil {
+		t.Fatal(err)
+	}
+	unreadable := map[string]string{
+		"resp_future":  `{"version":4,"id":"resp_future","stored":true}`,
+		"resp_corrupt": `{"id":"resp_corrupt",`,
+	}
+	for id, body := range unreadable {
+		if err := os.WriteFile(store.responsePath(id), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-time.Hour)
+	for _, id := range []string{"resp_old", "resp_future", "resp_corrupt"} {
+		if err := os.Chtimes(store.responsePath(id), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.SetRetentionPolicy(RetentionPolicy{MaxAge: time.Minute})
+	report, err := store.Prune(false)
+	if err != nil {
+		t.Fatalf("undecodable records blocked the prune: %v", err)
+	}
+	if len(report.Paths) != 3 {
+		t.Fatalf("prune report = %#v", report.Paths)
+	}
+	for _, id := range []string{"resp_old", "resp_future", "resp_corrupt"} {
+		if _, err := os.Stat(store.responsePath(id)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expired record %s remained: %v", id, err)
+		}
+	}
+	if _, err := store.LoadResponse("resp_new"); err != nil {
+		t.Fatalf("fresh record was pruned: %v", err)
+	}
+	if err := store.TakeMaintenanceError(); err != nil {
+		t.Fatalf("skippable records latched readiness off: %v", err)
+	}
+}
+
+func TestDeleteResponseIgnoresUndecodableNeighbour(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "sdk_neighbour"
+	sessionPath := filepath.Join(store.sessionsDir(), safeName(sessionID))
+	if err := os.MkdirAll(sessionPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveResponse(ResponseRecord{ID: "resp_ok", SDKSessionID: sessionID, Stored: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.responsePath("resp_future"), []byte(`{"version":4,"id":"resp_future"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteResponse("resp_ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TakeMaintenanceError(); err != nil {
+		t.Fatalf("unrelated record turned every delete into a readiness failure: %v", err)
+	}
+	if _, err := os.Stat(sessionPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreferenced session remained: %v", err)
+	}
+}
+
+func TestPruneContinuesAfterUndeletablePath(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	blocked := filepath.Join(store.sessionsDir(), "sdk_blocked")
+	free := filepath.Join(store.sessionsDir(), "sdk_free")
+	for _, path := range []string{blocked, free} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "payload"), make([]byte, 1024), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(path, "payload"), old, old); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(blocked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+	if err := os.Remove(filepath.Join(blocked, "payload")); err == nil {
+		t.Skip("filesystem does not enforce directory write permission")
+	}
+	// sdk_blocked sorts first, so the pre-fix loop aborted before reaching any
+	// other path and the store could never shrink again.
+	store.SetRetentionPolicy(RetentionPolicy{MaxAge: time.Minute})
+	report, err := store.Prune(false)
+	if err == nil {
+		t.Fatal("expected the undeletable path to be reported")
+	}
+	if !strings.Contains(err.Error(), "sdk_blocked") {
+		t.Fatalf("delete error did not name the offending path: %v", err)
+	}
+	if slices.Contains(report.Paths, blocked) {
+		t.Fatalf("report claimed an undeleted path: %#v", report.Paths)
+	}
+	if !slices.Contains(report.Paths, free) {
+		t.Fatalf("report omitted the deleted path: %#v", report.Paths)
+	}
+	if _, err := os.Stat(free); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prune stopped at the first delete failure: %v", err)
+	}
+	if err := store.TakeMaintenanceError(); err != nil {
+		t.Fatalf("a single undeletable path latched readiness off: %v", err)
+	}
+}
+
+func TestPruneToleratesSessionFilesVanishingDuringScan(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	// The Copilot CLI writes and removes session files without taking s.mu, so a
+	// scan routinely races them.
+	session := filepath.Join(store.sessionsDir(), "sdk_churn", "state")
+	if err := os.MkdirAll(session, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store.SetRetentionPolicy(RetentionPolicy{})
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for round := 0; ; round++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			names := make([]string, 0, 64)
+			for i := range 64 {
+				name := filepath.Join(session, fmt.Sprintf("events-%d-%d.jsonl", round, i))
+				if err := os.WriteFile(name, []byte("{}\n"), 0o600); err != nil {
+					return
+				}
+				names = append(names, name)
+			}
+			for _, name := range names {
+				_ = os.Remove(name)
+			}
+		}
+	}()
+	for range 200 {
+		if _, err := store.Prune(false); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("prune failed on a concurrently mutated session tree: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	if err := store.TakeMaintenanceError(); err != nil {
+		t.Fatalf("vanishing session files latched readiness off: %v", err)
+	}
+}
+
+func TestPinnedResponseSurvivesConcurrentPrune(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "sdk_hot"
+	sessionPath := filepath.Join(store.sessionsDir(), safeName(sessionID))
+	if err := os.MkdirAll(sessionPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Filler the pruner is always free to reclaim, so the loop below really does
+	// race deletions rather than idling.
+	for i := range 32 {
+		if err := store.SaveResponse(ResponseRecord{ID: fmt.Sprintf("resp_filler_%d", i), Stored: true, OutputText: strings.Repeat("x", 512)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.SetRetentionPolicy(RetentionPolicy{MaxBytes: 1})
+	var wg sync.WaitGroup
+	var pruned atomic.Int64
+	stop := make(chan struct{})
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				report, err := store.Prune(false)
+				if err != nil {
+					t.Errorf("concurrent prune failed: %v", err)
+					return
+				}
+				pruned.Add(int64(len(report.Paths)))
+			}
+		}()
+	}
+	releaseSession := store.PinSession(sessionID)
+	for i := range 300 {
+		id := fmt.Sprintf("resp_live_%d", i)
+		// Mirror the gateway: the record is pinned before it is written and stays
+		// pinned until the turn is finished with it.
+		releaseResponse := store.PinResponse(id)
+		if err := store.SaveResponse(ResponseRecord{ID: id, SDKSessionID: sessionID, Stored: true, OutputText: strings.Repeat("y", 512)}); err != nil {
+			t.Fatalf("save %s: %v", id, err)
+		}
+		if _, err := os.Stat(store.responsePath(id)); err != nil {
+			t.Fatalf("pinned response %s was pruned: %v", id, err)
+		}
+		if _, err := os.Stat(sessionPath); err != nil {
+			t.Fatalf("pinned session was pruned while %s was live: %v", id, err)
+		}
+		releaseResponse()
+	}
+	releaseSession()
+	close(stop)
+	wg.Wait()
+	if pruned.Load() == 0 {
+		t.Fatal("prune never reclaimed anything; the race window was never exercised")
+	}
+}
+
+func TestRetainedPathInfoReportsVanishedPathAsAbsent(t *testing.T) {
+	item, found, err := retainedPathInfo(filepath.Join(t.TempDir(), "gone"), nil)
+	if err != nil {
+		t.Fatalf("vanished path reported an error: %v", err)
+	}
+	if found || item.bytes != 0 {
+		t.Fatalf("vanished path reported as present: %#v", item)
 	}
 }
 

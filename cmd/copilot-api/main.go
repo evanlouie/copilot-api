@@ -126,8 +126,12 @@ func serve(args []string) error {
 			logger.Error("failed to release server lock", "error", err)
 		}
 	}()
-	if _, err := store.Prune(false); err != nil {
-		return fmt.Errorf("initial retention prune: %w", err)
+	// A quota scan that cannot complete is not a reason to refuse traffic. A
+	// single unreadable record used to make the server unstartable with no way to
+	// find the culprit; the store now records only failures that genuinely stop
+	// maintenance, and /readyz surfaces those.
+	if report, err := store.Prune(false); err != nil {
+		logger.Warn("initial retention prune did not complete", "error", err, "pruned_paths", len(report.Paths))
 	}
 
 	gw := copilotgw.NewReal(cfg, store, logger)
@@ -274,6 +278,8 @@ func runRetentionLoop(ctx context.Context, store *sessionstore.Store, logger *sl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Store.Prune records readiness-affecting failures itself, so this log
+			// is for operator visibility into the skippable ones too.
 			if _, err := store.Prune(false); err != nil {
 				logger.Warn("automatic retention prune failed", "error", err)
 			}

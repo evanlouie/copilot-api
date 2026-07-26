@@ -24,6 +24,7 @@ type Store struct {
 	deletedIDs     map[string]struct{}
 	pins           map[string]int
 	orphanSessions map[string]struct{}
+	deferredPrunes map[string]pruneBackoff
 	maintenanceErr error
 }
 
@@ -31,14 +32,24 @@ const (
 	ownershipMarker              = ".copilot-api-owned"
 	ownershipMarkerContent       = "copilot-api storage root v1\n"
 	legacyOwnershipMarkerContent = "copilot-api storage root\n"
+	// retentionLinkDir names the retention link index inside the responses
+	// directory. Each live response that belongs to an SDK session is recorded as
+	// an empty file at <responses>/<retentionLinkDir>/<session>/<response>, so a
+	// prune can answer "which sessions still have live responses" from directory
+	// listings instead of decoding every record.
+	retentionLinkDir = ".links"
 )
 
 func New(dataDir, stateDir, cacheDir string) *Store {
-	return &Store{DataDir: dataDir, StateDir: stateDir, CacheDir: cacheDir, deletedIDs: map[string]struct{}{}, pins: map[string]int{}, orphanSessions: map[string]struct{}{}}
+	return &Store{DataDir: dataDir, StateDir: stateDir, CacheDir: cacheDir, deletedIDs: map[string]struct{}{}, pins: map[string]int{}, orphanSessions: map[string]struct{}{}, deferredPrunes: map[string]pruneBackoff{}}
 }
 
 // TakeMaintenanceError returns and clears the latest asynchronous retention or
-// orphan-cleanup failure so readiness and shutdown can surface it once.
+// orphan-cleanup failure so readiness and shutdown can surface it once. Only
+// failures that stop maintenance from running at all are recorded here; a
+// single unreadable record or undeletable path is reported to the caller but
+// left out, because retries are automatic and one bad path must not hold
+// readiness off forever.
 func (s *Store) TakeMaintenanceError() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -72,7 +83,63 @@ func (s *Store) Ensure() error {
 			return fmt.Errorf("secure %s: %w", dir, err)
 		}
 	}
-	return nil
+	return s.ensureRetentionLinks()
+}
+
+// ensureRetentionLinks builds the retention link index for a store written
+// before the index existed. Retention plans session deletions from the index
+// alone, so an absent index would read as "no response references any session".
+// The index is staged and renamed into place so a crash mid-build cannot leave
+// a partial index looking complete. Records that cannot be decoded are skipped:
+// one of them must not make the server unstartable, and a record that cannot be
+// decoded cannot name a session to protect either.
+//
+// Both Ensure and Prune call this, because the prune subcommand never runs
+// Ensure. The steady-state cost is a single Stat. It takes s.mu, so callers
+// must not already hold it.
+func (s *Store) ensureRetentionLinks() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	links := s.linksDir()
+	if _, err := os.Stat(links); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect retention index %s: %w", links, err)
+	}
+	if _, err := os.Stat(s.responsesDir()); errors.Is(err, os.ErrNotExist) {
+		// Nothing to index, and prune must not create storage the caller has not
+		// asked for.
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect %s: %w", s.responsesDir(), err)
+	}
+	staging := links + ".building"
+	if err := os.RemoveAll(staging); err != nil {
+		return fmt.Errorf("clear retention index staging %s: %w", staging, err)
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		return fmt.Errorf("create retention index staging %s: %w", staging, err)
+	}
+	entries, err := os.ReadDir(s.responsesDir())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", s.responsesDir(), err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		record, err := readResponseRecordPath(filepath.Join(s.responsesDir(), entry.Name()))
+		if err != nil || record.Deleted || record.ID == "" || record.SDKSessionID == "" {
+			continue
+		}
+		if err := writeRetentionLink(staging, record.SDKSessionID, record.ID); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(staging, links); err != nil {
+		return fmt.Errorf("publish retention index %s: %w", links, err)
+	}
+	return syncDirectory(s.responsesDir())
 }
 
 func (s *Store) ValidateRoots() ([]string, error) {
@@ -158,6 +225,58 @@ func writeOwnershipMarker(root string) error {
 func (s *Store) LockPath() string     { return filepath.Join(s.StateDir, "server.lock") }
 func (s *Store) sessionsDir() string  { return filepath.Join(s.DataDir, "sessions") }
 func (s *Store) responsesDir() string { return filepath.Join(s.StateDir, "responses") }
+func (s *Store) linksDir() string     { return filepath.Join(s.responsesDir(), retentionLinkDir) }
+
+// sessionLinksDir takes the already-encoded session directory name so callers
+// holding only a session path can reuse it.
+func (s *Store) sessionLinksDir(sessionSafeName string) string {
+	return filepath.Join(s.linksDir(), sessionSafeName)
+}
+
+func (s *Store) writeResponseLinkLocked(sessionID, responseID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	return writeRetentionLink(s.linksDir(), sessionID, responseID)
+}
+
+func (s *Store) removeResponseLinkLocked(sessionID, responseID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	return s.removeLinkLocked(safeName(sessionID), safeName(responseID))
+}
+
+func (s *Store) removeLinkLocked(sessionSafeName, responseSafeName string) error {
+	path := filepath.Join(s.sessionLinksDir(sessionSafeName), responseSafeName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove retention link %s: %w", path, err)
+	}
+	return nil
+}
+
+func writeRetentionLink(base, sessionID, responseID string) error {
+	dir := filepath.Join(base, safeName(sessionID))
+	path := filepath.Join(dir, safeName(responseID))
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect retention link %s: %w", path, err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create retention link directory %s: %w", dir, err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		return fmt.Errorf("create retention link %s: %w", path, err)
+	}
+	// The link is empty, so the directory entry is the whole record. Sync the
+	// directory: losing it to a crash would let retention delete a session a
+	// surviving response still needs.
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("sync retention link directory %s: %w", dir, err)
+	}
+	return nil
+}
 
 func (s *Store) SaveSessionMetadata(sessionID string, meta SessionMetadata) error {
 	s.mu.Lock()
@@ -217,22 +336,44 @@ func (s *Store) SaveResponse(record ResponseRecord) error {
 	// overwrite a response that the client has deleted, even if retention has
 	// already removed the on-disk tombstone during this process lifetime.
 	markDeleted := record.Deleted
+	previousSession := ""
 	if !record.Deleted {
 		if _, deleted := s.deletedIDs[record.ID]; deleted {
 			return ErrNotFound
 		}
-		if existing, err := s.loadResponseRecord(record.ID); err == nil && existing.Deleted {
-			if s.pins[s.responsePath(record.ID)] > 0 {
-				s.deletedIDs[record.ID] = struct{}{}
+		if existing, err := s.loadResponseRecord(record.ID); err == nil {
+			if existing.Deleted {
+				if s.pins[s.responsePath(record.ID)] > 0 {
+					s.deletedIDs[record.ID] = struct{}{}
+				}
+				return ErrNotFound
 			}
-			return ErrNotFound
-		} else if err != nil && !errors.Is(err, ErrNotFound) {
+			previousSession = existing.SDKSessionID
+		} else if !errors.Is(err, ErrNotFound) {
 			return err
 		}
 	}
 	record.UpdatedAt = time.Now().UTC()
+	// Publish the retention link before the record. A crash between the two
+	// leaves an extra reference, which only delays a session deletion, whereas
+	// the reverse order could leave behind a record whose SDK session retention
+	// believes nothing references.
+	if !record.Deleted {
+		if err := s.writeResponseLinkLocked(record.SDKSessionID, record.ID); err != nil {
+			return err
+		}
+	}
 	if err := writeJSON(s.responsePath(record.ID), record); err != nil {
 		return err
+	}
+	if record.Deleted {
+		if err := s.removeResponseLinkLocked(record.SDKSessionID, record.ID); err != nil {
+			return err
+		}
+	} else if previousSession != "" && previousSession != record.SDKSessionID {
+		if err := s.removeResponseLinkLocked(previousSession, record.ID); err != nil {
+			return err
+		}
 	}
 	if markDeleted && s.pins[s.responsePath(record.ID)] > 0 {
 		s.deletedIDs[record.ID] = struct{}{}
@@ -282,6 +423,9 @@ func (s *Store) DeleteResponse(id string) error {
 		Status:       "deleted",
 	}
 	if err := writeJSON(s.responsePath(id), tombstone); err != nil {
+		return err
+	}
+	if err := s.removeResponseLinkLocked(record.SDKSessionID, id); err != nil {
 		return err
 	}
 	if s.pins[s.responsePath(id)] > 0 {
