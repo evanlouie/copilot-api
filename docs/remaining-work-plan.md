@@ -659,7 +659,8 @@ standard that caught the three plan errors in the previous round.
   billing block. That argument inverts itself: the official SDKs retry 5xx on
   their generic schedule, so 502 produced _more_ automatic retries than the 429
   it was avoiding. Now 429 `insufficient_quota`, matching the real API. This
-  supersedes R6 in the backlog below.
+  reversed the round-one decision and **deleted** its backlog entry; the `R6`
+  slot below has since been reused for an unrelated item.
 
 ### The one that justifies the exercise
 
