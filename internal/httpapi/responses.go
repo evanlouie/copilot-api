@@ -113,6 +113,9 @@ func (s *Server) logUnhonoredResponseControls(ctx context.Context, req *openai.R
 	if ignored := openai.IgnoredResponsesToolTypes(req.Tools); len(ignored) > 0 {
 		s.debugStream(ctx, "hosted Responses tools were dropped", "surface", "responses", "tool_types", ignored)
 	}
+	if fields := openai.UnhonoredResponseFields(req.Raw); len(fields) > 0 {
+		s.debugStream(ctx, "request fields were accepted but are not acted on", "surface", "responses", "fields", fields)
+	}
 	s.logUnhonoredToolChoice(ctx, "responses", req.ToolChoice)
 }
 

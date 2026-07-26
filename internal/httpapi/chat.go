@@ -327,6 +327,9 @@ func (s *Server) logUnhonoredChatControls(ctx context.Context, req *openai.ChatC
 	if req.RequestedLogprobs() {
 		s.debugStream(ctx, "logprobs are not produced by the Copilot SDK", "surface", "chat.completions")
 	}
+	if fields := openai.UnhonoredChatFields(req.Raw); len(fields) > 0 {
+		s.debugStream(ctx, "request fields were accepted but are not acted on", "surface", "chat.completions", "fields", fields)
+	}
 	s.logUnhonoredToolChoice(ctx, "chat.completions", req.ToolChoice)
 }
 

@@ -829,6 +829,16 @@ func (b *Batch) bindBroker(broker *Broker) bool {
 	if b.expired {
 		return false
 	}
+	// Rebinding to a *different* broker would silently orphan the first one's
+	// batches/byCall entries, since closeBatch only removes from the broker the
+	// field currently holds. Nothing can reach that today - RequestTools.broker
+	// is immutable and a gateway owns exactly one Broker - but "removed exactly
+	// once" was previously described as a property of this field when it is
+	// really a property of the caller, so make the field enforce it rather than
+	// inherit it.
+	if b.broker != nil && b.broker != broker {
+		return false
+	}
 	b.broker = broker
 	return true
 }

@@ -2,9 +2,7 @@ package sessionfs
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
-	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -207,7 +205,13 @@ func (p *Provider) AppendFile(path string, content string, mode *int) error {
 	// Checked under the session lock, which every provider operation holds, so
 	// the answer still describes this call by the time the file is opened.
 	_, statErr := root.Stat(name)
-	created := errors.Is(statErr, fs.ErrNotExist)
+	// Only a definite "not there" means this call is creating the name. Treating
+	// any other Stat failure as "it already exists" would skip the parent
+	// directory sync for a file O_CREATE then goes on to create - which is
+	// exactly the durability gap this sync exists to close - so an ambiguous
+	// answer syncs, because a redundant directory sync costs one fsync and a
+	// missed one costs the entry.
+	created := statErr != nil
 	perm := hardenFileMode(mode)
 	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, perm)
 	if err != nil {
