@@ -1158,5 +1158,5 @@ func recordFromResponse(resp *openai.Response, sessionID, retained string) sessi
 	if resp.PreviousResponseID != nil {
 		previous = *resp.PreviousResponseID
 	}
-	return sessionstore.ResponseRecord{ID: resp.ID, SDKSessionID: sessionID, Model: resp.Model, Instructions: resp.Instructions, CreatedAt: time.Unix(resp.CreatedAt, 0).UTC(), UpdatedAt: time.Now().UTC(), Status: resp.Status, Stored: resp.Store, Output: storeOutputItems(resp.Output), OutputText: resp.OutputText, Usage: storeUsage(resp.Usage), PreviousResponseID: previous, RetainedPath: retained}
+	return sessionstore.ResponseRecord{ID: resp.ID, SDKSessionID: sessionID, Model: resp.Model, Instructions: resp.Instructions, CreatedAt: time.Unix(resp.CreatedAt, 0).UTC(), UpdatedAt: time.Now().UTC(), Status: resp.Status, Stored: resp.Store, Output: resp.Output, OutputText: resp.OutputText, Usage: resp.Usage, PreviousResponseID: previous, RetainedPath: retained}
 }

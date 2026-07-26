@@ -533,19 +533,6 @@ func TestNewResponseUsageOmitsReasoningOnlyUsage(t *testing.T) {
 	}
 }
 
-func TestResponseUsageUnmarshalsLegacyChatUsage(t *testing.T) {
-	var usage ResponseUsage
-	if err := json.Unmarshal([]byte(`{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8,"completion_tokens_details":{"reasoning_tokens":2}}`), &usage); err != nil {
-		t.Fatal(err)
-	}
-	if usage.InputTokens == nil || *usage.InputTokens != 3 || usage.OutputTokens == nil || *usage.OutputTokens != 5 || usage.TotalTokens == nil || *usage.TotalTokens != 8 {
-		t.Fatalf("legacy usage was not migrated: %#v", usage)
-	}
-	if usage.OutputTokensDetails == nil || usage.OutputTokensDetails.ReasoningTokens == nil || *usage.OutputTokensDetails.ReasoningTokens != 2 {
-		t.Fatalf("legacy reasoning tokens were not migrated: %#v", usage.OutputTokensDetails)
-	}
-}
-
 func TestContentTextRejectsImages(t *testing.T) {
 	var c Content
 	if err := json.Unmarshal([]byte(`[{"type":"input_image","image_url":"x"}]`), &c); err != nil {

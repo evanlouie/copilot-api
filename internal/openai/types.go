@@ -81,41 +81,6 @@ func NewResponseUsage(usage *Usage) *ResponseUsage {
 	return out
 }
 
-func (u *ResponseUsage) UnmarshalJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err == nil {
-		if _, ok := raw["prompt_tokens"]; ok {
-			return u.unmarshalLegacyJSON(data)
-		}
-		if _, ok := raw["completion_tokens"]; ok {
-			return u.unmarshalLegacyJSON(data)
-		}
-		if _, ok := raw["completion_tokens_details"]; ok {
-			return u.unmarshalLegacyJSON(data)
-		}
-	}
-	type alias ResponseUsage
-	var current alias
-	if err := json.Unmarshal(data, &current); err != nil {
-		return err
-	}
-	*u = ResponseUsage(current)
-	return nil
-}
-
-func (u *ResponseUsage) unmarshalLegacyJSON(data []byte) error {
-	var legacy Usage
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return err
-	}
-	if converted := NewResponseUsage(&legacy); converted != nil {
-		*u = *converted
-		return nil
-	}
-	*u = ResponseUsage{}
-	return nil
-}
-
 type ChatCompletionRequest struct {
 	Model               string                     `json:"model"`
 	Messages            []ChatMessage              `json:"messages"`

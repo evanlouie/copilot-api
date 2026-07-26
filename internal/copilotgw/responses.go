@@ -51,9 +51,9 @@ func (g *RealGateway) CreateResponse(ctx context.Context, req ResponseRequest) (
 	record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 	record.InputText = incrementalInput
 	record.PendingBatchID = turn.PendingBatchID
-	record.InstalledToolCatalog = storeToolCatalog(prepared.catalog.StoredDTO())
-	record.ToolOutputs = storeToolOutputs(openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs))
-	record.LoadedToolEvents = storeLoadedToolEvents(req.LoadedToolEvents)
+	record.InstalledToolCatalog = prepared.catalog.StoredDTO()
+	record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
+	record.LoadedToolEvents = req.LoadedToolEvents
 	if err := g.store.SaveResponse(record); err != nil {
 		return nil, openai.Internal("failed to persist response")
 	}
@@ -131,8 +131,8 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 				resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 				record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 				record.PendingBatchID = turn.PendingBatchID
-				record.ToolOutputs = storeToolOutputs(openai.StoredToolOutputsFromMap(outputs))
-				record.InstalledToolCatalog = storeToolCatalog(catalogDTO)
+				record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
+				record.InstalledToolCatalog = catalogDTO
 				if err := g.store.SaveResponse(record); err != nil {
 					return openai.Internal("failed to persist response")
 				}
@@ -166,9 +166,9 @@ func (g *RealGateway) StreamResponse(ctx context.Context, req ResponseRequest) (
 		record := recordFromResponse(resp, prepared.sessionID, prepared.retained)
 		record.InputText = incrementalInput
 		record.PendingBatchID = turn.PendingBatchID
-		record.InstalledToolCatalog = storeToolCatalog(prepared.catalog.StoredDTO())
-		record.ToolOutputs = storeToolOutputs(openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs))
-		record.LoadedToolEvents = storeLoadedToolEvents(req.LoadedToolEvents)
+		record.InstalledToolCatalog = prepared.catalog.StoredDTO()
+		record.ToolOutputs = openai.StoredToolOutputsFromMap(req.ContinuationToolOutputs)
+		record.LoadedToolEvents = req.LoadedToolEvents
 		if err := g.store.SaveResponse(record); err != nil {
 			return openai.Internal("failed to persist response")
 		}
@@ -231,7 +231,7 @@ func appendResponseRecordTranscript(b *strings.Builder, record sessionstore.Resp
 		b.WriteString(text)
 		b.WriteString("\n\n")
 	}
-	for _, item := range wireOutputItems(record.Output) {
+	for _, item := range record.Output {
 		switch item.Type {
 		case "function_call", "custom_tool_call", "tool_search_call":
 			b.WriteString("Assistant call: ")
@@ -243,11 +243,11 @@ func appendResponseRecordTranscript(b *strings.Builder, record sessionstore.Resp
 			b.WriteString("\n\n")
 		}
 	}
-	for _, output := range wireToolOutputs(record.ToolOutputs) {
+	for _, output := range record.ToolOutputs {
 		b.WriteString(storedToolOutputPrompt(output))
 		b.WriteString("\n\n")
 	}
-	for _, event := range wireLoadedToolEvents(record.LoadedToolEvents) {
+	for _, event := range record.LoadedToolEvents {
 		if len(event.LoadedTools) == 0 {
 			continue
 		}
@@ -326,7 +326,14 @@ func (g *RealGateway) GetResponse(ctx context.Context, id string) (*openai.Respo
 		}
 		return nil, openai.Internal("failed to load response")
 	}
-	resp := &openai.Response{ID: record.ID, Object: openai.ObjectResponse, CreatedAt: record.CreatedAt.Unix(), Status: record.Status, Model: record.Model, Instructions: record.Instructions, Output: wireOutputItems(record.Output), OutputText: record.OutputText, Store: record.Stored, Usage: wireUsage(record.Usage), Error: nil, IncompleteDetails: nil, ParallelToolCalls: true}
+	// `output` is required and non-nullable on the Responses wire, so a record
+	// that never produced items (a tombstone, or a v0 record) still has to
+	// serialize as `[]` rather than `null`.
+	output := record.Output
+	if output == nil {
+		output = []openai.ResponseOutputItem{}
+	}
+	resp := &openai.Response{ID: record.ID, Object: openai.ObjectResponse, CreatedAt: record.CreatedAt.Unix(), Status: record.Status, Model: record.Model, Instructions: record.Instructions, Output: output, OutputText: record.OutputText, Store: record.Stored, Usage: record.Usage, Error: nil, IncompleteDetails: nil, ParallelToolCalls: true}
 	if record.PreviousResponseID != "" {
 		resp.PreviousResponseID = &record.PreviousResponseID
 	}

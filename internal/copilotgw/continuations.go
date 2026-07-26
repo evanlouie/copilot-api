@@ -290,8 +290,8 @@ func (g *RealGateway) continueToolResponse(ctx context.Context, req ResponseRequ
 		resp := responseFromTurn(req.ResponseID, req.Model, req.Instructions, &previous, storeVisible, turn, req.SuppressReasoning)
 		record := recordFromResponse(resp, turn.SDKSessionID, turn.RetainedPath)
 		record.PendingBatchID = turn.PendingBatchID
-		record.ToolOutputs = storeToolOutputs(openai.StoredToolOutputsFromMap(outputs))
-		record.InstalledToolCatalog = storeToolCatalog(catalogDTO)
+		record.ToolOutputs = openai.StoredToolOutputsFromMap(outputs)
+		record.InstalledToolCatalog = catalogDTO
 		if err := g.store.SaveResponse(record); err != nil {
 			return nil, openai.Internal("failed to persist response")
 		}
@@ -339,7 +339,7 @@ func (g *RealGateway) prepareDynamicToolSearchFallback(req ResponseRequest, batc
 	}
 	fallback := req
 	fallback.ToolOutputs = nil
-	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, wireOutputItems(previousRecord.Output))}
+	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, previousRecord.Output)}
 	fallback.PreviousResponseID = previousResponseID
 	fallback.Tools = merge.Catalog.Flatten()
 	fallback.ToolsSet = true
@@ -426,7 +426,7 @@ func (g *RealGateway) responseFallbackRequestFromFunctionOutputs(req ResponseReq
 	}
 	fallback := req
 	fallback.ToolOutputs = nil
-	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, wireOutputItems(previousRecord.Output))}
+	fallback.Input = openai.PromptContent{Text: responseToolOutputsPrompt(outputs, previousRecord.Output)}
 	fallback.Tools = merge.Catalog.Flatten()
 	fallback.ToolsSet = true
 	fallback.ForceSynthetic = true

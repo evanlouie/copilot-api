@@ -144,7 +144,7 @@ func TestLoadResponseMigratesOldVersionsAndRejectsFuture(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldPath := store.responsePath("resp_old")
-	if err := os.WriteFile(oldPath, []byte(`{"version":2,"id":"resp_old","stored":true,"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens":7,"completion_tokens_details":{"reasoning_tokens":3},"total_tokens":17}}`), 0o600); err != nil {
+	if err := os.WriteFile(oldPath, []byte(`{"version":2,"id":"resp_old","stored":true,"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":4},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":3},"total_tokens":17}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	old, err := store.LoadResponse("resp_old")
@@ -153,17 +153,6 @@ func TestLoadResponseMigratesOldVersionsAndRejectsFuture(t *testing.T) {
 	}
 	if old.Version != ResponseRecordVersion || old.Status != "completed" || old.Usage == nil || old.Usage.InputTokensDetails == nil || old.Usage.InputTokensDetails.CachedTokens == nil || *old.Usage.InputTokensDetails.CachedTokens != 4 || old.Usage.OutputTokensDetails == nil || old.Usage.OutputTokensDetails.ReasoningTokens == nil || *old.Usage.OutputTokensDetails.ReasoningTokens != 3 {
 		t.Fatalf("migrated record = %#v", old)
-	}
-	completionOnlyPath := store.responsePath("resp_v1_completion")
-	if err := os.WriteFile(completionOnlyPath, []byte(`{"version":1,"id":"resp_v1_completion","stored":true,"usage":{"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2},"total_tokens":5}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	completionOnly, err := store.LoadResponse("resp_v1_completion")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if completionOnly.Usage == nil || completionOnly.Usage.OutputTokens == nil || *completionOnly.Usage.OutputTokens != 5 || completionOnly.Usage.OutputTokensDetails == nil || completionOnly.Usage.OutputTokensDetails.ReasoningTokens == nil || *completionOnly.Usage.OutputTokensDetails.ReasoningTokens != 2 {
-		t.Fatalf("completion-only legacy usage was not migrated: %#v", completionOnly.Usage)
 	}
 
 	missingVersionPath := store.responsePath("resp_missing_version")
