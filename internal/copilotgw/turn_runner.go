@@ -85,15 +85,13 @@ type turnRunner struct {
 	// directly in tests usable.
 	aborted chan struct{}
 
-	chatStream        chan<- StreamEvent
-	chatDone          <-chan struct{}
+	chat              streamSink[StreamEvent]
 	mu                sync.Mutex
 	abortOnce         sync.Once
 	abortSignalOnce   sync.Once
 	requestDetached   bool
 	requestGeneration uint64
-	responseStream    chan<- ResponseStreamEvent
-	responseDone      <-chan struct{}
+	response          streamSink[ResponseStreamEvent]
 	responseParams    *responseParams
 	// messageItemID, reasoningItemID and itemOrder are this turn's output-item
 	// identity. The runner assigns each ID once, hands it to the client on the
@@ -304,19 +302,13 @@ func requestContextError(ctx context.Context) error {
 func (r *turnRunner) enableChatStream(ch chan<- StreamEvent, done <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.chatStream = ch
-	r.chatDone = done
+	r.chat.attach(ch, done)
 }
 
 func (r *turnRunner) enableResponseStream(ch chan<- ResponseStreamEvent, done <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.responseStream = ch
-	if ch == nil {
-		r.responseDone = nil
-		return
-	}
-	r.responseDone = done
+	r.response.attach(ch, done)
 }
 
 // setResponseParams records the request-scoped identity of the response the
@@ -345,7 +337,7 @@ func (r *turnRunner) resetOutputItems() {
 // truth for output_index: responseFromTurn arranges the terminal output to
 // match it.
 func (r *turnRunner) announceItemLocked(id string) {
-	if id == "" || r.responseStream == nil {
+	if id == "" || !r.response.active() {
 		return
 	}
 	for _, seen := range r.itemOrder {
@@ -889,22 +881,16 @@ func resolveReasoning(consolidated, deltas string) string {
 
 func (r *turnRunner) emitDelta(delta string) {
 	r.mu.Lock()
-	chatStream := r.chatStream
-	chatDone := r.chatDone
-	responseStream := r.responseStream
-	responseDone := r.responseDone
+	chat := r.chat
+	response := r.response
 	var itemID string
-	if responseStream != nil {
+	if response.active() {
 		itemID = r.messageItemIDLocked()
 		r.announceItemLocked(itemID)
 	}
 	r.mu.Unlock()
-	if chatStream != nil {
-		_ = sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "delta", Delta: delta})
-	}
-	if responseStream != nil {
-		sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "delta", ItemID: itemID, Delta: delta})
-	}
+	chat.send(StreamEvent{Kind: "delta", Delta: delta})
+	response.send(ResponseStreamEvent{Kind: "delta", ItemID: itemID, Delta: delta})
 }
 
 func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {
@@ -912,22 +898,16 @@ func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {
 		return
 	}
 	r.mu.Lock()
-	chatStream := r.chatStream
-	chatDone := r.chatDone
-	responseStream := r.responseStream
-	responseDone := r.responseDone
+	chat := r.chat
+	response := r.response
 	var itemID string
-	if responseStream != nil {
+	if response.active() {
 		itemID = r.reasoningItemIDLocked(reasoningID)
 		r.announceItemLocked(itemID)
 	}
 	r.mu.Unlock()
-	if chatStream != nil {
-		_ = sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "reasoning_delta", Delta: delta, ReasoningID: reasoningID})
-	}
-	if responseStream != nil {
-		sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "reasoning_delta", ItemID: itemID, Delta: delta})
-	}
+	chat.send(StreamEvent{Kind: "reasoning_delta", Delta: delta, ReasoningID: reasoningID})
+	response.send(ResponseStreamEvent{Kind: "reasoning_delta", ItemID: itemID, Delta: delta})
 }
 
 // emitResult publishes a turn result and reports whether the runner loop must
@@ -956,15 +936,11 @@ func (r *turnRunner) emitResult(res *TurnResult) (stop bool) {
 		}
 	}
 	r.mu.Lock()
-	chatStream := r.chatStream
-	chatDone := r.chatDone
-	responseStream := r.responseStream
-	responseDone := r.responseDone
+	chat := r.chat
+	response := r.response
 	if res.FinishReason == "tool_calls" {
-		r.chatStream = nil
-		r.chatDone = nil
-		r.responseStream = nil
-		r.responseDone = nil
+		r.chat.attach(nil, nil)
+		r.response.attach(nil, nil)
 	}
 	r.mu.Unlock()
 	if res.FinishReason == "tool_calls" {
@@ -974,17 +950,11 @@ func (r *turnRunner) emitResult(res *TurnResult) (stop bool) {
 		r.detachFromRequestContext()
 	}
 	r.updates <- toolproxy.TurnFinalResult{Value: res}
-	if chatStream != nil {
-		sent := sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "result", Result: res})
-		if res.FinishReason == "tool_calls" && sent {
-			close(chatStream)
-		}
+	if chat.send(StreamEvent{Kind: "result", Result: res}) && res.FinishReason == "tool_calls" {
+		chat.close()
 	}
-	if responseStream != nil {
-		sent := sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "response", Response: res.Response})
-		if res.FinishReason == "tool_calls" && sent {
-			close(responseStream)
-		}
+	if response.send(ResponseStreamEvent{Kind: "response", Response: res.Response}) && res.FinishReason == "tool_calls" {
+		response.close()
 	}
 	return false
 }
@@ -1019,7 +989,7 @@ func (r *turnRunner) buildTurnResponse(res *TurnResult) {
 	}
 	r.mu.Lock()
 	params := r.responseParams
-	streaming := r.responseStream != nil
+	streaming := r.response.active()
 	model := r.model
 	created := r.created
 	r.mu.Unlock()
@@ -1045,24 +1015,14 @@ func (r *turnRunner) buildTurnResponse(res *TurnResult) {
 func (r *turnRunner) emitError(err error) {
 	r.updates <- toolproxy.TurnFinalResult{Err: err}
 	r.mu.Lock()
-	chatStream := r.chatStream
-	chatDone := r.chatDone
-	responseStream := r.responseStream
-	responseDone := r.responseDone
-	r.chatStream = nil
-	r.chatDone = nil
-	r.responseStream = nil
-	r.responseDone = nil
+	chat := r.chat.take()
+	response := r.response.take()
 	r.mu.Unlock()
-	if chatStream != nil {
-		if sendChatStreamEvent(chatStream, chatDone, StreamEvent{Kind: "error", Error: err}) {
-			close(chatStream)
-		}
+	if chat.send(StreamEvent{Kind: "error", Error: err}) {
+		chat.close()
 	}
-	if responseStream != nil {
-		if sendResponseStreamEvent(responseStream, responseDone, ResponseStreamEvent{Kind: "error", Error: err}) {
-			close(responseStream)
-		}
+	if response.send(ResponseStreamEvent{Kind: "error", Error: err}) {
+		response.close()
 	}
 }
 
@@ -1074,32 +1034,6 @@ func (r *turnRunner) emitError(err error) {
 // ordered behind any buffered events and never blocks this goroutine.
 func (r *turnRunner) failSend(events *sessionEventSink, err error) {
 	events.send(copilot.SessionEvent{Data: &copilot.SessionErrorData{Message: err.Error()}})
-}
-
-func sendChatStreamEvent(ch chan<- StreamEvent, done <-chan struct{}, ev StreamEvent) bool {
-	if done == nil {
-		ch <- ev
-		return true
-	}
-	select {
-	case ch <- ev:
-		return true
-	case <-done:
-		return false
-	}
-}
-
-func sendResponseStreamEvent(ch chan<- ResponseStreamEvent, done <-chan struct{}, ev ResponseStreamEvent) bool {
-	if done == nil {
-		ch <- ev
-		return true
-	}
-	select {
-	case ch <- ev:
-		return true
-	case <-done:
-		return false
-	}
 }
 
 func (r *turnRunner) addPin(release func()) {
@@ -1133,19 +1067,11 @@ func (r *turnRunner) releasePins() {
 
 func (r *turnRunner) closeStreams() {
 	r.mu.Lock()
-	chatStream := r.chatStream
-	responseStream := r.responseStream
-	r.chatStream = nil
-	r.chatDone = nil
-	r.responseStream = nil
-	r.responseDone = nil
+	chat := r.chat.take()
+	response := r.response.take()
 	r.mu.Unlock()
-	if chatStream != nil {
-		close(chatStream)
-	}
-	if responseStream != nil {
-		close(responseStream)
-	}
+	chat.close()
+	response.close()
 }
 
 func (r *turnRunner) result(text, reasoning string, usage *openai.Usage, finish string) *TurnResult {
