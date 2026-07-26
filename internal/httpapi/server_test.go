@@ -200,7 +200,7 @@ func (g *streamChatGateway) StreamChat(_ context.Context, req copilotgw.ChatRequ
 					Arguments: `{"q":"alpha"}`,
 				},
 			}},
-			Usage: &openai.Usage{PromptTokens: &prompt, CompletionTokens: &completion, TotalTokens: &total},
+			Usage: &openai.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total},
 		}}
 	}()
 	return ch, nil

@@ -1080,33 +1080,26 @@ func (r *turnRunner) result(text, reasoning string, usage *openai.Usage, finish 
 	return &TurnResult{ID: id, Created: r.created, Model: r.model, SDKSessionID: r.session.SessionID, Text: text, Reasoning: reasoning, Usage: usage, FinishReason: finish, RetainedPath: r.retained}
 }
 
+// usageFromSDK maps an SDK usage event onto the Chat usage object. The mapping
+// is all-or-nothing by contract: OpenAI declares the three counters required, so
+// a usage event that reports no token counts produces no usage object at all
+// rather than one carrying whichever fields happened to arrive. The SDK reports
+// input and output tokens independently, so the partial case is reachable.
 func usageFromSDK(d *copilot.AssistantUsageData) *openai.Usage {
-	var prompt, completion, total *int64
+	if d == nil || (d.InputTokens == nil && d.OutputTokens == nil) {
+		return nil
+	}
+	usage := &openai.Usage{}
 	if d.InputTokens != nil {
-		v := int64(*d.InputTokens)
-		prompt = &v
+		usage.PromptTokens = *d.InputTokens
 	}
 	if d.OutputTokens != nil {
-		v := int64(*d.OutputTokens)
-		completion = &v
+		usage.CompletionTokens = *d.OutputTokens
 	}
-	if prompt != nil || completion != nil {
-		v := int64(0)
-		if prompt != nil {
-			v += *prompt
-		}
-		if completion != nil {
-			v += *completion
-		}
-		total = &v
-	}
-	usage := &openai.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total}
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	if d.ReasoningTokens != nil {
-		v := int64(*d.ReasoningTokens)
+		v := *d.ReasoningTokens
 		usage.CompletionTokensDetails = &openai.TokenDetails{ReasoningTokens: &v}
-	}
-	if prompt == nil && completion == nil && usage.CompletionTokensDetails == nil {
-		return nil
 	}
 	return usage
 }

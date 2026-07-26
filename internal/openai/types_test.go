@@ -44,7 +44,7 @@ func TestChatCompletionChunkUsageSerialization(t *testing.T) {
 
 	// With include_usage and a usage value, the value is serialized.
 	total := int64(8)
-	b, err = json.Marshal(ChatCompletionChunk{ID: "c", Object: ObjectChatChunk, IncludeUsage: true, Usage: &Usage{TotalTokens: &total}})
+	b, err = json.Marshal(ChatCompletionChunk{ID: "c", Object: ObjectChatChunk, IncludeUsage: true, Usage: &Usage{TotalTokens: total}})
 	if err != nil {
 		t.Fatal(err)
 	}

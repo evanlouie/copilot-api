@@ -151,7 +151,7 @@ func TestLoadResponseMigratesOldVersionsAndRejectsFuture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if old.Version != ResponseRecordVersion || old.Status != "completed" || old.Usage == nil || old.Usage.InputTokensDetails == nil || old.Usage.InputTokensDetails.CachedTokens == nil || *old.Usage.InputTokensDetails.CachedTokens != 4 || old.Usage.OutputTokensDetails == nil || old.Usage.OutputTokensDetails.ReasoningTokens == nil || *old.Usage.OutputTokensDetails.ReasoningTokens != 3 {
+	if old.Version != ResponseRecordVersion || old.Status != "completed" || old.Usage == nil || old.Usage.InputTokensDetails.CachedTokens != 4 || old.Usage.OutputTokensDetails.ReasoningTokens != 3 {
 		t.Fatalf("migrated record = %#v", old)
 	}
 

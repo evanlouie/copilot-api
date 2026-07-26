@@ -35,11 +35,17 @@ const goldenTombstoneRecordJSON = `{"version":3,"id":"resp_gone","sdk_session_id
 // catalog in goldenResponseRecordJSON.
 const goldenKnownEmptyCatalogJSON = `{"schema_version":1,"catalog_key":"empty-key","tools":null,"known_empty":true}`
 
+// goldenSparseUsageRecordJSON pins the persisted usage object for a turn the
+// upstream SDK only reported output tokens for. goldenResponseRecordJSON has
+// every usage counter set, so on its own it cannot catch a counter becoming
+// omitempty again. Every member of the Responses usage object is required, so
+// the sparse case must persist the same shape as the populated one, with
+// unreported counters as 0.
+const goldenSparseUsageRecordJSON = `{"version":3,"id":"resp_sparse_usage","sdk_session_id":"","model":"","created_at":"2026-07-25T18:56:00Z","updated_at":"2026-07-25T18:57:30Z","status":"completed","stored":true,"deleted":false,"output":null,"output_text":"","usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":12}}`
+
 func goldenResponseRecord() ResponseRecord {
 	created := time.Date(2026, 7, 25, 18, 56, 0, 0, time.UTC)
 	updated := time.Date(2026, 7, 25, 18, 57, 30, 0, time.UTC)
-	inputTokens, cachedTokens := int64(11), int64(3)
-	outputTokens, reasoningTokens, totalTokens := int64(7), int64(2), int64(18)
 	strict, deferLoading := true, false
 	return ResponseRecord{
 		Version:      ResponseRecordVersion,
@@ -65,11 +71,11 @@ func goldenResponseRecord() ResponseRecord {
 		},
 		OutputText: "hello",
 		Usage: &openai.ResponseUsage{
-			InputTokens:         &inputTokens,
-			InputTokensDetails:  &openai.ResponseInputTokensDetails{CachedTokens: &cachedTokens},
-			OutputTokens:        &outputTokens,
-			OutputTokensDetails: &openai.ResponseOutputTokensDetails{ReasoningTokens: &reasoningTokens},
-			TotalTokens:         &totalTokens,
+			InputTokens:         11,
+			InputTokensDetails:  openai.ResponseInputTokensDetails{CachedTokens: 3},
+			OutputTokens:        7,
+			OutputTokensDetails: openai.ResponseOutputTokensDetails{ReasoningTokens: 2},
+			TotalTokens:         18,
 		},
 		PreviousResponseID: "resp_prev",
 		PendingBatchID:     "batch_1",
@@ -139,6 +145,23 @@ func TestResponseRecordKnownEmptyCatalogGoldenJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertGoldenJSON(t, got, goldenKnownEmptyCatalogJSON)
+}
+
+func TestResponseRecordSparseUsageGoldenJSON(t *testing.T) {
+	record := ResponseRecord{
+		Version:   ResponseRecordVersion,
+		ID:        "resp_sparse_usage",
+		CreatedAt: time.Date(2026, 7, 25, 18, 56, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 7, 25, 18, 57, 30, 0, time.UTC),
+		Status:    "completed",
+		Stored:    true,
+		Usage:     openai.NewResponseUsage(&openai.Usage{CompletionTokens: 12, TotalTokens: 12}),
+	}
+	got, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGoldenJSON(t, got, goldenSparseUsageRecordJSON)
 }
 
 // TestResponseRecordGoldenDecodesToRecord closes the loop: the pinned bytes

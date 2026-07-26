@@ -32,47 +32,66 @@ type Model struct {
 	Meta    map[string]any `json:"metadata,omitempty"`
 }
 
+// Usage is the Chat Completions usage object. OpenAI declares prompt_tokens,
+// completion_tokens and total_tokens as required integers, so the counters are
+// plain values with no omitempty: whenever a usage object is on the wire it
+// carries all three. Optionality lives one level up, in the *Usage the
+// containing payload holds — an absent usage object is legal, a half-populated
+// one is not, because clients deserialize the counters into non-optional
+// integers and cost middleware adds them without a nil check.
+//
+// Producers must therefore decide all-or-nothing: emit nil, or emit an object
+// with every counter set. See copilotgw.usageFromSDK for the gate.
 type Usage struct {
-	PromptTokens            *int64        `json:"prompt_tokens,omitempty"`
-	CompletionTokens        *int64        `json:"completion_tokens,omitempty"`
-	TotalTokens             *int64        `json:"total_tokens,omitempty"`
+	PromptTokens            int64         `json:"prompt_tokens"`
+	CompletionTokens        int64         `json:"completion_tokens"`
+	TotalTokens             int64         `json:"total_tokens"`
 	CompletionTokensDetails *TokenDetails `json:"completion_tokens_details,omitempty"`
 }
 
+// TokenDetails stays optional: unlike its Responses counterpart,
+// completion_tokens_details is not a required member of the Chat usage object,
+// and reasoning tokens are genuinely absent for non-reasoning models.
 type TokenDetails struct {
 	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
 }
 
+// ResponseUsage is the Responses usage object. The Responses schema declares
+// every member required, including both details objects, so nothing here is
+// optional or omitempty; the details objects are values rather than pointers so
+// they cannot structurally go missing.
 type ResponseUsage struct {
-	InputTokens         *int64                       `json:"input_tokens,omitempty"`
-	InputTokensDetails  *ResponseInputTokensDetails  `json:"input_tokens_details,omitempty"`
-	OutputTokens        *int64                       `json:"output_tokens,omitempty"`
-	OutputTokensDetails *ResponseOutputTokensDetails `json:"output_tokens_details,omitempty"`
-	TotalTokens         *int64                       `json:"total_tokens,omitempty"`
+	InputTokens         int64                       `json:"input_tokens"`
+	InputTokensDetails  ResponseInputTokensDetails  `json:"input_tokens_details"`
+	OutputTokens        int64                       `json:"output_tokens"`
+	OutputTokensDetails ResponseOutputTokensDetails `json:"output_tokens_details"`
+	TotalTokens         int64                       `json:"total_tokens"`
 }
 
 type ResponseInputTokensDetails struct {
-	CachedTokens *int64 `json:"cached_tokens,omitempty"`
+	CachedTokens int64 `json:"cached_tokens"`
 }
 
 type ResponseOutputTokensDetails struct {
-	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
 }
 
+// NewResponseUsage renames the Chat counters onto the Responses object. The
+// all-or-nothing decision was already made by whoever produced the *Usage, so
+// this only propagates absence; a non-nil input always yields a complete object.
 func NewResponseUsage(usage *Usage) *ResponseUsage {
 	if usage == nil {
 		return nil
 	}
-	if usage.PromptTokens == nil && usage.CompletionTokens == nil && usage.TotalTokens == nil {
-		return nil
-	}
 	out := &ResponseUsage{InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens}
-	if out.TotalTokens == nil && out.InputTokens != nil && out.OutputTokens != nil {
-		total := *out.InputTokens + *out.OutputTokens
-		out.TotalTokens = &total
+	if out.TotalTokens == 0 {
+		// A zero total next to non-zero counters means the source never carried
+		// one, not that the turn consumed nothing; derive it rather than ship a
+		// total that contradicts its own addends.
+		out.TotalTokens = out.InputTokens + out.OutputTokens
 	}
 	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens != nil {
-		out.OutputTokensDetails = &ResponseOutputTokensDetails{ReasoningTokens: usage.CompletionTokensDetails.ReasoningTokens}
+		out.OutputTokensDetails.ReasoningTokens = *usage.CompletionTokensDetails.ReasoningTokens
 	}
 	return out
 }

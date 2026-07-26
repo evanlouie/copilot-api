@@ -510,10 +510,8 @@ func TestValidateChatRejectsUnsupportedToolTypes(t *testing.T) {
 }
 
 func TestNewResponseUsageUsesResponsesTokenNames(t *testing.T) {
-	prompt := int64(3)
-	completion := int64(5)
 	reasoning := int64(2)
-	usage := NewResponseUsage(&Usage{PromptTokens: &prompt, CompletionTokens: &completion, CompletionTokensDetails: &TokenDetails{ReasoningTokens: &reasoning}})
+	usage := NewResponseUsage(&Usage{PromptTokens: 3, CompletionTokens: 5, CompletionTokensDetails: &TokenDetails{ReasoningTokens: &reasoning}})
 	b, err := json.Marshal(usage)
 	if err != nil {
 		t.Fatal(err)
@@ -529,10 +527,19 @@ func TestNewResponseUsageUsesResponsesTokenNames(t *testing.T) {
 	}
 }
 
-func TestNewResponseUsageOmitsReasoningOnlyUsage(t *testing.T) {
-	reasoning := int64(2)
-	if usage := NewResponseUsage(&Usage{CompletionTokensDetails: &TokenDetails{ReasoningTokens: &reasoning}}); usage != nil {
-		t.Fatalf("reasoning-only usage = %#v, want nil", usage)
+// Every member of the Responses usage object is required, so an emitted object
+// carries all of them even when the turn only reported one counter. Absence is
+// expressible only by the nil parent.
+func TestNewResponseUsageAlwaysEmitsRequiredMembers(t *testing.T) {
+	b, err := json.Marshal(NewResponseUsage(&Usage{CompletionTokens: 12, TotalTokens: 12}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), `{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":12}`; got != want {
+		t.Fatalf("usage JSON = %s, want %s", got, want)
+	}
+	if usage := NewResponseUsage(nil); usage != nil {
+		t.Fatalf("NewResponseUsage(nil) = %#v, want nil", usage)
 	}
 }
 
