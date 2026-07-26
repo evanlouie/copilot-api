@@ -14,11 +14,11 @@ import (
 func registerLikeTurn(broker *Broker, tools int) *Batch {
 	batch := newBatch(time.Minute, "resp", "responses", "gpt-5", nil, nil, context.Background())
 	for i := range tools {
-		batch.ensureCall(fmt.Sprintf("call_%d", i), "lookup", ClientTool{}, json.RawMessage(`{}`), "", "")
+		batch.ensureCall(fmt.Sprintf("call_%d", i), "lookup", ClientTool{}, json.RawMessage(`{}`), "", nil)
 	}
 	broker.Register(batch)
 	for i := range tools {
-		batch.ensureCall(fmt.Sprintf("call_%d", i), "lookup", ClientTool{}, json.RawMessage(`{}`), "", "")
+		batch.ensureCall(fmt.Sprintf("call_%d", i), "lookup", ClientTool{}, json.RawMessage(`{}`), "", nil)
 		broker.Register(batch)
 	}
 	return batch

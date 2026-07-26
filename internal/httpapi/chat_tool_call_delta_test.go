@@ -96,6 +96,44 @@ func TestChatStreamForwardsToolCallArgumentFragments(t *testing.T) {
 	}
 }
 
+// The realistic case: the model's fragments and the finished arguments are the
+// same JSON value in different bytes, because toolproxy.rawArgs re-encodes the
+// decoded map and encoding/json sorts keys, escapes `<` and `>`, and reformats
+// floats. A byte-prefix test would fail this - and therefore nearly every real
+// tool call - so the stream has to complete with nothing extra appended.
+func TestChatStreamAcceptsFragmentsThatMatchOnlyAsJSON(t *testing.T) {
+	t.Parallel()
+	// Exactly what toolproxy.rawArgs does to the SDK's decoded arguments.
+	arguments, err := json.Marshal(map[string]any{"temp": 21.0, "location": "Paris", "note": "a <b> c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragments := []string{`{"temp": 21.0, `, `"location": "Paris", `, `"note": "a <b> c"}`}
+	gw := &streamChatToolFragmentGateway{fragments: fragments, arguments: string(arguments)}
+	s := New(config.Config{}, gw, slog.Default())
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatToolStreamBody)))
+
+	body := w.Body.String()
+	if strings.Contains(body, "chat.error") || strings.Contains(body, "do not match") {
+		t.Fatalf("semantically equal fragments were reported as a divergence:\n%s", body)
+	}
+	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("stream did not finish normally:\n%s", body)
+	}
+	var assembled strings.Builder
+	for _, delta := range chatToolCallDeltas(t, body) {
+		assembled.WriteString(delta.Function.Arguments)
+	}
+	if assembled.String() != strings.Join(fragments, "") {
+		t.Fatalf("client would accumulate %q, want exactly the model's own bytes %q", assembled.String(), strings.Join(fragments, ""))
+	}
+	if !sameJSONValue(assembled.String(), string(arguments)) {
+		t.Fatalf("accumulated %q is not the same call as %q", assembled.String(), arguments)
+	}
+}
+
 // A turn whose tool call never streamed - a strict tool, or a backend that
 // emits no fragments - must still deliver the whole call in one terminal chunk,
 // byte for byte as it always has.

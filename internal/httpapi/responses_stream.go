@@ -42,23 +42,15 @@ func (x *outputItemIndexer) indexOf(id string) int {
 // streamedToolCall is one tool call whose arguments this stream published
 // incrementally: the in-progress item the gateway announced it under, the text
 // already delivered, and - once the turn is finished - what is still owed.
+//
+// Only function calls reach here. A freeform custom tool's fragments are the
+// synthetic {"input": ...} envelope this proxy declared rather than the raw
+// input its item carries, so the gateway does not stream them at all (see
+// toolproxy.RequestTools.ReserveStreamingCall).
 type streamedToolCall struct {
 	item      openai.ResponseOutputItem
 	delivered strings.Builder
 	remaining string
-}
-
-func (s *streamedToolCall) custom() bool { return s.item.Type == "custom_tool_call" }
-
-// deltaEvent names the incremental event this item's input belongs to. A
-// freeform custom tool streams raw grammar input under its own event name;
-// reporting it as response.function_call_arguments.* would tell the client the
-// bytes are JSON arguments when they are not.
-func (s *streamedToolCall) deltaEvent() string {
-	if s.custom() {
-		return "response.custom_tool_call_input.delta"
-	}
-	return "response.function_call_arguments.delta"
 }
 
 // incompleteItem is the item as far as the stream got, for a turn that failed
@@ -66,21 +58,8 @@ func (s *streamedToolCall) deltaEvent() string {
 func (s *streamedToolCall) incompleteItem() openai.ResponseOutputItem {
 	item := s.item
 	item.Status = "incomplete"
-	if s.custom() {
-		item.Input = s.delivered.String()
-	} else {
-		item.Arguments = s.delivered.String()
-	}
+	item.Arguments = s.delivered.String()
 	return item
-}
-
-// toolCallItemInput is the value a tool call's streamed fragments accumulate
-// towards, which differs by item type.
-func toolCallItemInput(item openai.ResponseOutputItem) string {
-	if item.Type == "custom_tool_call" {
-		return item.Input
-	}
-	return item.Arguments
 }
 
 func writeResponseLifecycleStart(writer responseEventWriter, req copilotgw.ResponseRequest, status string) (*openai.Response, error) {
@@ -468,9 +447,10 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 			case "tool_call_delta":
 				// The gateway builds the in-progress item so this layer never has
-				// to invent one; without it a fragment could not be announced.
-				if ev.ItemID == "" || ev.Item == nil {
-					return writeFailure(apierr.Internal("response stream tool-call delta is missing its output item"))
+				// to invent one, and only function calls are ever streamed, so any
+				// other shape means the two sides have drifted apart.
+				if ev.ItemID == "" || ev.Item == nil || ev.Item.Type != "function_call" {
+					return writeFailure(apierr.Internal("response stream tool-call delta is missing its function_call output item"))
 				}
 				if ev.Delta == "" {
 					continue
@@ -494,7 +474,7 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 				}
 				streamed.delivered.WriteString(ev.Delta)
 				toolCallBytes += len(ev.Delta)
-				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: streamed.deltaEvent(), OutputIndex: &idx, ItemID: ev.ItemID, Delta: ev.Delta}); err != nil {
+				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: &idx, ItemID: ev.ItemID, Delta: ev.Delta}); err != nil {
 					return responseStreamWriteResult{Err: err, WriteFailed: true}
 				}
 			case "response":
@@ -727,7 +707,7 @@ func reconcileStreamedToolCalls(resp *openai.Response, streams map[string]*strea
 		if item == nil {
 			return apierr.Upstream("response stream terminal response is missing the streamed " + streamed.item.Type + " item")
 		}
-		suffix, err := terminalStreamSuffix(toolCallItemInput(*item), streamed.delivered.String(), "response stream terminal tool-call arguments do not match the streamed arguments")
+		suffix, err := toolArgumentsSuffix(item.Arguments, streamed.delivered.String(), "response stream terminal tool-call arguments do not match the streamed arguments")
 		if err != nil {
 			return err
 		}
@@ -736,10 +716,10 @@ func reconcileStreamedToolCalls(resp *openai.Response, streams map[string]*strea
 	return nil
 }
 
-// writeResponseOutputEvents closes out the turn's tool-call items. An item
-// whose arguments were streamed keeps the announcement it already received and
-// is only owed whatever the fragments did not deliver; an item that was never
-// streamed is announced and delivered whole, exactly as it always has been.
+// writeResponseOutputEvents closes out the turn's tool-call items. A function
+// call whose arguments were streamed keeps the announcement it already
+// received and is only owed whatever the fragments did not deliver; every
+// other item is announced and delivered whole, exactly as it always has been.
 // Either way the terminal events are identical, which is what lets a client
 // reconcile the two paths without knowing which one it got.
 func writeResponseOutputEvents(writer responseEventWriter, index *outputItemIndexer, resp *openai.Response, streams map[string]*streamedToolCall) error {
@@ -774,26 +754,12 @@ func writeResponseOutputEvents(writer responseEventWriter, index *outputItemInde
 			}
 		case "custom_tool_call", "tool_search_call":
 			idx := index.indexOf(item.ID)
-			streamed := streams[item.ID]
-			if streamed == nil {
-				added := item
-				if added.Status == "completed" {
-					added.Status = "in_progress"
-				}
-				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &added, Status: added.Status}); err != nil {
-					return err
-				}
-			} else {
-				if streamed.remaining != "" {
-					if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.custom_tool_call_input.delta", OutputIndex: &idx, ItemID: item.ID, Delta: streamed.remaining}); err != nil {
-						return err
-					}
-				}
-				// A fragment stream needs a terminator of its own; the item's own
-				// done event carries the whole item and arrives after it.
-				if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.custom_tool_call_input.done", OutputIndex: &idx, ItemID: item.ID, Input: item.Input}); err != nil {
-					return err
-				}
+			added := item
+			if added.Status == "completed" {
+				added.Status = "in_progress"
+			}
+			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.added", OutputIndex: &idx, Item: &added, Status: added.Status}); err != nil {
+				return err
 			}
 			if err := writer.WriteResponseEvent(openai.ResponseStreamEvent{Type: "response.output_item.done", OutputIndex: &idx, Item: &item, Status: item.Status}); err != nil {
 				return err

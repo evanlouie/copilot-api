@@ -502,7 +502,9 @@ type RequestTools struct {
 	// argument fragments are being streamed, keyed by the model's tool-call id.
 	// It exists because a streamed fragment has to name the call before the SDK
 	// announces the finished tool request that ensureCall would normally mint
-	// the id from.
+	// the id from. It is cleared at every tool-call boundary and whenever the
+	// current batch is cancelled, so it is bounded by the calls one model turn
+	// has in flight rather than by every call the request ever made.
 	reserved map[string]StreamingCall
 
 	// UnenforceableStrict lists tools whose strict: true was accepted but cannot
@@ -529,13 +531,22 @@ type StreamingCall struct {
 // ReserveStreamingCall decides whether a tool call's arguments may be streamed
 // as the model produces them, and pins the identity such a stream must use.
 //
-// The gate is strict tools, and it is the whole reason this is a decision
-// rather than a lookup. validateStrictArguments refuses to hand the client a
-// strict call whose arguments do not satisfy the declared schema, and that
-// refusal can only be made once the arguments are complete. Streaming
-// fragments of a strict call would publish arguments this proxy may be about
-// to reject, which is exactly the guarantee strict: true buys. Strict calls
-// therefore stay buffered; everything else streams.
+// Three things disqualify a call, and each is a case where the fragments could
+// not be reconciled against the call the client is finally handed:
+//
+//   - Strict tools. validateStrictArguments refuses to hand the client a strict
+//     call whose arguments do not satisfy the declared schema, and that refusal
+//     can only be made once the arguments are complete. Streaming fragments of
+//     one would publish arguments this proxy may be about to reject, which is
+//     exactly the guarantee strict: true buys.
+//   - Freeform custom tools. This proxy declares them to the SDK with the
+//     synthetic {"input": {"type": "string"}} wrapper customToolSchema builds,
+//     so the model streams that envelope with the input JSON-escaped inside it.
+//     The custom_tool_call item carries the unwrapped raw input customInput
+//     extracts, so envelope fragments could never add up to it. Streaming them
+//     needs incremental unwrapping, which is a feature of its own.
+//   - Tool-search calls. Neither OpenAI surface defines an incremental event
+//     for one.
 //
 // The reserved id matters as much as the decision. ensureCall normally mints
 // the client-visible id when the SDK announces the finished tool request, but
@@ -543,7 +554,7 @@ type StreamingCall struct {
 // consuming the reservation there is what makes the fragments and the final
 // tool call the same call rather than two.
 //
-// custom reports the SDK's tool-call type discriminator, so the kind returned
+// custom reports the SDK's tool-call type discriminator, so the kind decided
 // here is the same kind CaptureRequests will settle on.
 func (rt *RequestTools) ReserveStreamingCall(sdkID, sdkName string, custom bool) (StreamingCall, bool) {
 	// An empty id cannot be correlated back to a tool request, so a fragment
@@ -556,6 +567,16 @@ func (rt *RequestTools) ReserveStreamingCall(sdkID, sdkName string, custom bool)
 	if call, ok := rt.reserved[sdkID]; ok {
 		return call, true
 	}
+	// A batch that already published a call under this id owns it. Copilot's
+	// backends emit low-entropy ids such as "call_1" (see ensureCall), so one can
+	// come round again inside a still-open batch - where ensureCall answers with
+	// the call it already minted and would ignore anything reserved here. The
+	// fragments would then accumulate under an id the client never receives.
+	if rt.batch != nil {
+		if _, published := rt.batch.callBySDKID(sdkID); published {
+			return StreamingCall{}, false
+		}
+	}
 	meta, ok := rt.clientTool(sdkName)
 	if !ok || meta.strictEnabled() {
 		return StreamingCall{}, false
@@ -566,6 +587,9 @@ func (rt *RequestTools) ReserveStreamingCall(sdkID, sdkName string, custom bool)
 	}
 	if custom && kind == toolcatalog.ToolKindFunction {
 		kind = toolcatalog.ToolKindCustom
+	}
+	if kind != toolcatalog.ToolKindFunction {
+		return StreamingCall{}, false
 	}
 	name := meta.ResponseName
 	if name == "" {
@@ -580,8 +604,10 @@ func (rt *RequestTools) ReserveStreamingCall(sdkID, sdkName string, custom bool)
 }
 
 // takeReservedCallIDLocked consumes the id reserved for a streamed tool call.
-// Consuming rather than reading keeps the map bounded by the calls still in
-// flight instead of by every call the request ever made.
+// It is passed to ensureCall as a thunk rather than a value so that only the
+// path that actually mints a call consumes it: a repeat request for an id the
+// batch already holds must leave the reservation alone rather than silently
+// discard it.
 func (rt *RequestTools) takeReservedCallIDLocked(sdkID string) string {
 	call, ok := rt.reserved[sdkID]
 	if !ok {
@@ -589,6 +615,20 @@ func (rt *RequestTools) takeReservedCallIDLocked(sdkID string) string {
 	}
 	delete(rt.reserved, sdkID)
 	return call.CallID
+}
+
+// releaseReservationsLocked drops every streaming reservation this turn made.
+// A turn that streamed fragments and then aborted, errored or was cancelled
+// never reaches ensureCall, so without this the entries would live as long as
+// the request rather than as long as the turn that created them.
+func (rt *RequestTools) releaseReservationsLocked() {
+	clear(rt.reserved)
+}
+
+// reservationFor is the thunk ensureCall consults when it mints a call. The
+// caller must hold rt.mu, which it does for the whole of ensureCall.
+func (rt *RequestTools) reservationFor(sdkID string) func() string {
+	return func() string { return rt.takeReservedCallIDLocked(sdkID) }
 }
 
 func NewRequestTools(broker *Broker, tools []openai.Tool, scope openai.ToolScope) (*RequestTools, error) {
@@ -903,6 +943,9 @@ func (rt *RequestTools) SetContext(ctx context.Context) {
 func (rt *RequestTools) CancelCurrent(err error) {
 	rt.mu.Lock()
 	batch := rt.batch
+	// A cancelled turn will never reach CaptureRequests, so this is the only
+	// boundary its streaming reservations have.
+	rt.releaseReservationsLocked()
 	rt.mu.Unlock()
 	if batch != nil {
 		batch.Cancel(err)
@@ -964,9 +1007,12 @@ func (rt *RequestTools) CaptureRequests(reqs []copilot.AssistantMessageToolReque
 		if meta.ResponseKind == toolcatalog.ToolKindCustom {
 			input = customInput(req.Arguments, args)
 		}
-		call := rt.batch.ensureCall(req.ToolCallID, req.Name, meta, args, input, rt.takeReservedCallIDLocked(req.ToolCallID))
+		call := rt.batch.ensureCall(req.ToolCallID, req.Name, meta, args, input, rt.reservationFor(req.ToolCallID))
 		calls = append(calls, call.Captured())
 	}
+	// This is the turn's tool-call boundary: every call the model planned now
+	// exists, so no reservation from it can still be owed an id.
+	rt.releaseReservationsLocked()
 	rt.broker.Register(rt.batch)
 	rt.batch.startTimer()
 	return rt.batch, calls, nil
@@ -992,7 +1038,7 @@ func (rt *RequestTools) handleInvocation(inv copilot.ToolInvocation) (copilot.To
 	if meta.ResponseKind == toolcatalog.ToolKindCustom {
 		input = customInput(inv.Arguments, args)
 	}
-	call := batch.ensureCall(inv.ToolCallID, inv.ToolName, meta, args, input, rt.takeReservedCallIDLocked(inv.ToolCallID))
+	call := batch.ensureCall(inv.ToolCallID, inv.ToolName, meta, args, input, rt.reservationFor(inv.ToolCallID))
 	rt.broker.Register(batch)
 	batch.startTimer()
 	rt.mu.Unlock()
@@ -1186,9 +1232,12 @@ func (b *Batch) configure(responseID, kind string, model string, done <-chan Tur
 // another client's pending batch. The model's id is retained on Call.SDKID and
 // indexed in b.bySDKID, which is per-batch and only used to answer the SDK.
 //
-// reservedID is the id ReserveStreamingCall already published on the wire for
-// this call, and is empty for a call whose arguments were never streamed.
-func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.RawMessage, input string, reservedID string) *Call {
+// reserved yields the id ReserveStreamingCall already published on the wire for
+// this call, or "" when its arguments were never streamed. It is a thunk and is
+// called only on the path that mints, because it consumes the reservation: a
+// repeat request for a call this batch already holds must leave that
+// reservation for whoever is still owed it.
+func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.RawMessage, input string, reserved func() string) *Call {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if meta.SDKName == "" {
@@ -1213,7 +1262,10 @@ func (b *Batch) ensureCall(sdkID, sdkName string, meta ClientTool, args json.Raw
 			return call
 		}
 	}
-	openaiID := reservedID
+	openaiID := ""
+	if reserved != nil {
+		openaiID = reserved()
+	}
 	if openaiID == "" {
 		openaiID = "call_" + uuid.NewString()
 	}

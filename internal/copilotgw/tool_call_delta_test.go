@@ -3,29 +3,36 @@ package copilotgw
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/openai"
+	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	"github.com/evanlouie/copilot-api/internal/toolproxy"
 	copilot "github.com/github/copilot-sdk/go"
 )
 
 // The acceptance criterion for streamed tool-call arguments is that they
-// reconcile: whatever the client accumulated from the fragments has to be
-// exactly the arguments of the call it is finally handed. This drives a turn
-// that plans one ordinary tool call and one strict one, and asserts both that
-// the ordinary call's fragments add up and that the strict call produced none -
-// strict arguments are validated before the client sees them, so a fragment of
-// one is a promise this proxy may still refuse to keep.
+// reconcile with the call the client is finally handed. The payload here is
+// chosen to break a byte-wise test on purpose: toolproxy.rawArgs re-encodes the
+// SDK's decoded map[string]any, so encoding/json sorts the keys, escapes the
+// angle brackets and reformats the float. The fragments are the model's own
+// bytes and none of those normalizations apply to them, so the two agree as
+// JSON values and disagree as bytes - which is exactly the property the HTTP
+// layer's toolArgumentsSuffix has to be built on.
+//
+// The strict call in the same turn asserts the other half: strict arguments are
+// validated before the client sees them, so a fragment of one is a promise this
+// proxy may still refuse to keep.
 func TestToolCallDeltasStreamNonStrictCallsAndBufferStrictOnes(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
 	strict := true
 	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{
-		{Type: "function", Function: openai.FunctionTool{Name: "lookup", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)}},
+		{Type: "function", Function: openai.FunctionTool{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}},
 		{Type: "function", Function: openai.FunctionTool{Name: "verify", Strict: &strict, Parameters: json.RawMessage(`{"type":"object","properties":{"code":{"type":"string"}}}`)}},
 	}, openai.ToolScope{})
 	if err != nil {
@@ -40,12 +47,12 @@ func TestToolCallDeltasStreamNonStrictCallsAndBufferStrictOnes(t *testing.T) {
 
 	go runner.loop(&RealGateway{})
 	events <- copilot.SessionEvent{Data: &copilot.AssistantTurnStartData{}}
-	for _, fragment := range []string{`{"q":`, `"al`, `pha"}`} {
+	for _, fragment := range []string{`{"temp": 21.0, `, `"location": "Paris", `, `"note": "a <b> c"}`} {
 		events <- copilot.SessionEvent{Data: toolCallDelta("sdk_1", "lookup", fragment)}
 	}
 	events <- copilot.SessionEvent{Data: toolCallDelta("sdk_2", "verify", `{"code":"123"}`)}
 	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{
-		{ToolCallID: "sdk_1", Name: "lookup", Arguments: map[string]any{"q": "alpha"}},
+		{ToolCallID: "sdk_1", Name: "lookup", Arguments: map[string]any{"temp": 21.0, "location": "Paris", "note": "a <b> c"}},
 		{ToolCallID: "sdk_2", Name: "verify", Arguments: map[string]any{"code": "123"}},
 	}}}
 
@@ -67,17 +74,62 @@ func TestToolCallDeltasStreamNonStrictCallsAndBufferStrictOnes(t *testing.T) {
 		t.Fatalf("terminal result = %#v, want two tool calls", result)
 	}
 	lookup, verify := result.ToolCalls[0], result.ToolCalls[1]
-	if got := fragments[lookup.ID]; got != lookup.Function.Arguments {
-		t.Fatalf("accumulated fragments for %s = %q, want the final arguments %q", lookup.ID, got, lookup.Function.Arguments)
+	streamed := fragments[lookup.ID]
+	if !sameJSON(t, streamed, lookup.Function.Arguments) {
+		t.Fatalf("accumulated fragments %q are not the final arguments %q", streamed, lookup.Function.Arguments)
+	}
+	// Guards the guard: a payload that happened to round-trip byte for byte would
+	// make this test pass without exercising the normalization at all.
+	if streamed == lookup.Function.Arguments {
+		t.Fatalf("fragments %q round-tripped unchanged; the payload no longer exercises rawArgs normalization", streamed)
 	}
 	if names[lookup.ID] != "lookup" {
 		t.Fatalf("streamed tool name = %q, want lookup", names[lookup.ID])
 	}
-	if _, streamed := fragments[verify.ID]; streamed {
+	if _, streamedStrict := fragments[verify.ID]; streamedStrict {
 		t.Fatalf("strict tool %s streamed arguments before they were validated", verify.ID)
 	}
 	if len(fragments) != 1 {
 		t.Fatalf("streamed fragments for %d calls, want only the non-strict one: %#v", len(fragments), fragments)
+	}
+
+	runner.abort()
+	awaitLoopExit(t, runner, unpinned)
+}
+
+// A freeform custom tool is declared to the SDK behind a synthetic
+// {"input": ...} wrapper, so the model streams that envelope while the
+// custom_tool_call item carries the unwrapped raw input. The fragments could
+// not add up to the item, so none are forwarded.
+func TestCustomToolCallDeltasAreNotForwarded(t *testing.T) {
+	t.Parallel()
+	broker := toolproxy.NewBroker(time.Minute)
+	defer broker.CancelAll(context.Canceled)
+	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"},
+	}, openai.ToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan copilot.SessionEvent, 4)
+	runner, unpinned := newLoopTestRunner(events, time.Minute)
+	runner.rt = rt
+	runner.setResponseParams(responseParams{id: "resp_1", model: "gpt-test"})
+	stream := make(chan ResponseStreamEvent, 16)
+	runner.enableResponseStream(stream, nil)
+
+	go runner.loop(&RealGateway{})
+	custom := copilot.AssistantMessageToolRequestTypeCustom
+	name := "apply_patch"
+	events <- copilot.SessionEvent{Data: &copilot.AssistantToolCallDeltaData{ToolCallID: "sdk_1", ToolName: &name, ToolType: &custom, InputDelta: `{"input":"*** Begin Patch\n"}`}}
+	events <- copilot.SessionEvent{Data: &copilot.AssistantMessageData{ToolRequests: []copilot.AssistantMessageToolRequest{
+		{ToolCallID: "sdk_1", Name: "apply_patch", Type: &custom, Arguments: `{"input":"*** Begin Patch\n"}`},
+	}}}
+
+	for ev := range stream {
+		if ev.Kind == "tool_call_delta" {
+			t.Fatalf("forwarded a fragment of a custom tool's synthetic envelope: %#v", ev)
+		}
 	}
 
 	runner.abort()
@@ -183,4 +235,18 @@ func TestToolCallDeltasAnnounceTheItemTheTerminalResponseCarries(t *testing.T) {
 func toolCallDelta(sdkID, toolName, fragment string) *copilot.AssistantToolCallDeltaData {
 	toolType := copilot.AssistantMessageToolRequestTypeFunction
 	return &copilot.AssistantToolCallDeltaData{ToolCallID: sdkID, ToolName: &toolName, ToolType: &toolType, InputDelta: fragment}
+}
+
+// sameJSON reports whether two JSON texts denote the same value, which is the
+// equality the HTTP layer reconciles streamed tool arguments on.
+func sameJSON(t *testing.T, a, b string) bool {
+	t.Helper()
+	var left, right any
+	if err := json.Unmarshal([]byte(a), &left); err != nil {
+		t.Fatalf("accumulated fragments are not valid JSON: %v (%q)", err, a)
+	}
+	if err := json.Unmarshal([]byte(b), &right); err != nil {
+		t.Fatalf("final arguments are not valid JSON: %v (%q)", err, b)
+	}
+	return reflect.DeepEqual(left, right)
 }
