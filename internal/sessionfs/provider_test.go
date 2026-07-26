@@ -374,6 +374,27 @@ func TestProviderKeepsFilesUsableForRestrictiveModes(t *testing.T) {
 	}
 }
 
+// AppendFile creates the file and its parents on a first call and extends it
+// afterwards; both branches sync, and only the creating one syncs the parent.
+func TestProviderAppendFileCreatesThenExtends(t *testing.T) {
+	t.Parallel()
+	_, p := newTestProvider(t, "session")
+	const path = "/session-state/nested/events.jsonl"
+	if err := p.AppendFile(path, "one\n", nil); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if err := p.AppendFile(path, "two\n", nil); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	got, err := p.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got != "one\ntwo\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestProviderKeepsDirectoriesUsableForRestrictiveModes(t *testing.T) {
 	t.Parallel()
 	probe := filepath.Join(t.TempDir(), "probe")

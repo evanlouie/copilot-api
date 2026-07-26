@@ -2,7 +2,9 @@ package sessionfs
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -179,6 +181,17 @@ func (p *Provider) WriteFile(path string, content string, mode *int) error {
 	return writeFileAtomic(root, name, []byte(content), hardenFileMode(mode))
 }
 
+// AppendFile is how the Copilot CLI extends a session's event log, so it is
+// fsynced for the same reason WriteFile is atomic: a Responses continuation
+// resumes the SDK session named by the previous record and lets the CLI reread
+// that log, and only falls back to rehydrating from the session store when the
+// resume fails. A silently short log is therefore the bad case - the resume
+// succeeds and the model answers without the turn the client just referenced -
+// so the suffix has to be as durable as the prefix WriteEvents already syncs.
+//
+// The cost is one durability barrier per append RPC. Appends are event-log
+// writes issued while a turn runs, so their number is bounded by the turn's
+// event count and the total is immaterial next to model latency.
 func (p *Provider) AppendFile(path string, content string, mode *int) error {
 	mu := p.mutex()
 	mu.Lock()
@@ -191,6 +204,10 @@ func (p *Provider) AppendFile(path string, content string, mode *int) error {
 	if err := secureParent(root, name); err != nil {
 		return err
 	}
+	// Checked under the session lock, which every provider operation holds, so
+	// the answer still describes this call by the time the file is opened.
+	_, statErr := root.Stat(name)
+	created := errors.Is(statErr, fs.ErrNotExist)
 	perm := hardenFileMode(mode)
 	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, perm)
 	if err != nil {
@@ -204,7 +221,23 @@ func (p *Provider) AppendFile(path string, content string, mode *int) error {
 		_ = f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync %s: %w", name, err)
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if !created {
+		return nil
+	}
+	// A first append also creates the name, and a file's own fsync does not make
+	// its directory entry durable.
+	dir := filepath.Dir(name)
+	if err := syncDirectory(root, dir); err != nil {
+		return fmt.Errorf("sync directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 func (p *Provider) Exists(path string) (bool, error) {
