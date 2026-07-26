@@ -43,16 +43,65 @@ func TestStrictToolRequestIsAccepted(t *testing.T) {
 	}
 }
 
-// A strict tool whose schema cannot be compiled can never have its guarantee
-// enforced, so it fails at request time rather than mid-turn.
-func TestStrictToolWithUnusableSchemaIsRejected(t *testing.T) {
+// A strict tool whose schema this proxy cannot compile is accepted and reported
+// rather than rejected.
+//
+// The schemas that reach this path are ones real OpenAI accepts: Draft-07's
+// boolean exclusiveMinimum, which jsonschema-go does not model, and any
+// external $ref, which fails because Resolve is called with no loader - this
+// proxy's own limitation, not something the client did. Since the clients that
+// set strict: true by default send exactly these, a 400 would break working
+// integrations over a guarantee that is best-effort here in the first place.
+func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
 	t.Parallel()
-	_, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", `{"type":"object","properties":{"city":{"$ref":"#/nope/missing"}}}`, boolPtr(true))}, false)
-	if err == nil {
-		t.Fatal("expected an unusable strict schema to be rejected")
+	for _, tc := range []struct {
+		name   string
+		schema string
+	}{
+		{"unresolvable local ref", `{"type":"object","properties":{"city":{"$ref":"#/nope/missing"}}}`},
+		{"external ref", `{"$ref":"https://example.invalid/schema.json"}`},
+		{"draft-07 exclusiveMinimum", `{"type":"object","properties":{"n":{"minimum":1,"exclusiveMinimum":true}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", tc.schema, boolPtr(true))}, false)
+			if err != nil {
+				t.Fatalf("uncompilable strict schema should not fail the request: %v", err)
+			}
+			if len(rt.Tools()) != 1 {
+				t.Fatalf("SDK tools = %#v, want the tool to still be offered", rt.Tools())
+			}
+			if len(rt.UnenforceableStrict) != 1 {
+				t.Fatalf("UnenforceableStrict = %#v, want the acceptance to be reported", rt.UnenforceableStrict)
+			}
+			if got := rt.UnenforceableStrict[0].Tool; got != "lookup" {
+				t.Fatalf("reported tool = %q, want %q", got, "lookup")
+			}
+			if rt.UnenforceableStrict[0].Reason == "" {
+				t.Fatal("reported an unenforceable strict tool with no reason")
+			}
+			// Unenforced means unenforced: arguments the schema would have
+			// rejected must now be delivered rather than failing the turn.
+			if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(`{"city":123}`)); err != nil {
+				t.Fatalf("validate = %v, want no enforcement for an uncompilable schema", err)
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "strict: true") {
-		t.Fatalf("error = %v, want it to name the strict declaration", err)
+}
+
+// A tool whose schema does compile is still enforced, so the fallback above is
+// scoped to schemas this proxy genuinely cannot read.
+func TestStrictToolWithUsableSchemaIsStillEnforced(t *testing.T) {
+	t.Parallel()
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", strictLookupSchema, boolPtr(true))}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.UnenforceableStrict) != 0 {
+		t.Fatalf("UnenforceableStrict = %#v, want empty for a compilable schema", rt.UnenforceableStrict)
+	}
+	if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(`{"city":123}`)); err == nil {
+		t.Fatal("a compilable strict schema must still reject non-conforming arguments")
 	}
 }
 
@@ -126,9 +175,9 @@ func TestStrictArgumentsAreValidatedInTheSDKHandler(t *testing.T) {
 }
 
 // A freeform custom tool has no client-declared JSON Schema to constrain, so
-// strict is refused instead of being checked against the synthetic schema this
-// proxy hands the SDK.
-func TestStrictCustomToolIsRejected(t *testing.T) {
+// strict cannot be enforced against the synthetic schema this proxy hands the
+// SDK. Like an uncompilable schema, that is reported rather than rejected.
+func TestStrictCustomToolIsAcceptedAndReported(t *testing.T) {
 	t.Parallel()
 	tools, err := FlattenResponsesTools([]toolcatalog.NormalizedTool{{
 		Kind:   toolcatalog.ToolKindCustom,
@@ -139,8 +188,12 @@ func TestStrictCustomToolIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("flatten: %v", err)
 	}
-	if _, err := newRequestToolsFromClientTools(NewBroker(time.Minute), tools, false); err == nil || !strings.Contains(err.Error(), "freeform") {
-		t.Fatalf("error = %v, want a refusal naming the freeform input", err)
+	rt, err := newRequestToolsFromClientTools(NewBroker(time.Minute), tools, false)
+	if err != nil {
+		t.Fatalf("strict on a custom tool should not fail the request: %v", err)
+	}
+	if len(rt.UnenforceableStrict) != 1 || !strings.Contains(rt.UnenforceableStrict[0].Reason, "format") {
+		t.Fatalf("UnenforceableStrict = %#v, want one entry naming the freeform input", rt.UnenforceableStrict)
 	}
 }
 

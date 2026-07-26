@@ -66,47 +66,79 @@ func (t ClientTool) deferMode() copilot.ToolDefer {
 }
 
 // resolveStrictSchema compiles a strict tool's declared parameters so the
-// arguments the model emits can be checked against them. A strict tool whose
-// schema cannot be compiled is rejected at request time, which is what OpenAI
-// does with a strict function tool it cannot honour: failing now is far better
-// than discovering mid-turn that the guarantee was never enforceable.
-func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, error) {
+// arguments the model emits can be checked against them.
+//
+// A schema this proxy cannot compile is NOT a client error, and returning 400
+// for one was wrong. Two ordinary cases reach it, both of which real OpenAI
+// accepts:
+//
+//   - Draft-07 spellings. `{"exclusiveMinimum": true}` alongside `minimum` is
+//     valid Draft-07 and fails to unmarshal here, because jsonschema-go models
+//     the Draft 2020-12 numeric form.
+//   - Any external `$ref`. Resolve is called with no loader, so
+//     `{"$ref":"https://..."}` fails with "cannot resolve remote schemas".
+//     That is this proxy's own limitation, not something the client did.
+//
+// The clients that set strict: true by default - the Vercel AI SDK,
+// LangChain/LangGraph, the OpenAI Agents SDK, Cline - would have had working
+// integrations broken outright by a 400 they cannot act on. So an
+// uncompilable schema degrades to unenforced, which is exactly the position
+// every client was in before strict was honoured at all, and the reason is
+// reported so it is visible rather than silent.
+//
+// The second return value is empty when strict is either enforced or not
+// requested, and otherwise says why it could not be enforced.
+func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, string) {
 	if !t.strictEnabled() {
-		return nil, nil
+		return nil, ""
 	}
 	// A freeform custom tool describes its input with a grammar in `format`, not
-	// with a JSON Schema, and this proxy hands the SDK a synthetic single-string
-	// schema for it. There is therefore nothing client-declared to constrain, so
-	// strict is refused here rather than checked against a schema the client never
-	// wrote.
+	// a JSON Schema, and this proxy hands the SDK a synthetic single-string
+	// schema for it. There is nothing client-declared to constrain.
 	if t.ResponseKind == toolcatalog.ToolKindCustom {
-		return nil, strictSchemaError(t.ResponseName, "are freeform: a custom tool declares its input with `format`, which cannot be schema-constrained")
+		return nil, "a custom tool declares its input with `format`, which cannot be schema-constrained"
 	}
 	raw, err := json.Marshal(t.Parameters)
 	if err != nil {
-		return nil, strictSchemaError(t.ResponseName, "cannot be encoded: "+err.Error())
+		return nil, "its parameters cannot be encoded: " + err.Error()
 	}
 	var schema jsonschema.Schema
 	if err := json.Unmarshal(raw, &schema); err != nil {
-		return nil, strictSchemaError(t.ResponseName, "are not a usable JSON Schema: "+err.Error())
+		return nil, "its parameters are not a JSON Schema this proxy can compile: " + err.Error()
 	}
 	resolved, err := schema.Resolve(nil)
 	if err != nil {
-		return nil, strictSchemaError(t.ResponseName, "are not a usable JSON Schema: "+err.Error())
+		return nil, "its parameters are not a JSON Schema this proxy can compile: " + err.Error()
 	}
-	return resolved, nil
-}
-
-func strictSchemaError(toolName, problem string) error {
-	if toolName == "" {
-		return apierr.InvalidRequest("a tool sets strict: true but its parameters "+problem, "tools")
-	}
-	return apierr.InvalidRequest(fmt.Sprintf("tool %q sets strict: true but its parameters %s", toolName, problem), "tools")
+	return resolved, ""
 }
 
 // errStrictArguments is returned when the model emits arguments that do not
 // satisfy a strict tool's declared schema.
+//
+// It is wrapped in an *apierr.Error rather than left bare because a bare error
+// loses everything the client needs. Through CaptureRequests it became
+// apierr.Upstream(err.Error()) - a 502 server_error indistinguishable from a
+// network fault, which the official SDKs retry on their 5xx schedule against a
+// turn that will fail identically. Through handleInvocation it fell to
+// domainError's fallback and reached the client as a bare 500 "internal server
+// error" with the tool name gone entirely.
+//
+// The kind stays upstream, because the model is what produced the bad
+// arguments and a re-run genuinely might not, but the distinct code and the
+// preserved message let a client tell the two apart.
 var errStrictArguments = errors.New("strict tool arguments did not match the declared schema")
+
+// strictArgumentsError classifies a strict-schema violation so it survives
+// both materialisation paths with its tool name and reason intact.
+func strictArgumentsError(toolName, detail string) error {
+	message := fmt.Sprintf("tool %q emitted arguments that do not satisfy the strict schema it declared: %s", toolName, detail)
+	return fmt.Errorf("%w: %w", errStrictArguments, &apierr.Error{
+		Kind:    apierr.KindUpstream,
+		Message: message,
+		Code:    "strict_tool_arguments_invalid",
+	})
+}
 
 // validateStrictArguments is where strict: true stops being decoration. The
 // Copilot SDK exposes no constrained-decoding control (copilot.Tool carries a
@@ -128,10 +160,19 @@ func validateStrictArguments(meta ClientTool, args json.RawMessage) error {
 	if len(args) == 0 {
 		instance = map[string]any{}
 	} else if err := json.Unmarshal(args, &instance); err != nil {
-		return fmt.Errorf("%w: tool %q emitted arguments that are not valid JSON: %v", errStrictArguments, meta.ResponseName, err)
+		// Deliberately a plain Unmarshal, not the UseNumber decode schemaMap uses
+		// for the schema side. jsonschema-go reflects over the instance and types
+		// a json.Number as "string", so decoding with UseNumber makes every
+		// numeric constraint fail: measured against v0.4.3, {"n":5} against
+		// {"type":"integer"} reports `5 has type "string", want "integer"`.
+		// Both the schema's literals and the instance round through float64 here,
+		// so they round identically and compare correctly - the consistency that
+		// matters for validation is between these two, not with the bytes on the
+		// wire, which schemaMap already preserves separately.
+		return strictArgumentsError(meta.ResponseName, "they are not valid JSON: "+err.Error())
 	}
 	if err := meta.strictSchema.Validate(instance); err != nil {
-		return fmt.Errorf("%w: tool %q: %v", errStrictArguments, meta.ResponseName, err)
+		return strictArgumentsError(meta.ResponseName, err.Error())
 	}
 	return nil
 }
@@ -297,6 +338,18 @@ type RequestTools struct {
 	mu        sync.Mutex
 	ctx       context.Context
 	batch     *Batch
+
+	// UnenforceableStrict lists tools whose strict: true was accepted but cannot
+	// be enforced, with the reason. Read once at request setup by the gateway,
+	// which owns the logger; never mutated afterwards, so it needs no lock.
+	UnenforceableStrict []UnenforceableStrictTool
+}
+
+// UnenforceableStrictTool records a tool that asked for strict: true which this
+// proxy accepted but cannot enforce, so the gateway can report it.
+type UnenforceableStrictTool struct {
+	Tool   string
+	Reason string
 }
 
 func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*RequestTools, error) {
@@ -334,9 +387,13 @@ func newRequestToolsFromClientTools(broker *Broker, clientTools []ClientTool, ch
 		if _, exists := rt.client[ct.SDKName]; exists {
 			return nil, fmt.Errorf("duplicate SDK tool name %q", ct.SDKName)
 		}
-		strictSchema, err := ct.resolveStrictSchema()
-		if err != nil {
-			return nil, err
+		strictSchema, unenforceable := ct.resolveStrictSchema()
+		if unenforceable != "" {
+			// Recorded rather than logged here: this package owns no logger, and
+			// the gateway that does is where every other per-request note is
+			// written. Reporting it is what keeps "accepted but not honoured"
+			// from being silent.
+			rt.UnenforceableStrict = append(rt.UnenforceableStrict, UnenforceableStrictTool{Tool: ct.ResponseName, Reason: unenforceable})
 		}
 		ct.strictSchema = strictSchema
 		rt.client[ct.SDKName] = ct

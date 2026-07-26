@@ -66,6 +66,7 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	if err != nil {
 		return nil, apierr.InvalidRequest(err.Error(), "tools")
 	}
+	g.logUnenforceableStrict(rt, "chat")
 	events := newSessionEventSink(g.log)
 	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, streaming, events)
 	if err != nil {
@@ -178,4 +179,22 @@ func (g *RealGateway) resolveChatHistoryWithImageBudget(ctx context.Context, mod
 		}
 	}
 	return out, nil
+}
+
+// logUnenforceableStrict reports tools whose strict: true this proxy accepted
+// but cannot enforce.
+//
+// Accepting a control and silently not honouring it is the one outcome the
+// validation policy rules out, and an uncompilable schema is not something the
+// client can be 400'd for - Draft-07 spellings and external $refs are both
+// accepted by real OpenAI and both fail to compile here. Reporting is what
+// keeps the acceptance honest: the request succeeds, and the operator can see
+// that the guarantee was not applied.
+func (g *RealGateway) logUnenforceableStrict(rt *toolproxy.RequestTools, surface string) {
+	if g == nil || g.log == nil || rt == nil {
+		return
+	}
+	for _, t := range rt.UnenforceableStrict {
+		g.log.Warn("accepted strict: true but cannot enforce it", "surface", surface, "tool", t.Tool, "reason", t.Reason)
+	}
 }
