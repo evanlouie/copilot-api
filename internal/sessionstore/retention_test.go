@@ -173,6 +173,72 @@ func TestPruneKeepsSessionsWhenIndexCannotBeBuilt(t *testing.T) {
 	}
 }
 
+// TestDeleteResponseKeepsSessionWhenIndexRemoved holds the delete path to the
+// same rule as the prune path: an index that cannot be established says nothing
+// about which sessions are still referenced, so no session may be deleted.
+// Deleting one here would leave resp_live pointing at a session directory that
+// no longer exists, making that conversation permanently unresumable.
+func TestDeleteResponseKeepsSessionWhenIndexRemoved(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := seedReferencedSession(t, store, "sdk_shared_index", "resp_doomed", 0)
+	if err := store.SaveResponse(ResponseRecord{ID: "resp_live", SDKSessionID: "sdk_shared_index", Stored: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The index disappears out from under a running server.
+	if err := os.RemoveAll(store.linksDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteResponse("resp_doomed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sessionPath); err != nil {
+		t.Fatalf("session still referenced by resp_live was removed: %v", err)
+	}
+	if _, err := store.LoadResponse("resp_live"); err != nil {
+		t.Fatalf("load surviving response: %v", err)
+	}
+	if err := store.TakeMaintenanceError(); err != nil {
+		t.Fatalf("a recoverable index rebuild latched readiness off: %v", err)
+	}
+	// The rebuilt index must leave cleanup working, not disabled forever.
+	if err := store.DeleteResponse("resp_live"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sessionPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreferenced session remained after the index was rebuilt: %v", err)
+	}
+}
+
+// TestDeleteResponseKeepsSessionWhenLinkDirUnreadable covers the third case: the
+// index root exists, so a missing per-session directory would mean zero
+// references, but this one exists and cannot be listed. 0o300 keeps the
+// directory writable so removing the deleted response's own link still
+// succeeds, isolating the unreadable-listing case.
+func TestDeleteResponseKeepsSessionWhenLinkDirUnreadable(t *testing.T) {
+	store := New(t.TempDir(), t.TempDir(), t.TempDir())
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := seedReferencedSession(t, store, "sdk_opaque_links", "resp_opaque", 0)
+	linkDir := store.sessionLinksDir(safeName("sdk_opaque_links"))
+	if err := os.Chmod(linkDir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(linkDir, 0o700) })
+	if _, err := os.ReadDir(linkDir); err == nil {
+		t.Skip("filesystem does not enforce directory read permission")
+	}
+	if err := store.DeleteResponse("resp_opaque"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sessionPath); err != nil {
+		t.Fatalf("session was deleted from an unreadable link directory: %v", err)
+	}
+}
+
 // TestPruneWithoutEnsureMatchesEnsuredStore exercises the prune subcommand,
 // which builds a Store and calls Prune without ever calling Ensure. Prune has
 // to establish the index itself, otherwise it plans session deletions from an

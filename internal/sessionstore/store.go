@@ -96,10 +96,16 @@ func (s *Store) Ensure() error {
 //
 // Both Ensure and Prune call this, because the prune subcommand never runs
 // Ensure. The steady-state cost is a single Stat. It takes s.mu, so callers
-// must not already hold it.
+// must not already hold it; those use ensureRetentionLinksLocked.
 func (s *Store) ensureRetentionLinks() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.ensureRetentionLinksLocked()
+}
+
+// ensureRetentionLinksLocked is ensureRetentionLinks for callers that already
+// hold s.mu.
+func (s *Store) ensureRetentionLinksLocked() error {
 	links := s.linksDir()
 	if _, err := os.Stat(links); err == nil {
 		return nil

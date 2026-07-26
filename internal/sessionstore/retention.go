@@ -391,11 +391,11 @@ func (s *Store) removeRetainedLocked(now time.Time, entry retainedEntry, scan *r
 		// SaveResponse publishes a session's retention link before writing the
 		// record, both under s.mu, so this count is authoritative here even
 		// though the scan's copy was not.
-		refs, err := s.liveSessionRefsLocked(filepath.Base(entry.path))
+		refs, known, err := s.liveSessionRefsLocked(filepath.Base(entry.path))
 		if err != nil {
 			return false, err
 		}
-		if refs > 0 {
+		if !known || refs > 0 {
 			return false, nil
 		}
 	case entry.isResponse:
@@ -583,9 +583,21 @@ func (s *Store) cleanupSessionIfUnreferencedLocked(sessionID string) error {
 		s.orphanSessions[sessionID] = struct{}{}
 		return nil
 	}
-	refs, err := s.liveSessionRefsLocked(safe)
+	// Deleting a session is only safe when the index can say which responses
+	// still reference it, so rebuild it first if it went missing. This runs under
+	// s.mu, hence the Locked variant.
+	if err := s.ensureRetentionLinksLocked(); err != nil {
+		return err
+	}
+	refs, known, err := s.liveSessionRefsLocked(safe)
 	if err != nil {
 		return err
+	}
+	if !known {
+		// Same rule as the prune path: with no readable index nothing is known
+		// about references, and deleting a session other stored responses still
+		// point at makes those conversations permanently unresumable.
+		return nil
 	}
 	if refs > 0 {
 		delete(s.orphanSessions, sessionID)
@@ -606,14 +618,28 @@ func (s *Store) cleanupSessionIfUnreferencedLocked(sessionID string) error {
 // must be called with s.mu held: SaveResponse writes the link and the record
 // inside one critical section, so only with the lock held does a link without a
 // record definitively mean residue rather than a save in progress.
-func (s *Store) liveSessionRefsLocked(sessionSafeName string) (int, error) {
+//
+// The second result is the indexPresent property of a single session: false
+// means the count is unknown rather than zero, because the index root could not
+// be established or the session's own link directory could not be listed.
+// Callers must protect the session in that case.
+func (s *Store) liveSessionRefsLocked(sessionSafeName string) (int, bool, error) {
+	// An absent index root is not an index reporting zero references. Only once
+	// the root is known to exist does a missing per-session directory mean the
+	// session genuinely has no live responses.
+	if _, err := os.Stat(s.linksDir()); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("inspect retention index %s: %w", s.linksDir(), err)
+	}
 	dir := s.sessionLinksDir(sessionSafeName)
 	links, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+			return 0, true, nil
 		}
-		return 0, fmt.Errorf("read %s: %w", dir, err)
+		return 0, false, fmt.Errorf("read %s: %w", dir, err)
 	}
 	live := 0
 	var errs []error
@@ -636,7 +662,7 @@ func (s *Store) liveSessionRefsLocked(sessionSafeName string) (int, error) {
 			errs = append(errs, fmt.Errorf("remove stale retention link %s: %w", filepath.Join(dir, link.Name()), rmErr))
 		}
 	}
-	return live, errors.Join(errs...)
+	return live, true, errors.Join(errs...)
 }
 
 func readResponseRecordPath(path string) (ResponseRecord, error) {
