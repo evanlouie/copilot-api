@@ -7,7 +7,14 @@ type responseStreamEncoder struct {
 	sequenceNumber int64
 }
 
+// newResponseStreamEncoder wraps writer so each event carries a monotonic
+// sequence number. An encoder is returned unchanged so a caller that owns one
+// (to keep numbering continuous across a later failure frame) can hand it to
+// helpers that also normalise their writer.
 func newResponseStreamEncoder(writer responseEventWriter) *responseStreamEncoder {
+	if encoder, ok := writer.(*responseStreamEncoder); ok {
+		return encoder
+	}
 	return &responseStreamEncoder{writer: writer}
 }
 

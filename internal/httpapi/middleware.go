@@ -286,6 +286,35 @@ type loggingResponseWriter struct {
 	wrote         bool
 	capture       *bodyCapture
 	captureActive bool
+	// streamFailure terminates an already-committed stream with an in-band
+	// failure frame. Streaming handlers register it; only recoverMiddleware,
+	// running on the same goroutine while the handler unwinds, reads it.
+	streamFailure func(error)
+}
+
+// committedResponseWriter is implemented by loggingResponseWriter so
+// recoverMiddleware can tell whether bytes are already on the wire and, when a
+// streaming handler registered one, how to terminate that stream in-band.
+type committedResponseWriter interface {
+	Committed() bool
+	StreamFailure() func(error)
+}
+
+// Committed reports whether the status line has already been sent. Once it has,
+// status and headers are frozen and anything further must speak the body
+// grammar the client is already parsing.
+func (w *loggingResponseWriter) Committed() bool { return w.wrote }
+
+func (w *loggingResponseWriter) StreamFailure() func(error) { return w.streamFailure }
+
+// setStreamFailureWriter records how to terminate an already-committed stream.
+// Streaming handlers call it once their SSE writer exists, so a panic unwinding
+// past the point where an HTTP error response is still possible can still be
+// reported to the client.
+func setStreamFailureWriter(w http.ResponseWriter, fail func(error)) {
+	if recorder, ok := w.(*loggingResponseWriter); ok {
+		recorder.streamFailure = fail
+	}
 }
 
 func (w *loggingResponseWriter) WriteHeader(status int) {
@@ -397,13 +426,42 @@ func remoteIP(remoteAddr string) string {
 func recoverMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if v := recover(); v != nil {
-				observability.Logger(r.Context(), log).Error("panic in HTTP handler", "panic", v, "stack", string(debug.Stack()))
-				openai.WriteError(w, openai.Internal("internal server error"))
+			v := recover()
+			if v == nil {
+				return
 			}
+			if err, ok := v.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				// net/http suppresses this panic deliberately, so re-panic
+				// rather than inventing a 500 for a connection a lower layer
+				// intentionally aborted.
+				panic(v)
+			}
+			logger := observability.Logger(r.Context(), log)
+			logger.Error("panic in HTTP handler", "panic", v, "stack", string(debug.Stack()))
+			writePanicFailure(logger, w)
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writePanicFailure reports a recovered panic using whatever the response state
+// still allows.
+func writePanicFailure(logger *slog.Logger, w http.ResponseWriter) {
+	failure := openai.Internal("internal server error")
+	committed, ok := w.(committedResponseWriter)
+	if !ok || !committed.Committed() {
+		openai.WriteError(w, failure)
+		return
+	}
+	// The status line is already on the wire: WriteError's header work would be a
+	// silent no-op and its JSON body would be appended verbatim to the committed
+	// body, where SSE clients discard it as a line with no known field name.
+	fail := committed.StreamFailure()
+	if fail == nil {
+		logger.Warn("panic after response commit; client sees a truncated response")
+		return
+	}
+	fail(failure)
 }
 func asAPIError(err error) *openai.APIError {
 	var api *openai.APIError

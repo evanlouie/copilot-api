@@ -33,9 +33,12 @@ func New(cfg config.Config, gw copilotgw.HTTPGateway, log *slog.Logger) *Server 
 }
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
-	h = requestLoggingMiddleware(s.log, s.cfg.LogContent, h)
 	h = s.authMiddleware(h)
 	h = recoverMiddleware(s.log, h)
+	// Request logging wraps both auth and recovery so the access log records the
+	// final status of every outcome: rejected credentials (which never reach the
+	// mux) and panics (which never return through the handler) included.
+	h = requestLoggingMiddleware(s.log, s.cfg.LogContent, h)
 	h = observability.RequestIDMiddleware(h)
 	return h
 }

@@ -156,7 +156,14 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req cop
 		openai.WriteError(w, openai.Internal("streaming unsupported by ResponseWriter"))
 		return
 	}
-	responseWriter := sseResponseEventWriter{server: s, ctx: ctx, writer: writer}
+	responseWriter := newResponseStreamEncoder(sseResponseEventWriter{server: s, ctx: ctx, writer: writer})
+	// Owning the encoder here keeps sequence numbers continuous if a panic
+	// forces the terminal response.failed frame below.
+	setStreamFailureWriter(w, func(failure error) {
+		if writeResponseFailedEvent(responseWriter, req, failure, nil, "") == nil {
+			_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")
+		}
+	})
 	result := writeResponseStreamEvents(ctx, responseWriter, req, s.cfg.MaxTurnOutputBytes, ch)
 	if !result.WriteFailed {
 		_ = s.writeSSEDone(ctx, writer, "stream_kind", "responses")

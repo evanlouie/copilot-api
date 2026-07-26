@@ -128,16 +128,19 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 		return
 	}
 	created := openai.UnixNow()
-	if err := s.writeSSEData(ctx, writer, "chat.role", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "role"); err != nil {
-		return
-	}
-	var streamedText strings.Builder
-	var streamedReasoning strings.Builder
 	writeFailure := func(streamErr error) {
 		if s.writeSSEData(ctx, writer, "chat.error", openai.ErrorEnvelope{Error: errorObject(streamErr)}, "stream_kind", "chat", "chunk_kind", "error") == nil {
 			_ = s.writeSSEDone(ctx, writer, "stream_kind", "chat")
 		}
 	}
+	// Once chunks are committed a panic can no longer be reported as an HTTP
+	// error, so hand the recover middleware the chat stream's own grammar.
+	setStreamFailureWriter(w, writeFailure)
+	if err := s.writeSSEData(ctx, writer, "chat.role", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Role: "assistant"}}}, IncludeUsage: includeUsage}, "stream_kind", "chat", "chunk_kind", "role"); err != nil {
+		return
+	}
+	var streamedText strings.Builder
+	var streamedReasoning strings.Builder
 	for {
 		select {
 		case <-ctx.Done():
