@@ -179,30 +179,24 @@ func (s *Server) streamChatEvents(w http.ResponseWriter, r *http.Request, stream
 					writeFailure(apierr.Internal("chat stream returned an empty result"))
 					return
 				}
-				streamedReason := streamedReasoning.String()
-				if ev.Result.Reasoning != streamedReason {
-					if !strings.HasPrefix(ev.Result.Reasoning, streamedReason) {
-						writeFailure(apierr.Upstream("chat stream terminal reasoning does not match streamed reasoning"))
+				remainingReasoning, err := terminalStreamSuffix(ev.Result.Reasoning, streamedReasoning.String(), "chat stream terminal reasoning does not match streamed reasoning")
+				if err != nil {
+					writeFailure(err)
+					return
+				}
+				if remainingReasoning != "" {
+					if err := s.writeChatReasoningDelta(ctx, writer, streamID, created, model, remainingReasoning, includeUsage); err != nil {
 						return
-					}
-					remainingReasoning := strings.TrimPrefix(ev.Result.Reasoning, streamedReason)
-					if remainingReasoning != "" {
-						if err := s.writeChatReasoningDelta(ctx, writer, streamID, created, model, remainingReasoning, includeUsage); err != nil {
-							return
-						}
 					}
 				}
-				streamed := streamedText.String()
-				if ev.Result.Text != streamed {
-					if !strings.HasPrefix(ev.Result.Text, streamed) {
-						writeFailure(apierr.Upstream("chat stream terminal text does not match streamed content"))
+				remaining, err := terminalStreamSuffix(ev.Result.Text, streamedText.String(), "chat stream terminal text does not match streamed content")
+				if err != nil {
+					writeFailure(err)
+					return
+				}
+				if remaining != "" {
+					if err := s.writeSSEData(ctx, writer, "chat.content_delta", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: remaining}}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "content", remaining)...); err != nil {
 						return
-					}
-					remaining := strings.TrimPrefix(ev.Result.Text, streamed)
-					if remaining != "" {
-						if err := s.writeSSEData(ctx, writer, "chat.content_delta", openai.ChatCompletionChunk{ID: streamID, Object: openai.ObjectChatChunk, Created: created, Model: model, Choices: []openai.ChatChunkChoice{{Index: 0, Delta: openai.ChatChunkDelta{Content: remaining}}}, IncludeUsage: includeUsage}, s.chatChunkAttrs(ctx, "content", remaining)...); err != nil {
-							return
-						}
 					}
 				}
 				if err := s.writeChatTerminalWithID(ctx, writer, streamID, created, model, ev.Result, includeUsage); err != nil {

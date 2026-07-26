@@ -185,13 +185,16 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 		}
 		finalText := terminal.String()
 		streamed := reasoningText.String()
-		if finalText == "" || finalText == streamed {
+		if finalText == "" {
 			return nil
 		}
-		if !strings.HasPrefix(finalText, streamed) {
-			return apierr.Upstream("response stream terminal reasoning does not match streamed reasoning")
+		suffix, err := terminalStreamSuffix(finalText, streamed, "response stream terminal reasoning does not match streamed reasoning")
+		if err != nil {
+			return err
 		}
-		suffix := strings.TrimPrefix(finalText, streamed)
+		if suffix == "" {
+			return nil
+		}
 		if int64(reasoningText.Len()+messageText.Len()+len(suffix)) > maxOutputBytes {
 			return apierr.Upstream("response output exceeded stream size limit")
 		}
@@ -431,10 +434,10 @@ func writeResponseStreamEvents(ctx context.Context, writer responseEventWriter, 
 					msgIdx := index.indexOf(messageID)
 					contentIdx := 0
 					if terminalText := outputItemText(*item); terminalText != text {
-						if !strings.HasPrefix(terminalText, text) {
-							return writeFailure(apierr.Upstream("response stream terminal text does not match streamed content"))
+						suffix, err := terminalStreamSuffix(terminalText, text, "response stream terminal text does not match streamed content")
+						if err != nil {
+							return writeFailure(err)
 						}
-						suffix := strings.TrimPrefix(terminalText, text)
 						if int64(reasoningText.Len()+messageText.Len()+len(suffix)) > maxOutputBytes {
 							return writeFailure(apierr.Upstream("response output exceeded stream size limit"))
 						}
