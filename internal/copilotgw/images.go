@@ -440,30 +440,19 @@ func (g *RealGateway) findModel(ctx context.Context, id string) (Model, error) {
 	if id == "" {
 		return Model{}, apierr.InvalidRequest("model is required", "model")
 	}
-	models, err := g.refreshModels(ctx, false)
-	if err != nil {
+	if err := g.ensureModels(ctx, false); err != nil {
 		return Model{}, apierr.Upstream(err.Error())
 	}
-	if m, ok := findModel(models, id); ok {
+	if m, ok := g.lookupModel(id); ok {
 		return m, nil
 	}
 	if g.shouldForceModelRefresh() {
-		models, err = g.refreshModels(ctx, true)
-		if err != nil {
+		if err := g.ensureModels(ctx, true); err != nil {
 			return Model{}, apierr.Upstream(err.Error())
 		}
-		if m, ok := findModel(models, id); ok {
+		if m, ok := g.lookupModel(id); ok {
 			return m, nil
 		}
 	}
 	return Model{}, apierr.NotFound("model not found: "+id, "model_not_found")
-}
-
-func findModel(models []Model, id string) (Model, bool) {
-	for _, m := range models {
-		if m.ID == id {
-			return m, true
-		}
-	}
-	return Model{}, false
 }

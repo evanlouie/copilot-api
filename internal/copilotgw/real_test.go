@@ -517,7 +517,7 @@ func TestNewRealNormalizesNilLogger(t *testing.T) {
 func TestFindModelThrottlesSequentialForcedRefreshes(t *testing.T) {
 	var calls int32
 	gw := &RealGateway{
-		modelCache: &modelCache{models: []Model{{ID: "known"}}, fetched: time.Now(), ttl: time.Hour},
+		modelCache: newModelCacheWithModels([]Model{{ID: "known"}}, time.Hour),
 		modelsFetcher: func(context.Context) ([]Model, error) {
 			atomic.AddInt32(&calls, 1)
 			return []Model{{ID: "known"}}, nil

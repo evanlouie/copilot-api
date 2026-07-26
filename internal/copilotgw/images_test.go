@@ -22,7 +22,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func cachedModelGateway(model Model) *RealGateway {
-	return &RealGateway{modelCache: &modelCache{models: []Model{model}, fetched: time.Now(), ttl: time.Hour}}
+	return &RealGateway{modelCache: newModelCacheWithModels([]Model{model}, time.Hour)}
 }
 
 func TestPublicIPRejectsSpecialUseRanges(t *testing.T) {

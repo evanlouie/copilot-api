@@ -66,7 +66,7 @@ func benchmarkModelCatalog(n int) []Model {
 const benchmarkModelCatalogSize = 48
 
 func benchmarkModelGateway() *RealGateway {
-	return &RealGateway{modelCache: &modelCache{models: benchmarkModelCatalog(benchmarkModelCatalogSize), fetched: time.Now(), ttl: time.Hour}}
+	return &RealGateway{modelCache: newModelCacheWithModels(benchmarkModelCatalog(benchmarkModelCatalogSize), time.Hour)}
 }
 
 // BenchmarkFindModelCacheHit measures the cost of answering "does model X

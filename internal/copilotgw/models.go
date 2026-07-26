@@ -13,8 +13,14 @@ import (
 const modelMissRefreshInterval = 30 * time.Second
 
 type modelCache struct {
-	mu                sync.Mutex
-	models            []Model
+	mu     sync.Mutex
+	models []Model
+	// index maps model id to its position in models. It exists so a lookup does
+	// not have to clone and scan the whole catalog to answer a question about one
+	// model. It is only ever assigned by setModelsLocked, together with models:
+	// an index assigned apart from the slice it indexes can answer a lookup from
+	// a stale catalog.
+	index             map[string]int
 	fetched           time.Time
 	ttl               time.Duration
 	refreshing        bool
@@ -24,6 +30,41 @@ type modelCache struct {
 
 func newModelCache(ttl time.Duration) *modelCache {
 	return &modelCache{ttl: ttl}
+}
+
+// newModelCacheWithModels seeds a cache with an already-fetched catalog. Tests
+// use it instead of a struct literal so the id index cannot be left unbuilt.
+func newModelCacheWithModels(models []Model, ttl time.Duration) *modelCache {
+	cache := newModelCache(ttl)
+	cache.setModelsLocked(models)
+	cache.fetched = time.Now()
+	return cache
+}
+
+// setModelsLocked replaces the cached catalog and rebuilds its id index in the
+// same critical section. It is the only writer of either field.
+//
+// Duplicate ids resolve to the first entry, which is what the linear scan this
+// index replaces did.
+func (c *modelCache) setModelsLocked(models []Model) {
+	index := make(map[string]int, len(models))
+	for i, model := range models {
+		if _, seen := index[model.ID]; seen {
+			continue
+		}
+		index[model.ID] = i
+	}
+	c.models = models
+	c.index = index
+}
+
+// lookupModelLocked returns the single cached model with this id.
+func (c *modelCache) lookupModelLocked(id string) (Model, bool) {
+	i, ok := c.index[id]
+	if !ok || i >= len(c.models) {
+		return Model{}, false
+	}
+	return cloneModel(c.models[i]), true
 }
 
 func (g *RealGateway) modelsState() *modelCache {
@@ -42,14 +83,42 @@ func (g *RealGateway) ValidateModel(ctx context.Context, model string) error {
 	_, err := g.findModel(ctx, model)
 	return err
 }
+
+// refreshModels returns the whole catalog, cloned. Only ListModels needs that;
+// callers asking about one model use lookupModel, which clones one entry.
 func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, error) {
+	if err := g.ensureModels(ctx, force); err != nil {
+		return nil, err
+	}
+	cache := g.modelsState()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cloneModels(cache.models), nil
+}
+
+// lookupModel returns a deep copy of the one cached model with this id.
+//
+// It exists because findModel used to obtain a clone of the entire catalog and
+// then scan it for a single entry, paying a recursive copy of every model's
+// metadata to answer a question about one of them. findModel runs at least
+// twice per request and once more per message carrying an image.
+func (g *RealGateway) lookupModel(id string) (Model, bool) {
+	cache := g.modelsState()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.lookupModelLocked(id)
+}
+
+// ensureModels brings the cache into a state a lookup can be answered from,
+// refreshing it when it is missing or stale. It produces no snapshot; callers
+// take whichever view they need afterwards.
+func (g *RealGateway) ensureModels(ctx context.Context, force bool) error {
 	cache := g.modelsState()
 	for {
 		cache.mu.Lock()
 		if !force && cache.freshLocked() {
-			out := cloneModels(cache.models)
 			cache.mu.Unlock()
-			return out, nil
+			return nil
 		}
 		if !force && len(cache.models) > 0 {
 			if !cache.refreshing {
@@ -58,9 +127,8 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 				cache.refreshDone = done
 				go g.refreshModelsInBackground(done)
 			}
-			out := cloneModels(cache.models)
 			cache.mu.Unlock()
-			return out, nil
+			return nil
 		}
 		if cache.refreshing {
 			// A refresh is already in flight. Join it instead of issuing a duplicate
@@ -72,13 +140,12 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 			select {
 			case <-done:
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return ctx.Err()
 			}
 			cache.mu.Lock()
 			if cache.models != nil && cache.fetched.After(before) {
-				out := cloneModels(cache.models)
 				cache.mu.Unlock()
-				return out, nil
+				return nil
 			}
 			// The joined refresh failed and left the cache unchanged; loop so this
 			// caller issues its own fetch.
@@ -91,10 +158,7 @@ func (g *RealGateway) refreshModels(ctx context.Context, force bool) ([]Model, e
 		cache.mu.Unlock()
 		out, err := g.fetchModels(ctx)
 		g.finishModelRefresh(done, out, err)
-		if err != nil {
-			return nil, err
-		}
-		return cloneModels(out), nil
+		return err
 	}
 }
 
@@ -105,21 +169,26 @@ func (c *modelCache) freshLocked() bool {
 func cloneModels(models []Model) []Model {
 	out := make([]Model, len(models))
 	for i, model := range models {
-		out[i] = model
-		out[i].Metadata = cloneStringAnyMap(model.Metadata)
-		out[i].SupportedReasoningEfforts = append([]string(nil), model.SupportedReasoningEfforts...)
-		if model.Limits != nil {
-			limits := *model.Limits
-			limits.MaxContextWindowTokens = cloneInt64(model.Limits.MaxContextWindowTokens)
-			limits.MaxPromptTokens = cloneInt64(model.Limits.MaxPromptTokens)
-			limits.MaxOutputTokens = cloneInt64(model.Limits.MaxOutputTokens)
-			out[i].Limits = &limits
-		}
-		if model.Vision != nil {
-			vision := *model.Vision
-			vision.SupportedMediaTypes = append([]string(nil), model.Vision.SupportedMediaTypes...)
-			out[i].Vision = &vision
-		}
+		out[i] = cloneModel(model)
+	}
+	return out
+}
+
+func cloneModel(model Model) Model {
+	out := model
+	out.Metadata = cloneStringAnyMap(model.Metadata)
+	out.SupportedReasoningEfforts = append([]string(nil), model.SupportedReasoningEfforts...)
+	if model.Limits != nil {
+		limits := *model.Limits
+		limits.MaxContextWindowTokens = cloneInt64(model.Limits.MaxContextWindowTokens)
+		limits.MaxPromptTokens = cloneInt64(model.Limits.MaxPromptTokens)
+		limits.MaxOutputTokens = cloneInt64(model.Limits.MaxOutputTokens)
+		out.Limits = &limits
+	}
+	if model.Vision != nil {
+		vision := *model.Vision
+		vision.SupportedMediaTypes = append([]string(nil), model.Vision.SupportedMediaTypes...)
+		out.Vision = &vision
 	}
 	return out
 }
@@ -188,7 +257,7 @@ func (g *RealGateway) finishModelRefresh(done chan struct{}, models []Model, err
 	cache := g.modelsState()
 	cache.mu.Lock()
 	if err == nil {
-		cache.models = cloneModels(models)
+		cache.setModelsLocked(cloneModels(models))
 		cache.fetched = time.Now()
 	}
 	if cache.refreshDone == done {
