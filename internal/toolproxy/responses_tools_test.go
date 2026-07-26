@@ -1,11 +1,14 @@
 package toolproxy
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/evanlouie/copilot-api/internal/apierr"
+	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/toolcatalog"
 	copilot "github.com/github/copilot-sdk/go"
 )
@@ -18,7 +21,7 @@ func TestResponseRequestToolsFlattenExtendedResponsesTools(t *testing.T) {
 		{Kind: toolcatalog.ToolKindNamespace, Name: "mcp__grep_app", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "searchGitHub", Description: "search", Parameters: []byte(`{"type":"object","properties":{"query":{"type":"string"}}}`)}}},
 		{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client", Parameters: []byte(`{"type":"object","properties":{"query":{"type":"string"}}}`)},
 	}
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), tools, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +55,7 @@ func TestCaptureRequestsRehydratesExtendedResponseToolMetadata(t *testing.T) {
 		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"},
 		{Kind: toolcatalog.ToolKindNamespace, Name: "mcp__grep_app", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "searchGitHub"}}},
 		{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"},
-	}, false)
+	}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +98,7 @@ func TestResponseRequestToolsRejectSDKAliasCollisions(t *testing.T) {
 
 func TestToolChoiceNoneWithExtendedResponsesToolsUsesSentinel(t *testing.T) {
 	t.Parallel()
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, true)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, openai.ToolScope{None: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +115,7 @@ func TestToolChoiceNoneWithExtendedResponsesToolsUsesSentinel(t *testing.T) {
 
 func TestRequestToolsRejectUnconfiguredSDKToolRequestsAndInvocations(t *testing.T) {
 	t.Parallel()
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +129,7 @@ func TestRequestToolsRejectUnconfiguredSDKToolRequestsAndInvocations(t *testing.
 
 func TestExtendedToolOutputKindMustMatchPendingCall(t *testing.T) {
 	t.Parallel()
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +146,7 @@ func TestExtendedToolOutputKindMustMatchPendingCall(t *testing.T) {
 
 func TestCustomToolOutputNameMustMatchPendingCallWhenPresent(t *testing.T) {
 	t.Parallel()
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +167,7 @@ func TestCustomToolOutputNameMustMatchPendingCallWhenPresent(t *testing.T) {
 
 func TestToolSearchOutputToolsDoNotMutateLiveAvailableTools(t *testing.T) {
 	t.Parallel()
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +186,92 @@ func TestToolSearchOutputToolsDoNotMutateLiveAvailableTools(t *testing.T) {
 	}
 	if contains(rt.AvailableTools(), "custom:loaded_tool") {
 		t.Fatalf("returned tool was exposed in live AvailableTools: %#v", rt.AvailableTools())
+	}
+}
+
+// allowed_tools is exactly a catalog restriction, so filtering satisfies it
+// rather than approximating it: the permitted tool stays configured and
+// everything else stops being visible to the model at all.
+func TestAllowedToolsNarrowsTheResponsesCatalog(t *testing.T) {
+	t.Parallel()
+	tools := []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindFunction, Name: "lookup"},
+		{Kind: toolcatalog.ToolKindCustom, Name: "apply_patch"},
+		{Kind: toolcatalog.ToolKindNamespace, Name: "mcp__grep_app", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "searchGitHub"}}},
+	}
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{Only: []string{"apply_patch", "mcp__grep_app.searchGitHub"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rt.AvailableTools()
+	if !contains(got, "custom:apply_patch") || !contains(got, "custom:mcp__grep_app__searchGitHub") {
+		t.Fatalf("available tools = %#v, want the two allowed tools", got)
+	}
+	if contains(got, "custom:lookup") {
+		t.Fatalf("available tools = %#v, want lookup withheld", got)
+	}
+	if len(rt.Tools()) != 2 {
+		t.Fatalf("SDK tools = %#v, want only the allowed two", rt.Tools())
+	}
+}
+
+// Narrowing must not rename anything: SDK names and aliases are assigned over
+// the catalog the client declared, so a tool keeps the name a wider request
+// would have given it and the calls it makes still rehydrate.
+func TestForcedToolChoiceExposesOnlyThatToolWithoutRenamingIt(t *testing.T) {
+	t.Parallel()
+	tools := []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindFunction, Name: "multi_tool_use.parallel"},
+		{Kind: toolcatalog.ToolKindFunction, Name: "lookup"},
+	}
+	wide, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forced, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{Only: []string{"multi_tool_use.parallel"}, Forced: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forced.Tools()) != 1 {
+		t.Fatalf("SDK tools = %#v, want only the forced tool", forced.Tools())
+	}
+	var wideName string
+	for _, tool := range wide.Tools() {
+		if strings.HasPrefix(tool.Name, "multi_tool_use") {
+			wideName = tool.Name
+		}
+	}
+	if wideName == "" || forced.Tools()[0].Name != wideName {
+		t.Fatalf("forced SDK name = %q, want the unnarrowed alias %q", forced.Tools()[0].Name, wideName)
+	}
+}
+
+// OpenAI rejects a forced choice for a tool the request never declared, and so
+// must this: narrowing to nothing leaves the model an empty catalog and no way
+// to do what was asked. The blame has to land on tool_choice, not on tools.
+func TestForcedToolChoiceForAnUnknownToolIsRejected(t *testing.T) {
+	t.Parallel()
+	_, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, openai.ToolScope{Only: []string{"missing"}, Forced: true})
+	var domain *apierr.Error
+	if !errors.As(err, &domain) || domain.Kind != apierr.KindInvalidInput || domain.Param != "tool_choice" {
+		t.Fatalf("error = %#v, want an invalid_request blaming tool_choice", err)
+	}
+	if !strings.Contains(domain.Message, "missing") {
+		t.Fatalf("message = %q, want the unknown tool named", domain.Message)
+	}
+}
+
+// An allow-list matching nothing is a filter that permits nothing, not a client
+// error: a Responses catalog can still grow through tool_search, so the honest
+// outcome is the same withheld catalog tool_choice: "none" produces.
+func TestAllowedToolsMatchingNothingWithholdsTheCatalog(t *testing.T) {
+	t.Parallel()
+	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, openai.ToolScope{Only: []string{"not_installed_yet"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rt.AvailableTools(), []string{NoToolsSentinel}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("available tools = %#v, want %#v", got, want)
 	}
 }
 

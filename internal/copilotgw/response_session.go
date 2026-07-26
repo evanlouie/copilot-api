@@ -95,9 +95,9 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 		if err != nil {
 			return nil, err
 		}
-		prepared.rt, err = toolproxy.NewResponseRequestTools(g.broker, prepared.catalog.Flatten(), req.ToolChoiceNone)
+		prepared.rt, err = toolproxy.NewResponseRequestTools(g.broker, prepared.catalog.Flatten(), req.ToolChoice.Scope())
 		if err != nil {
-			return nil, apierr.InvalidRequest(err.Error(), "tools")
+			return nil, requestToolsError(err)
 		}
 		g.logUnenforceableStrict(prepared.rt, "responses")
 		if previousRecord != nil {

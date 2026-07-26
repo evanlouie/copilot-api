@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -538,6 +540,73 @@ func TestGatewayStopDisconnectsWarmSessionsItStillOwns(t *testing.T) {
 // loadSessionMetadata reads back the record SaveSessionMetadata wrote. The
 // store has no reader for it, and adding one purely for a test would be the
 // wrong trade, so this walks the same layout store.SaveSessionMetadata uses.
+// tool_choice reaches the SDK as nothing but the tool catalog the session is
+// opened with, so this asserts on what the runtime was actually handed. The
+// gap this cannot close is that the model remains free to answer in prose:
+// narrowing produces "can only call lookup", never OpenAI's "must call lookup".
+func TestChatToolChoiceNarrowsTheCatalogHandedToTheSDK(t *testing.T) {
+	t.Parallel()
+	tools := []openai.Tool{
+		{Type: "function", Function: openai.FunctionTool{Name: "lookup"}},
+		{Type: "function", Function: openai.FunctionTool{Name: "get_weather"}},
+	}
+	tests := map[string]struct {
+		choice openai.ToolChoice
+		want   []string
+	}{
+		"unset":         {want: []string{"lookup", "get_weather"}},
+		"forced":        {choice: openai.ToolChoice{Kind: "function", Name: "lookup"}, want: []string{"lookup"}},
+		"allowed tools": {choice: openai.ToolChoice{Kind: "allowed_tools", AllowedMode: "auto", Allowed: []string{"get_weather"}}, want: []string{"get_weather"}},
+		"none":          {choice: openai.ToolChoice{Kind: "none"}},
+		// required cannot be enforced by narrowing, so it must not narrow.
+		"required": {choice: openai.ToolChoice{Kind: "required"}, want: []string{"lookup", "get_weather"}},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			runtime := &fakeSDKRuntime{respond: answerWith("answer")}
+			gw := newSDKTestGateway(t, runtime)
+			req := chatRequest("gpt-test", "hi")
+			req.Tools = tools
+			req.ToolChoice = tt.choice
+
+			if _, err := gw.Chat(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+
+			opens := runtime.openCalls()
+			if len(opens) != 1 {
+				t.Fatalf("gateway made %d SDK session calls, want 1", len(opens))
+			}
+			got := append([]string(nil), opens[0].toolNames...)
+			sort.Strings(got)
+			want := append([]string(nil), tt.want...)
+			sort.Strings(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("SDK tool catalog = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+// A forced choice for a tool the request never declared narrows the catalog to
+// nothing, leaving the model no way at all to do what was asked. OpenAI rejects
+// it and so does this, blaming the field the client actually got wrong.
+func TestChatForcedToolChoiceForAnUndeclaredToolIsRejected(t *testing.T) {
+	t.Parallel()
+	gw := newSDKTestGateway(t, &fakeSDKRuntime{respond: answerWith("answer")})
+	req := chatRequest("gpt-test", "hi")
+	req.Tools = []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}
+	req.ToolChoice = openai.ToolChoice{Kind: "function", Name: "get_weather"}
+
+	_, err := gw.Chat(context.Background(), req)
+
+	var domain *apierr.Error
+	if !errors.As(err, &domain) || domain.Kind != apierr.KindInvalidInput || domain.Param != "tool_choice" {
+		t.Fatalf("error = %#v, want an invalid_request blaming tool_choice", err)
+	}
+}
+
 func loadSessionMetadata(gw *RealGateway, sessionID string) (sessionstore.SessionMetadata, error) {
 	var meta sessionstore.SessionMetadata
 	raw, err := os.ReadFile(filepath.Join(gw.cfg.DataDir, "sessions", sessionID, "metadata.json"))

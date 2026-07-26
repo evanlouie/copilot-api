@@ -352,7 +352,7 @@ type UnenforceableStrictTool struct {
 	Reason string
 }
 
-func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*RequestTools, error) {
+func NewRequestTools(broker *Broker, tools []openai.Tool, scope openai.ToolScope) (*RequestTools, error) {
 	tools = openai.SupportedTools(tools)
 	clientTools := make([]ClientTool, 0, len(tools))
 	for _, t := range tools {
@@ -362,20 +362,24 @@ func NewRequestTools(broker *Broker, tools []openai.Tool, choiceNone bool) (*Req
 		}
 		clientTools = append(clientTools, ClientTool{SDKName: t.Function.Name, ResponseKind: toolcatalog.ToolKindFunction, ResponseName: t.Function.Name, Description: t.Function.Description, Parameters: params, Strict: t.Function.Strict})
 	}
-	return newRequestToolsFromClientTools(broker, clientTools, choiceNone)
+	return newRequestToolsFromClientTools(broker, clientTools, scope)
 }
 
-func NewResponseRequestTools(broker *Broker, tools []toolcatalog.NormalizedTool, choiceNone bool) (*RequestTools, error) {
+func NewResponseRequestTools(broker *Broker, tools []toolcatalog.NormalizedTool, scope openai.ToolScope) (*RequestTools, error) {
 	clientTools, err := FlattenResponsesTools(tools)
 	if err != nil {
 		return nil, err
 	}
-	return newRequestToolsFromClientTools(broker, clientTools, choiceNone)
+	return newRequestToolsFromClientTools(broker, clientTools, scope)
 }
 
-func newRequestToolsFromClientTools(broker *Broker, clientTools []ClientTool, choiceNone bool) (*RequestTools, error) {
+func newRequestToolsFromClientTools(broker *Broker, clientTools []ClientTool, scope openai.ToolScope) (*RequestTools, error) {
+	clientTools, err := scopeClientTools(clientTools, scope)
+	if err != nil {
+		return nil, err
+	}
 	rt := &RequestTools{broker: broker, permitted: map[string]struct{}{}, client: map[string]ClientTool{}, ctx: context.Background()}
-	if choiceNone || len(clientTools) == 0 {
+	if scope.None || len(clientTools) == 0 {
 		rt.available = []string{NoToolsSentinel}
 		return rt, nil
 	}
@@ -414,6 +418,60 @@ func newRequestToolsFromClientTools(broker *Broker, clientTools []ClientTool, ch
 	}
 	rt.available = available.ToSlice()
 	return rt, nil
+}
+
+// scopeClientTools narrows the request-scoped catalog to the tools a
+// tool_choice permits.
+//
+// This is the only enforcement lever there is. The Copilot SDK has no
+// tool_choice concept, so what the model may call is decided entirely by what
+// it is shown, and the same AvailableTools narrowing that implements
+// tool_choice: "none" implements the rest. For allowed_tools that is the whole
+// of the semantic and the result is exact. For a forced function/custom choice
+// it is not: the model is left able to call nothing but the named tool, which
+// still leaves it free to answer in prose instead of calling anything.
+//
+// Filtering runs after flattening so SDK names, aliases and collision checks
+// are computed over the catalog the client actually declared - a narrowed
+// request must not rename or start accepting tools that a wider one rejected.
+func scopeClientTools(tools []ClientTool, scope openai.ToolScope) ([]ClientTool, error) {
+	if scope.None || len(scope.Only) == 0 {
+		return tools, nil
+	}
+	allowed := make(map[string]struct{}, len(scope.Only))
+	for _, name := range scope.Only {
+		allowed[name] = struct{}{}
+	}
+	kept := make([]ClientTool, 0, len(tools))
+	for _, tool := range tools {
+		for _, name := range clientToolChoiceNames(tool) {
+			if _, ok := allowed[name]; ok {
+				kept = append(kept, tool)
+				break
+			}
+		}
+	}
+	if scope.Forced && len(kept) == 0 {
+		// OpenAI rejects a forced choice for a tool the request did not declare,
+		// and so must this: narrowing to nothing would hand the model an empty
+		// catalog and no way at all to do what the client asked for. An
+		// allow-list is a filter by nature and gets no such treatment - a
+		// Responses catalog can still grow through tool_search, so a name that
+		// matches nothing yet is not necessarily a client mistake.
+		return nil, apierr.InvalidRequest(fmt.Sprintf("tool_choice names tool %q, which is not in this request's tool catalog", scope.Only[0]), "tool_choice")
+	}
+	return kept, nil
+}
+
+// clientToolChoiceNames lists the spellings a tool_choice may use to name this
+// tool. Clients address tools by the name they declared them under, never by
+// the SDK alias this proxy mints, and a namespace child answers to both its
+// bare name and the dotted canonical form its output items carry.
+func clientToolChoiceNames(tool ClientTool) []string {
+	if tool.Namespace == "" {
+		return []string{tool.ResponseName}
+	}
+	return []string{tool.ResponseName, tool.Namespace + "." + tool.ResponseName}
 }
 
 func FlattenResponsesTools(tools []toolcatalog.NormalizedTool) ([]ClientTool, error) {

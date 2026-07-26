@@ -659,6 +659,47 @@ func TestAuthenticationFailureSamplerBoundsRepeatedLogs(t *testing.T) {
 	}
 }
 
+// tool_choice is enforced by narrowing the tool catalog in the gateway, which
+// only works if the decoded choice survives the HTTP layer intact. Both
+// surfaces accept both spellings of an allow-list, so both are checked.
+func TestToolChoiceReachesTheGatewayDecoded(t *testing.T) {
+	t.Parallel()
+	t.Run("chat", func(t *testing.T) {
+		t.Parallel()
+		gw := &captureChatGateway{}
+		s := New(config.Config{}, gw, slog.Default())
+		body := `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}],"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"lookup"}}]}}}`
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+		assertLookupAllowList(t, gw.got.ToolChoice)
+	})
+	t.Run("responses", func(t *testing.T) {
+		t.Parallel()
+		gw := &captureResponseGateway{}
+		s := New(config.Config{}, gw, slog.Default())
+		body := `{"model":"gpt-5","input":"hi","tools":[{"type":"function","name":"lookup"}],"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"lookup"}]}}`
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+		assertLookupAllowList(t, gw.got.ToolChoice)
+	})
+}
+
+func assertLookupAllowList(t *testing.T, choice openai.ToolChoice) {
+	t.Helper()
+	if choice.Kind != "allowed_tools" || len(choice.Allowed) != 1 || choice.Allowed[0] != "lookup" {
+		t.Fatalf("tool_choice = %#v, want an allowed_tools list naming lookup", choice)
+	}
+	if got, want := choice.Scope().Only, []string{"lookup"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("scope = %#v, want the catalog narrowed to lookup", got)
+	}
+}
+
 func TestUnknownWebSocketErrorsAreGeneric(t *testing.T) {
 	t.Parallel()
 	event := NewWebSocketErrorEvent(errors.New("/secret/path"), "evt", 0)

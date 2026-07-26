@@ -78,7 +78,7 @@ type ChatRequest struct {
 	History                 []openai.ChatMessage
 	FinalUser               openai.ChatMessage
 	Tools                   []openai.Tool
-	ToolChoiceNone          bool
+	ToolChoice              openai.ToolChoice
 	ReasoningEffort         string
 	DefaultReasoningEffort  string
 	ResolvedReasoningEffort string
@@ -92,7 +92,7 @@ type ChatContinuationRequest struct {
 	Messages               []openai.ChatMessage
 	Outputs                map[string]string
 	Tools                  []openai.Tool
-	ToolChoiceNone         bool
+	ToolChoice             openai.ToolChoice
 	ReasoningEffort        string
 	DefaultReasoningEffort string
 	IncludeUsageChunk      bool
@@ -173,7 +173,7 @@ type ResponseRequest struct {
 	WarmSession                        *WarmResponseSession
 	Tools                              []toolcatalog.NormalizedTool
 	ToolsSet                           bool
-	ToolChoiceNone                     bool
+	ToolChoice                         openai.ToolChoice
 	ForceSynthetic                     bool
 	ContinuationToolOutputs            map[string]toolcatalog.ResponseToolOutput
 	LoadedToolEvents                   []toolcatalog.StoredLoadedToolEvent

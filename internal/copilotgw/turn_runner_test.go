@@ -218,7 +218,7 @@ func TestOnResultErrorTerminatesLoop(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestCurrentResponseIDUsesContinuationMetadata(t *testing.T) {
 func TestRunnerCapturesResponseToolCallsWithCurrentResponseID(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestTurnAccumulatesTextAcrossAssistantMessages(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +461,7 @@ func TestToolCallBoundaryResetsAccumulatedText(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
 	defer broker.CancelAll(context.Canceled)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}

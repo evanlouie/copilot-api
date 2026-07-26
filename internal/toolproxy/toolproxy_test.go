@@ -18,7 +18,7 @@ import (
 func TestRequestToolsNoneUsesSentinel(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, nil, false)
+	rt, err := NewRequestTools(broker, nil, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestRequestToolsNoneUsesSentinel(t *testing.T) {
 func TestRequestToolsUnsupportedOnlyUsesSentinel(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "custom"}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "custom"}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,13 +42,36 @@ func TestRequestToolsUnsupportedOnlyUsesSentinel(t *testing.T) {
 	}
 }
 
+// Chat Completions gets the same catalog narrowing as Responses; a forced
+// function choice on that surface is enforced as far as "the model can call
+// nothing else" reaches.
+func TestChatForcedToolChoiceNarrowsTheCatalog(t *testing.T) {
+	t.Parallel()
+	tools := []openai.Tool{
+		{Type: "function", Function: openai.FunctionTool{Name: "lookup"}},
+		{Type: "function", Function: openai.FunctionTool{Name: "get_weather"}},
+	}
+	rt, err := NewRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{Only: []string{"get_weather"}, Forced: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rt.AvailableTools(), []string{"custom:get_weather"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("available tools = %#v, want %#v", got, want)
+	}
+	// The withheld tool must also stop being callable, not merely stop being
+	// advertised.
+	if _, _, err := rt.CaptureRequests([]copilot.AssistantMessageToolRequest{{ToolCallID: "call_bad", Name: "lookup", Arguments: map[string]any{}}}, "chatcmpl_1", "chat", "gpt-test", make(chan TurnFinalResult, 1), nil); err == nil || !strings.Contains(err.Error(), "unconfigured SDK tool request") {
+		t.Fatalf("error = %v, want the narrowed-away tool to be unconfigured", err)
+	}
+}
+
 func TestRequestToolsExposePublicNamesAsCustomFilters(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
 	rt, err := NewRequestTools(broker, []openai.Tool{
 		{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}},
 		{Type: "function", Function: openai.FunctionTool{Name: "grep"}},
-	}, false)
+	}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +99,7 @@ func TestRequestToolsExposePublicNamesAsCustomFilters(t *testing.T) {
 func TestCaptureRequestsUsesPublicToolName(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "get-weather"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +125,7 @@ func TestCaptureRequestsUsesPublicToolName(t *testing.T) {
 func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +156,7 @@ func TestPermissionHandlerAllowsOnlyConfiguredCustomTools(t *testing.T) {
 func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +185,7 @@ func TestCompletedBatchDoesNotCaptureNextInvocation(t *testing.T) {
 func TestFindByAnyCallIDsIgnoresStaleHistoryIDs(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +217,7 @@ func TestFindByAnyCallIDsIgnoresStaleHistoryIDs(t *testing.T) {
 func TestFindByAnyCallIDsReturnsAllMatchedLiveIDs(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +252,7 @@ func TestFindByAnyCallIDsReturnsAllMatchedLiveIDs(t *testing.T) {
 func TestFindByAnyCallIDsRejectsMultipleLiveBatches(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +260,7 @@ func TestFindByAnyCallIDsRejectsMultipleLiveBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt2, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt2, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +322,7 @@ func TestCompletionAfterDeadlineRunsAllExpiryCleanup(t *testing.T) {
 func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(10 * time.Millisecond)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +345,7 @@ func TestExpiredBatchIsRemovedFromBroker(t *testing.T) {
 func TestBatchContextCancellationUnblocksHandler(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +376,7 @@ func TestBatchCompleteUnblocksHandler(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
 	params := json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}}}`)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup", Parameters: params}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup", Parameters: params}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +417,7 @@ func TestBatchCompleteUnblocksHandler(t *testing.T) {
 func TestParallelToolCallsRoundTripThroughBatch(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
-	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}

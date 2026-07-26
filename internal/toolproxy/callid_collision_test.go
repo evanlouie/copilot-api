@@ -31,11 +31,11 @@ func TestCollidingSDKToolCallIDsStayIsolatedPerRequest(t *testing.T) {
 	t.Parallel()
 	broker := NewBroker(time.Minute)
 
-	rtA, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rtA, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rtB, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rtB, err := NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}

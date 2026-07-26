@@ -139,7 +139,7 @@ func chatRequestFromContinuation(req ChatContinuationRequest) (ChatRequest, erro
 		History:                history,
 		FinalUser:              openai.ChatMessage{Role: "user", Content: openai.NewTextContent("Continue.")},
 		Tools:                  req.Tools,
-		ToolChoiceNone:         req.ToolChoiceNone,
+		ToolChoice:             req.ToolChoice,
 		ReasoningEffort:        req.ReasoningEffort,
 		DefaultReasoningEffort: req.DefaultReasoningEffort,
 		IncludeUsageChunk:      req.IncludeUsageChunk,

@@ -69,7 +69,7 @@ func captureResponseBatch(t *testing.T, rt *toolproxy.RequestTools, requests []c
 func TestResponseContinuationBatchSelectsLiveSubsetFromCodexHistory(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestResponseContinuationBatchSelectsLiveSubsetFromCodexHistory(t *testing.T
 func TestResponseContinuationBatchKeepsAllLiveParallelOutputs(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestResponseContinuationBatchKeepsAllLiveParallelOutputs(t *testing.T) {
 func TestResponseContinuationBatchRejectsAmbiguousLiveBatches(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestResponseContinuationBatchRejectsAmbiguousLiveBatches(t *testing.T) {
 	}
 	_, liveIDs1 := captureResponseBatch(t, rt, []copilot.AssistantMessageToolRequest{{ToolCallID: "call_live_1", Name: rt.Tools()[0].Name, Arguments: map[string]any{}}}, "resp_live_1")
 	// Simulate a second independent live pending batch from another response.
-	rt2, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt2, err := toolproxy.NewRequestTools(broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestStreamingResponseContinuationDefaultsMissingResponseID(t *testing.T) {
 	if err := store.SaveResponse(recordFromResponse(previous, "sdk-session", "")); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := toolproxy.NewRequestTools(g.broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, false)
+	rt, err := toolproxy.NewRequestTools(g.broker, []openai.Tool{{Type: "function", Function: openai.FunctionTool{Name: "lookup"}}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}

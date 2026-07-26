@@ -16,7 +16,7 @@ import (
 func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
+	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestValidateResponseToolOutputsForBatchDetectsToolSearchInstallBoundary(t *
 func TestValidateResponseToolOutputsRejectsFailedToolSearchWithTools(t *testing.T) {
 	t.Parallel()
 	broker := toolproxy.NewBroker(time.Minute)
-	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, false)
+	rt, err := toolproxy.NewResponseRequestTools(broker, []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindToolSearch, Name: "tool_search", Execution: "client"}}, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,14 +77,14 @@ func TestMergeLoadedToolSearchOutputsUsesPreviousCatalogAndPersistsEvent(t *test
 	if len(flat) != 2 || flat[1].Kind != toolcatalog.ToolKindNamespace || flat[1].Children[0].Name != "spawn_agent" {
 		t.Fatalf("merged catalog = %#v", flat)
 	}
-	rt, err := toolproxy.NewResponseRequestTools(toolproxy.NewBroker(time.Minute), flat, false)
+	rt, err := toolproxy.NewResponseRequestTools(toolproxy.NewBroker(time.Minute), flat, openai.ToolScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !containsString(rt.AvailableTools(), "custom:multi_agent_v1__spawn_agent") {
 		t.Fatalf("AvailableTools = %#v, want loaded namespace child", rt.AvailableTools())
 	}
-	none, err := toolproxy.NewResponseRequestTools(toolproxy.NewBroker(time.Minute), flat, true)
+	none, err := toolproxy.NewResponseRequestTools(toolproxy.NewBroker(time.Minute), flat, openai.ToolScope{None: true})
 	if err != nil {
 		t.Fatal(err)
 	}

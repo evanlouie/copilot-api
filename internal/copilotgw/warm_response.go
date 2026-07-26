@@ -20,7 +20,7 @@ type WarmResponseSession struct {
 	instructions    string
 	reasoningEffort string
 	tools           []toolcatalog.NormalizedTool
-	toolChoiceNone  bool
+	toolChoice      openai.ToolChoice
 	input           resolvedPrompt
 	// pendingInput names every record whose buffered input this session's primed
 	// prompt carries, including this session's own response. Whoever generates
@@ -143,9 +143,18 @@ func (w *WarmResponseSession) use(req *ResponseRequest) (warmResponseUse, bool) 
 	} else if !responseToolsEqual(req.Tools, w.tools) {
 		return warmResponseUse{}, false
 	}
-	if w.toolChoiceNone {
-		req.ToolChoiceNone = true
-	} else if req.ToolChoiceNone {
+	// The warm session's SDK session was configured with the catalog its own
+	// tool_choice implied, and an SDK session's AvailableTools cannot be changed
+	// after the fact. So reuse is only sound when this request asks for the same
+	// catalog: an unset tool_choice inherits the warm session's, exactly as
+	// instructions and reasoning effort do above, and anything else has to agree
+	// on scope rather than on spelling, because an omitted tool_choice and
+	// "auto" name the same catalog. A mismatch is not an error - the caller
+	// falls back to resuming the chain from the store, which rebuilds the
+	// catalog this request asked for.
+	if req.ToolChoice.Kind == "" {
+		req.ToolChoice = w.toolChoice
+	} else if !req.ToolChoice.Scope().Equal(w.toolChoice.Scope()) {
 		return warmResponseUse{}, false
 	}
 	// The SDK session, its pins and its events are about to become the caller's
@@ -227,9 +236,9 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 	if err != nil {
 		return nil, err
 	}
-	rt, err := toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoiceNone)
+	rt, err := toolproxy.NewResponseRequestTools(g.broker, catalog.Flatten(), req.ToolChoice.Scope())
 	if err != nil {
-		return nil, apierr.InvalidRequest(err.Error(), "tools")
+		return nil, requestToolsError(err)
 	}
 	g.logUnenforceableStrict(rt, "responses.warm")
 	events := newSessionEventSink(g.log)
@@ -321,7 +330,7 @@ func (g *RealGateway) WarmResponse(ctx context.Context, req ResponseRequest) (*W
 		_ = session.Disconnect()
 		return nil, apierr.Internal("failed to persist response")
 	}
-	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoiceNone: req.ToolChoiceNone, input: prompt, pendingInput: append(pendingInput, req.ResponseID), imageBudget: imageBudget, pinReleases: pinReleases, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
+	warm := &WarmResponseSession{responseID: req.ResponseID, sessionID: sessionID, model: req.Model, instructions: req.Instructions, reasoningEffort: reasoningEffort, tools: catalog.Flatten(), toolChoice: req.ToolChoice, input: prompt, pendingInput: append(pendingInput, req.ResponseID), imageBudget: imageBudget, pinReleases: pinReleases, previous: previous, store: req.Store, retained: retained, session: session, rt: rt, events: events}
 	// The session now owns the pins, so the deferred release must not fire; from
 	// here on teardown goes through warm.Disconnect.
 	keepPins = true

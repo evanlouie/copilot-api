@@ -42,6 +42,11 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := requestContext(r.Context(), s.cfg.RequestTimeout)
 	defer cancel()
 	s.logUnhonoredChatControls(ctx, &req)
+	toolChoice, err := openai.ParseToolChoice(req.ToolChoice)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
 	if isToolContinuation(messages) {
 		s.logGenerationStarted(r, "chat.completions", req.Model, req.ReasoningEffort, "", false, true)
 		outputs, err := trailingToolOutputs(messages)
@@ -49,7 +54,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, err)
 			return
 		}
-		contReq := copilotgw.ChatContinuationRequest{Model: req.Model, Instructions: instructions, Messages: messages, Outputs: outputs, Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), ReasoningEffort: req.ReasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
+		contReq := copilotgw.ChatContinuationRequest{Model: req.Model, Instructions: instructions, Messages: messages, Outputs: outputs, Tools: req.Tools, ToolChoice: toolChoice, ReasoningEffort: req.ReasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
 		if req.Stream {
 			s.streamChatContinuation(w, r, contReq)
 			return
@@ -89,7 +94,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		history = messages
 		finalUser = openai.ChatMessage{Role: "user", Content: openai.NewTextContent("Continue.")}
 	}
-	chatReq := copilotgw.ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: req.Model, Instructions: instructions, History: history, FinalUser: finalUser, Tools: req.Tools, ToolChoiceNone: openai.ToolChoiceNone(req.ToolChoice), ReasoningEffort: req.ReasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
+	chatReq := copilotgw.ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: req.Model, Instructions: instructions, History: history, FinalUser: finalUser, Tools: req.Tools, ToolChoice: toolChoice, ReasoningEffort: req.ReasoningEffort, DefaultReasoningEffort: s.cfg.DefaultReasoningEffort, ResolvedReasoningEffort: resolvedEffort, ReasoningEffortResolved: resolved, IncludeUsageChunk: req.StreamOptions != nil && req.StreamOptions.IncludeUsage}
 	if req.Stream {
 		s.streamChat(w, r, chatReq)
 		return
@@ -333,6 +338,11 @@ func (s *Server) logUnhonoredChatControls(ctx context.Context, req *openai.ChatC
 	s.logUnhonoredToolChoice(ctx, "chat.completions", req.ToolChoice)
 }
 
+// logUnhonoredToolChoice reports the part of a tool_choice this proxy does not
+// deliver. Narrowing the tool catalog is the only lever the Copilot SDK offers,
+// so it says what narrowing did and does not claim more than that: an
+// allow-list is satisfied exactly and goes unmentioned, while a demand that the
+// model actually call something survives no matter how narrow the catalog gets.
 func (s *Server) logUnhonoredToolChoice(ctx context.Context, surface string, raw json.RawMessage) {
 	choice, err := openai.ParseToolChoice(raw)
 	if err != nil || choice.Honored() {
@@ -342,7 +352,14 @@ func (s *Server) logUnhonoredToolChoice(ctx context.Context, surface string, raw
 	if choice.Name != "" {
 		attrs = append(attrs, "tool_choice_name", choice.Name)
 	}
-	s.debugStream(ctx, "tool_choice is not enforced by the Copilot SDK", attrs...)
+	switch {
+	case choice.ForcesTool():
+		s.debugStream(ctx, "tool_choice narrows the tool catalog to the named tool, but the Copilot SDK cannot make the model call it", attrs...)
+	case choice.Kind == "allowed_tools":
+		s.debugStream(ctx, "allowed_tools narrows the tool catalog, but its required mode is not enforced by the Copilot SDK", attrs...)
+	default:
+		s.debugStream(ctx, "tool_choice is not enforced by the Copilot SDK", attrs...)
+	}
 }
 
 func trailingToolOutputs(messages []openai.ChatMessage) (map[string]string, error) {

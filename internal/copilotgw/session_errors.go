@@ -55,6 +55,22 @@ func upstreamSessionError(d *copilot.SessionErrorData) *apierr.Error {
 	return apierr.Upstream(d.Message)
 }
 
+// requestToolsError classifies a failure from building a request-scoped tool
+// catalog.
+//
+// Catalog construction now validates two request fields at once: the tools
+// themselves and the tool_choice that narrows them. Everything it returns used
+// to be blamed on "tools", which for a forced tool_choice naming a tool the
+// request never declared would send the client looking in the wrong field, so
+// an already-classified failure keeps the param it named.
+func requestToolsError(err error) error {
+	var domain *apierr.Error
+	if errors.As(err, &domain) {
+		return domain
+	}
+	return apierr.InvalidRequest(err.Error(), "tools")
+}
+
 // classifyUpstreamError maps an error returned by an SDK call - as opposed to a
 // session.error event - onto the domain taxonomy.
 //
