@@ -69,22 +69,29 @@ func (t ClientTool) deferMode() copilot.ToolDefer {
 // arguments the model emits can be checked against them.
 //
 // A schema this proxy cannot compile is NOT a client error, and returning 400
-// for one was wrong. Two ordinary cases reach it, both of which real OpenAI
+// for one by default was wrong. The cases that reach it are ones real OpenAI
 // accepts:
 //
-//   - Draft-07 spellings. `{"exclusiveMinimum": true}` alongside `minimum` is
-//     valid Draft-07 and fails to unmarshal here, because jsonschema-go models
-//     the Draft 2020-12 numeric form.
+//   - Legacy exclusive bounds. `{"exclusiveMinimum": true}` alongside `minimum`
+//     is the Draft-04 spelling and fails to unmarshal here, because
+//     jsonschema-go models the Draft 2020-12 numeric form. These are now
+//     rewritten and compiled - see withNumericExclusiveBounds - so they reach
+//     this path only when something else about the schema is also unreadable.
 //   - Any external `$ref`. Resolve is called with no loader, so
 //     `{"$ref":"https://..."}` fails with "cannot resolve remote schemas".
-//     That is this proxy's own limitation, not something the client did.
+//     That is this proxy's own limitation, not something the client did, and it
+//     stays that way deliberately: fetching a schema named by a request at
+//     request time is an SSRF primitive, and no guarantee is worth handing the
+//     model's caller an outbound request of its choosing.
 //
 // The clients that set strict: true by default - the Vercel AI SDK,
 // LangChain/LangGraph, the OpenAI Agents SDK, Cline - would have had working
 // integrations broken outright by a 400 they cannot act on. So an
 // uncompilable schema degrades to unenforced, which is exactly the position
 // every client was in before strict was honoured at all, and the reason is
-// reported so it is visible rather than silent.
+// reported so it is visible rather than silent. An operator who would rather
+// fail than serve an unenforced contract sets COPILOT_STRICT_ENFORCEMENT to
+// fail-closed; the gateway turns the same report into a 400 there.
 //
 // The second return value is empty when strict is either enforced or not
 // requested, and otherwise says why it could not be enforced.
@@ -98,7 +105,28 @@ func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, string) {
 	if t.ResponseKind == toolcatalog.ToolKindCustom {
 		return nil, "a custom tool declares its input with `format`, which cannot be schema-constrained"
 	}
-	raw, err := json.Marshal(t.Parameters)
+	resolved, unenforceable := compileStrictSchema(t.Parameters)
+	if unenforceable == "" {
+		return resolved, ""
+	}
+	// Retrying only after a failure is what keeps the rewrite from being a
+	// behaviour change: a schema that compiles today compiles from exactly the
+	// bytes the client sent, and the rewritten copy is never handed to the SDK.
+	if rewritten, rewrote := withNumericExclusiveBounds(t.Parameters); rewrote {
+		if retried, retryReason := compileStrictSchema(rewritten); retryReason == "" {
+			return retried, ""
+		}
+	}
+	// Reported as the original failure, not the retry's: the first attempt is the
+	// one that describes what the client actually sent.
+	return nil, unenforceable
+}
+
+// compileStrictSchema compiles declared parameters into a validator, returning
+// the reason it could not rather than an error, because every caller reports it
+// as prose alongside the tool name.
+func compileStrictSchema(params map[string]any) (*jsonschema.Resolved, string) {
+	raw, err := json.Marshal(params)
 	if err != nil {
 		return nil, "its parameters cannot be encoded: " + err.Error()
 	}
@@ -111,6 +139,138 @@ func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, string) {
 		return nil, "its parameters are not a JSON Schema this proxy can compile: " + err.Error()
 	}
 	return resolved, ""
+}
+
+// exclusiveBoundPairs are Draft-04's boolean exclusive-bound flags paired with
+// the inclusive bound each one modifies.
+var exclusiveBoundPairs = [...]struct{ exclusive, inclusive string }{
+	{"exclusiveMinimum", "minimum"},
+	{"exclusiveMaximum", "maximum"},
+}
+
+// The keywords the rewrite descends through. Walking only positions that hold
+// schemas is what stops it reaching client data: `default`, `const`, `enum` and
+// `examples` can each contain an object with an `exclusiveMinimum` member that
+// is a value rather than a keyword, and rewriting one of those would corrupt
+// the constraint instead of translating it.
+var (
+	// subschemaKeywords hold a single schema, except `items`, which holds an
+	// ordered list in the Draft-04/07 tuple form and a single schema in 2020-12.
+	subschemaKeywords = [...]string{
+		"additionalItems", "additionalProperties", "contains", "contentSchema",
+		"else", "if", "items", "not", "propertyNames", "then",
+		"unevaluatedItems", "unevaluatedProperties",
+	}
+	// subschemaListKeywords hold an ordered list of schemas.
+	subschemaListKeywords = [...]string{"allOf", "anyOf", "oneOf", "prefixItems"}
+	// subschemaMapKeywords hold schemas under names the client chose, so their
+	// keys are never keywords. `dependencies` is the Draft-07 form whose values
+	// are either a schema or a list of property names; a list is left alone.
+	subschemaMapKeywords = [...]string{
+		"$defs", "definitions", "dependencies", "dependentSchemas",
+		"patternProperties", "properties",
+	}
+)
+
+// withNumericExclusiveBounds returns a copy of a schema with Draft-04's boolean
+// exclusive bounds rewritten into the numeric form Draft 2020-12 uses, plus
+// whether anything was rewritten.
+//
+// `{"minimum": 1, "exclusiveMinimum": true}` means x > 1 in Draft-04 and
+// `{"exclusiveMinimum": 1}` means x > 1 in 2020-12, so the translation is exact
+// rather than an approximation. A false flag simply drops out, leaving the
+// inclusive bound, and a flag with no bound beside it carried no constraint in
+// Draft-04 either, so it is dropped entirely.
+//
+// This is deliberately a rewrite rather than a multi-draft compiler.
+// santhosh-tekuri/jsonschema/v6 was measured against these exact cases and is
+// worse on all of them: under its 2020-12 default the boolean form still fails
+// (so does declaring `$schema` as Draft-07, whose own metaschema already
+// requires a numeric exclusiveMinimum - the boolean spelling is Draft-04), and
+// it additionally rejects tuple `items` and `additionalItems`, which
+// jsonschema-go accepts today. Forcing its default draft to 4 fixes the boolean
+// form by breaking the numeric one, which is the spelling almost every client
+// sends. There is no single draft that reads both, so the choice is a rewrite
+// or a heuristic that guesses a draft per schema - and the rewrite is the
+// smaller, checkable one, with no new dependency.
+//
+// Values are left as they were decoded, which is json.Number, so a bound moved
+// between keywords keeps the precision the client sent it with.
+func withNumericExclusiveBounds(schema map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, len(schema))
+	for key, value := range schema {
+		out[key] = value
+	}
+	rewrote := false
+	for _, pair := range exclusiveBoundPairs {
+		flag, isBool := out[pair.exclusive].(bool)
+		if !isBool {
+			continue
+		}
+		rewrote = true
+		delete(out, pair.exclusive)
+		if bound, ok := out[pair.inclusive]; ok && flag {
+			out[pair.exclusive] = bound
+			delete(out, pair.inclusive)
+		}
+	}
+	for _, keyword := range subschemaKeywords {
+		switch child := out[keyword].(type) {
+		case map[string]any:
+			if rewritten, changed := withNumericExclusiveBounds(child); changed {
+				out[keyword], rewrote = rewritten, true
+			}
+		case []any:
+			if rewritten, changed := rewriteSubschemaList(child); changed {
+				out[keyword], rewrote = rewritten, true
+			}
+		}
+	}
+	for _, keyword := range subschemaListKeywords {
+		if child, ok := out[keyword].([]any); ok {
+			if rewritten, changed := rewriteSubschemaList(child); changed {
+				out[keyword], rewrote = rewritten, true
+			}
+		}
+	}
+	for _, keyword := range subschemaMapKeywords {
+		child, ok := out[keyword].(map[string]any)
+		if !ok {
+			continue
+		}
+		named := make(map[string]any, len(child))
+		changedAny := false
+		for name, sub := range child {
+			named[name] = sub
+			subSchema, ok := sub.(map[string]any)
+			if !ok {
+				continue
+			}
+			if rewritten, changed := withNumericExclusiveBounds(subSchema); changed {
+				named[name], changedAny = rewritten, true
+			}
+		}
+		if changedAny {
+			out[keyword], rewrote = named, true
+		}
+	}
+	return out, rewrote
+}
+
+func rewriteSubschemaList(items []any) ([]any, bool) {
+	out := make([]any, len(items))
+	rewrote := false
+	for i, item := range items {
+		out[i] = item
+		sub, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if rewritten, changed := withNumericExclusiveBounds(sub); changed {
+			out[i], rewrote = rewritten, true
+		}
+	}
+	return out, rewrote
 }
 
 // errStrictArguments is returned when the model emits arguments that do not

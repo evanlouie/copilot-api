@@ -136,6 +136,44 @@ func TestReasoningEmissionRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestStrictEnforcementDefaultsBestEffort(t *testing.T) {
+	setLoadEnv(t)
+	t.Setenv("COPILOT_STRICT_ENFORCEMENT", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The default is load-bearing: rejecting a strict tool this proxy merely
+	// cannot compile was tried and reverted because it broke the clients that set
+	// strict: true by default.
+	if cfg.StrictEnforcement != StrictEnforcementBestEffort {
+		t.Fatalf("StrictEnforcement default = %q, want best-effort", cfg.StrictEnforcement)
+	}
+}
+
+func TestStrictEnforcementEnvOverride(t *testing.T) {
+	setLoadEnv(t)
+	t.Setenv("COPILOT_STRICT_ENFORCEMENT", " Fail-Closed ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StrictEnforcement != StrictEnforcementFailClosed {
+		t.Fatalf("StrictEnforcement = %q, want fail-closed", cfg.StrictEnforcement)
+	}
+}
+
+func TestStrictEnforcementRejectsUnknown(t *testing.T) {
+	setLoadEnv(t)
+	t.Setenv("COPILOT_STRICT_ENFORCEMENT", "strict")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected unknown COPILOT_STRICT_ENFORCEMENT value to be rejected")
+	}
+}
+
 func setLoadEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -157,6 +195,7 @@ func setLoadEnv(t *testing.T) {
 		"COPILOT_RETENTION_MAX_BYTES",
 		"COPILOT_LOG_CONTENT",
 		"COPILOT_REASONING_EMISSION",
+		"COPILOT_STRICT_ENFORCEMENT",
 		"COPILOT_WEBSOCKET_IDLE_TIMEOUT",
 		"COPILOT_WEBSOCKET_MAX_LIFETIME",
 		"COPILOT_WEBSOCKET_PING_INTERVAL",

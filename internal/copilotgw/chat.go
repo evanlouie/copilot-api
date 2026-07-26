@@ -3,9 +3,11 @@ package copilotgw
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
+	"github.com/evanlouie/copilot-api/internal/config"
 	"github.com/evanlouie/copilot-api/internal/hydration"
 	"github.com/evanlouie/copilot-api/internal/openai"
 	"github.com/evanlouie/copilot-api/internal/sessionfs"
@@ -66,7 +68,9 @@ func (g *RealGateway) prepareChatTurn(ctx context.Context, req ChatRequest, stre
 	if err != nil {
 		return nil, requestToolsError(err)
 	}
-	g.logUnenforceableStrict(rt, "chat")
+	if err := g.reportUnenforceableStrict(rt, "chat"); err != nil {
+		return nil, err
+	}
 	events := newSessionEventSink(g.log)
 	session, err := g.resumeSession(ctx, sessionID, req.Model, req.Instructions, reasoningEffort, rt, streaming, events)
 	if err != nil {
@@ -181,20 +185,46 @@ func (g *RealGateway) resolveChatHistoryWithImageBudget(ctx context.Context, mod
 	return out, nil
 }
 
-// logUnenforceableStrict reports tools whose strict: true this proxy accepted
-// but cannot enforce.
+// reportUnenforceableStrict reports tools whose strict: true this proxy
+// accepted but cannot enforce, and applies the operator's policy for them.
 //
 // Accepting a control and silently not honouring it is the one outcome the
 // validation policy rules out, and an uncompilable schema is not something the
-// client can be 400'd for - Draft-07 spellings and external $refs are both
-// accepted by real OpenAI and both fail to compile here. Reporting is what
-// keeps the acceptance honest: the request succeeds, and the operator can see
-// that the guarantee was not applied.
-func (g *RealGateway) logUnenforceableStrict(rt *toolproxy.RequestTools, surface string) {
-	if g == nil || g.log == nil || rt == nil {
-		return
+// client can be 400'd for by default - an external $ref is refused a loader on
+// purpose, and a freeform custom tool has no schema to compile at all, both of
+// which real OpenAI accepts. Reporting is what keeps the acceptance honest:
+// under best-effort the request succeeds and the operator can see that the
+// guarantee was not applied.
+//
+// A warn log is only actionable for whoever reads the logs, though, and the
+// client that trusted strict: true and skipped its own validation is the party
+// actually exposed. COPILOT_STRICT_ENFORCEMENT=fail-closed gives an operator
+// who cannot accept that the other trade: the request is refused with a 400
+// naming every tool and reason, so the contract breaks loudly at the caller
+// rather than quietly in a log file.
+func (g *RealGateway) reportUnenforceableStrict(rt *toolproxy.RequestTools, surface string) error {
+	if g == nil || rt == nil || len(rt.UnenforceableStrict) == 0 {
+		return nil
 	}
+	failClosed := g.cfg.StrictEnforcement == config.StrictEnforcementFailClosed
+	if g.log != nil {
+		message := "accepted strict: true but cannot enforce it"
+		if failClosed {
+			message = "refused strict: true because it cannot be enforced"
+		}
+		for _, t := range rt.UnenforceableStrict {
+			g.log.Warn(message, "surface", surface, "tool", t.Tool, "reason", t.Reason)
+		}
+	}
+	if !failClosed {
+		return nil
+	}
+	refusals := make([]string, 0, len(rt.UnenforceableStrict))
 	for _, t := range rt.UnenforceableStrict {
-		g.log.Warn("accepted strict: true but cannot enforce it", "surface", surface, "tool", t.Tool, "reason", t.Reason)
+		refusals = append(refusals, fmt.Sprintf("tool %q: %s", t.Tool, t.Reason))
 	}
+	return apierr.InvalidRequest(
+		"this proxy cannot enforce strict: true for "+strings.Join(refusals, "; ")+
+			" (COPILOT_STRICT_ENFORCEMENT=fail-closed refuses a strict contract it cannot honour; best-effort accepts it unenforced)",
+		"tools")
 }

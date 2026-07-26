@@ -99,7 +99,9 @@ func (g *RealGateway) prepareResponseTurn(ctx context.Context, req *ResponseRequ
 		if err != nil {
 			return nil, requestToolsError(err)
 		}
-		g.logUnenforceableStrict(prepared.rt, "responses")
+		if err := g.reportUnenforceableStrict(prepared.rt, "responses"); err != nil {
+			return nil, err
+		}
 		if previousRecord != nil {
 			prepared.sessionID = previousRecord.SDKSessionID
 			prepared.previous = &req.PreviousResponseID
