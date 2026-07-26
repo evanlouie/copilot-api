@@ -305,7 +305,7 @@ func (c *chatToolCallStreams) terminalDeltas(calls []openai.ChatToolCall) ([]ope
 	for _, tc := range calls {
 		delivered[tc.ID] = struct{}{}
 		index, first := c.index(tc.ID)
-		suffix, err := terminalStreamSuffix(tc.Function.Arguments, c.streamed[tc.ID], "chat stream terminal tool-call arguments do not match the streamed arguments")
+		suffix, err := toolArgumentsSuffix(tc.Function.Arguments, c.streamed[tc.ID], "chat stream terminal tool-call arguments do not match the streamed arguments")
 		if err != nil {
 			return nil, err
 		}

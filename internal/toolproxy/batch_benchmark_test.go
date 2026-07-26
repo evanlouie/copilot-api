@@ -27,14 +27,14 @@ func benchmarkTurn(b *testing.B, broker *Broker, tools int) {
 	for range b.N {
 		batch := newBatch(time.Minute, "resp_bench", "responses", "gpt-5", nil, nil, ctx)
 		for _, id := range sdkIDs {
-			batch.ensureCall(id, "lookup", ClientTool{}, args, "", "")
+			batch.ensureCall(id, "lookup", ClientTool{}, args, "", nil)
 		}
 		// CaptureRequests registers the announced set once.
 		broker.Register(batch)
 		batch.startTimer()
 		// handleInvocation then registers again, once per invoked tool.
 		for _, id := range sdkIDs {
-			batch.ensureCall(id, "lookup", ClientTool{}, args, "", "")
+			batch.ensureCall(id, "lookup", ClientTool{}, args, "", nil)
 			broker.Register(batch)
 			batch.startTimer()
 		}
@@ -59,7 +59,7 @@ func BenchmarkBrokerRegisterRepeat(b *testing.B) {
 	broker := NewBroker(time.Minute)
 	batch := newBatch(time.Minute, "resp_bench", "responses", "gpt-5", nil, nil, context.Background())
 	for i := range 32 {
-		batch.ensureCall(fmt.Sprintf("call_%d", i), "lookup", ClientTool{}, json.RawMessage(`{}`), "", "")
+		batch.ensureCall(fmt.Sprintf("call_%d", i), "lookup", ClientTool{}, json.RawMessage(`{}`), "", nil)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()

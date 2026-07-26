@@ -951,20 +951,19 @@ func (r *turnRunner) emitDelta(delta string) {
 type toolCallStreamState map[string]*toolCallStream
 
 // toolCallStream is one tool call's incremental-argument routing: the identity
-// its fragments are published under, and which surfaces can carry them.
+// its fragments are published under, and the item they extend.
 //
 // A zero value is the decision not to forward this call's fragments at all,
-// which is how a strict tool, an unrecognised tool and a tool-search call are
-// all represented. Once made, that decision is remembered for the rest of the
-// turn: a later fragment must not start a stream halfway through a call's
-// arguments, since the client would then hold a fragment it cannot place.
+// which is how a strict tool, an unrecognised tool, a freeform custom tool and
+// a tool-search call are all represented (see
+// toolproxy.RequestTools.ReserveStreamingCall for why each is excluded). Once
+// made, that decision is remembered for the rest of the turn: a later fragment
+// must not start a stream halfway through a call's arguments, since the client
+// would then hold a fragment it cannot place.
 type toolCallStream struct {
 	call toolproxy.StreamingCall
-	// item is the in-progress Responses output item the fragments extend, nil
-	// when the call has no Responses representation that streams.
+	// item is the in-progress Responses output item the fragments extend.
 	item *openai.ResponseOutputItem
-	// chat records whether Chat Completions can carry these fragments.
-	chat bool
 }
 
 func (s *toolCallStream) forwarded() bool { return s != nil && s.call.CallID != "" }
@@ -988,22 +987,15 @@ func (s toolCallStreamState) resolve(rt *toolproxy.RequestTools, d *copilot.Assi
 }
 
 func newToolCallStream(call toolproxy.StreamingCall) *toolCallStream {
-	itemID := responseToolItemID(call.Kind, call.CallID)
-	switch call.Kind {
-	case toolcatalog.ToolKindCustom:
-		// A custom tool's fragments are the raw grammar input, which is what the
-		// custom_tool_call item's `input` accumulates. Chat Completions has
-		// nowhere to put them: it renders a custom call as a function call whose
-		// arguments are the JSON envelope around that input, so the fragments
-		// would not reconcile against what the terminal chunk carries.
-		return &toolCallStream{call: call, item: &openai.ResponseOutputItem{ID: itemID, Type: "custom_tool_call", Status: "in_progress", CallID: call.CallID, Name: call.Name}}
-	case toolcatalog.ToolKindToolSearch:
-		// Neither surface defines an incremental event for a tool-search call, so
-		// it keeps the announce/done pair it has always had.
+	// ReserveStreamingCall admits nothing but function calls, so this is the only
+	// item shape the fragments can extend. Checking rather than assuming keeps a
+	// later widening of that gate from silently routing another kind's fragments
+	// into a function_call item.
+	if call.Kind != toolcatalog.ToolKindFunction {
 		return &toolCallStream{}
-	default:
-		return &toolCallStream{call: call, chat: true, item: &openai.ResponseOutputItem{ID: itemID, Type: "function_call", Status: "in_progress", CallID: call.CallID, Name: call.Name}}
 	}
+	item := &openai.ResponseOutputItem{ID: responseToolItemID(call.Kind, call.CallID), Type: "function_call", Status: "in_progress", CallID: call.CallID, Name: call.Name}
+	return &toolCallStream{call: call, item: item}
 }
 
 // emitToolCallDelta publishes one tool-call argument fragment. The item it
@@ -1017,16 +1009,10 @@ func (r *turnRunner) emitToolCallDelta(stream *toolCallStream, delta string) {
 	r.mu.Lock()
 	chat := r.chat
 	response := r.response
-	if stream.item != nil {
-		r.announceItemLocked(stream.item.ID)
-	}
+	r.announceItemLocked(stream.item.ID)
 	r.mu.Unlock()
-	if stream.chat {
-		chat.send(StreamEvent{Kind: "tool_call_delta", Delta: delta, ToolCallID: stream.call.CallID, ToolName: stream.call.Name})
-	}
-	if stream.item != nil {
-		response.send(ResponseStreamEvent{Kind: "tool_call_delta", ItemID: stream.item.ID, Item: stream.item, Delta: delta})
-	}
+	chat.send(StreamEvent{Kind: "tool_call_delta", Delta: delta, ToolCallID: stream.call.CallID, ToolName: stream.call.Name})
+	response.send(ResponseStreamEvent{Kind: "tool_call_delta", ItemID: stream.item.ID, Item: stream.item, Delta: delta})
 }
 
 func (r *turnRunner) emitReasoningDelta(delta, reasoningID string) {

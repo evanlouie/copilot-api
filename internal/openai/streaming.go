@@ -65,18 +65,15 @@ type ResponseStreamEvent struct {
 	Item           *ResponseOutputItem `json:"item,omitempty"`
 	// Part carries either a content part (*ResponseText) or a reasoning summary
 	// part (ResponseReasoningSummary), depending on the event type.
-	Part         any    `json:"part,omitempty"`
-	ItemID       string `json:"item_id,omitempty"`
-	OutputIndex  *int   `json:"output_index,omitempty"`
-	ContentIndex *int   `json:"content_index,omitempty"`
-	SummaryIndex *int   `json:"summary_index,omitempty"`
-	Delta        string `json:"delta,omitempty"`
-	Text         string `json:"text,omitempty"`
-	Arguments    string `json:"arguments,omitempty"`
-	// Input is the completed raw input of a freeform custom tool call, which is
-	// what response.custom_tool_call_input.done carries instead of `arguments`.
-	Input  string       `json:"input,omitempty"`
-	Name   string       `json:"name,omitempty"`
-	Status string       `json:"status,omitempty"`
-	Error  *ErrorObject `json:"error,omitempty"`
+	Part         any          `json:"part,omitempty"`
+	ItemID       string       `json:"item_id,omitempty"`
+	OutputIndex  *int         `json:"output_index,omitempty"`
+	ContentIndex *int         `json:"content_index,omitempty"`
+	SummaryIndex *int         `json:"summary_index,omitempty"`
+	Delta        string       `json:"delta,omitempty"`
+	Text         string       `json:"text,omitempty"`
+	Arguments    string       `json:"arguments,omitempty"`
+	Name         string       `json:"name,omitempty"`
+	Status       string       `json:"status,omitempty"`
+	Error        *ErrorObject `json:"error,omitempty"`
 }
