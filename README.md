@@ -447,10 +447,36 @@ disablement, tool-choice, and provider-shape tests/spikes have been re-run.
 
 ## Development
 
+Every check that CI runs is available as a `make` target, so you can reproduce a
+pipeline failure locally with the exact same command:
+
 ```sh
-go test ./...
-go vet ./...
+make            # everything below (same as `make ci`)
+make go-ci      # fmt-check, build, vet, test, lint
+make deno-ci    # deno-fmt-check, deno-check, deno-test
 ```
+
+Individual gates:
+
+| Target                | Command                                             |
+| --------------------- | --------------------------------------------------- |
+| `make fmt`            | `gofmt -w .` (rewrites; not a CI gate)               |
+| `make fmt-check`      | fails if `gofmt -l .` lists any file                 |
+| `make build`          | `go build ./...`                                     |
+| `make vet`            | `go vet ./...`                                       |
+| `make test`           | `go test ./... -race -count=1`                       |
+| `make lint`           | `go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...` |
+| `make deno-fmt-check` | `deno fmt --check`                                   |
+| `make deno-check`     | `deno check tests/ai-sdk-deno`                       |
+| `make deno-test`      | `deno task test:ai-sdk`                              |
+
+The staticcheck version is pinned in both the `Makefile` and
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml); bump them together. A
+locally installed `staticcheck` may be built against an older Go toolchain and
+fail to analyze this module, which is why the pinned `go run` form is used.
+
+Tests run under `-race` only. The suite is fast enough that a second non-race
+pass would double the runtime without adding signal.
 
 Live Copilot integration checks should be gated by `COPILOT_API_LIVE_TESTS=1`
 and are not part of the default test suite.
@@ -464,6 +490,9 @@ COPILOT_API_BASE_URL=http://127.0.0.1:8080/v1 \
 COPILOT_API_KEY=local-secret \
 deno task test:ai-sdk
 ```
+
+With the gate unset (as in CI), all 22 credentialed cases are skipped; the run
+still verifies that the suite type-checks and that `deno.lock` resolves.
 
 The suite covers Chat Completions, Responses over HTTP and WebSocket transports,
 reasoning effort, multi-turn history, MCP-backed client tools, and image inputs.

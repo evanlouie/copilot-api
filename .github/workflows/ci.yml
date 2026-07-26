@@ -1,0 +1,86 @@
+name: CI
+
+# Each gate is its own named step so a red X in the Actions UI names the exact
+# check that failed without expanding any logs. The Makefile at the repo root
+# mirrors these commands verbatim for local use; keep the two in sync.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Track the toolchain declared by the module instead of pinning twice.
+          go-version-file: go.mod
+          # Built-in module + build cache keyed off go.sum. Free, so use it.
+          cache: true
+
+      - name: Check formatting (gofmt)
+        run: |
+          # `gofmt -l` exits 0 even when it lists unformatted files, so the
+          # output has to be inspected explicitly for this to gate anything.
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Files are not gofmt-formatted. Run 'make fmt' to fix:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "All Go files are gofmt-clean."
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        # -count=1 defeats the test cache so this is a real run every time.
+        # Credentialed live tests stay skipped: COPILOT_API_LIVE_TESTS is unset.
+        run: go test ./... -race -count=1
+
+      - name: Lint (staticcheck)
+        # Pinned rather than @latest so a new staticcheck release cannot turn a
+        # green branch red. Bump deliberately.
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+
+  deno:
+    name: Deno
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Check formatting (deno fmt)
+        run: deno fmt --check
+
+      - name: Type check
+        # The `test:ai-sdk` task only type-checks mcp_server.ts; checking the
+        # whole directory also covers ai_sdk_integration_test.ts.
+        run: deno check tests/ai-sdk-deno
+
+      - name: Test
+        # COPILOT_API_AI_SDK_DENO_TESTS is intentionally unset, so the 22
+        # credentialed cases skip. This still proves the suite compiles, that
+        # deno.lock resolves, and that the gate itself works.
+        run: deno task test:ai-sdk
