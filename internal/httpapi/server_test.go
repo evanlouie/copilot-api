@@ -995,6 +995,38 @@ func TestResponsesStreamEmitsFunctionCallEventsAndCompletedResponse(t *testing.T
 			t.Fatalf("response stream missing %s:\n%s", want, out)
 		}
 	}
+	// A function_call item declares no content/summary/role, so forcing those
+	// keys on message/reasoning items must not leak them here.
+	added := firstRawItemFrame(t, out, "response.output_item.added", "function_call")
+	for _, forbidden := range []string{`"content"`, `"summary"`, `"role"`} {
+		if strings.Contains(added, forbidden) {
+			t.Fatalf("function_call output_item.added must not carry %s: %s", forbidden, added)
+		}
+	}
+}
+
+// TestResponsesStreamOpensMessageItemWithEmptyContentArray pins the wire shape
+// of the frame that opens a streamed message. `content` is required and
+// non-nullable on a Responses message item, and openai-python's
+// ResponseStreamState appends into it on the first response.content_part.added,
+// so dropping the key (Go's omitempty drops zero-length slices) makes every
+// client.responses.stream(...) call fail on the first text token.
+func TestResponsesStreamOpensMessageItemWithEmptyContentArray(t *testing.T) {
+	s := New(config.Config{}, &codexStreamGateway{}, slog.Default())
+	body := strings.NewReader(`{"model":"gpt-5","stream":true,"input":"hi"}`)
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	added := firstRawItemFrame(t, w.Body.String(), "response.output_item.added", "message")
+	for _, want := range []string{`"content":[]`, `"role":"assistant"`, `"status":"in_progress"`} {
+		if !strings.Contains(added, want) {
+			t.Fatalf("message output_item.added missing %s: %s", want, added)
+		}
+	}
 }
 
 func TestResponsesWebSocketNonUpgradeRequiresUpgrade(t *testing.T) {

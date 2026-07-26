@@ -353,6 +353,15 @@ func TestResponsesStreamEmitsReasoningSummaryBeforeMessage(t *testing.T) {
 	if messageAdded == nil || messageAdded.OutputIndex == nil || *messageAdded.OutputIndex != 1 {
 		t.Fatalf("message item must shift to output_index 1 when reasoning present: %#v", messageAdded)
 	}
+	// Both items are opened empty, and both arrays are required and non-nullable
+	// in the Responses schema. Omitting the key makes SDK stream accumulators
+	// append into None on the first summary/content part.
+	if raw := firstRawItemFrame(t, w.Body.String(), "response.output_item.added", "reasoning"); !strings.Contains(raw, `"summary":[]`) {
+		t.Fatalf("reasoning output_item.added must carry an empty summary array: %s", raw)
+	}
+	if raw := firstRawItemFrame(t, w.Body.String(), "response.output_item.added", "message"); !strings.Contains(raw, `"content":[]`) {
+		t.Fatalf("message output_item.added must carry an empty content array: %s", raw)
+	}
 	for _, e := range events {
 		if e.Type == "response.reasoning_summary_text.delta" {
 			if e.SummaryIndex == nil || *e.SummaryIndex != 0 || e.Delta == "" {
@@ -434,6 +443,9 @@ func TestResponsesStreamReconcilesEncryptedOnlyReasoning(t *testing.T) {
 	}
 	if reasoningAdded.Item == nil || reasoningAdded.Item.EncryptedContent != "enc-blob" {
 		t.Fatalf("reconciled reasoning item lost encrypted content: %#v", reasoningAdded.Item)
+	}
+	if raw := firstRawItemFrame(t, w.Body.String(), "response.output_item.added", "reasoning"); !strings.Contains(raw, `"summary":[]`) {
+		t.Fatalf("reconciled reasoning item must carry an empty summary array: %s", raw)
 	}
 	if firstItemEvent(events, "response.output_item.done", "reasoning") == nil {
 		t.Fatalf("reconciled reasoning item was never closed:\n%s", w.Body.String())
@@ -559,4 +571,31 @@ func firstItemEvent(events []openai.ResponseStreamEvent, eventType, itemType str
 		}
 	}
 	return nil
+}
+
+// firstRawItemFrame returns the undecoded SSE `data:` payload of the first frame
+// of eventType carrying an item of itemType.
+//
+// Assertions about required-but-empty arrays (`content`, `summary`) have to run
+// against the raw bytes: decoding into openai.ResponseStreamEvent cannot tell an
+// absent JSON key from an empty array, and that is precisely the distinction
+// openai-python's ResponseStreamState depends on when it appends into
+// item.content / item.summary.
+func firstRawItemFrame(t *testing.T, body, eventType, itemType string) string {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok || strings.TrimSpace(data) == "[DONE]" {
+			continue
+		}
+		var ev openai.ResponseStreamEvent
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			t.Fatalf("bad SSE data frame %q: %v", data, err)
+		}
+		if ev.Type == eventType && ev.Item != nil && ev.Item.Type == itemType {
+			return data
+		}
+	}
+	t.Fatalf("no %s frame carrying a %q item in:\n%s", eventType, itemType, body)
+	return ""
 }

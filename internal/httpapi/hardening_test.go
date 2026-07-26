@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -339,6 +340,20 @@ func TestTerminalOnlyResponseMessageHasCompleteLifecycle(t *testing.T) {
 	}
 	if writer.events[len(writer.events)-1].Type != "response.completed" {
 		t.Fatalf("last event = %#v", writer.events[len(writer.events)-1])
+	}
+	// writeUnstreamedMessageEvents opens the item with an empty content array; it
+	// must reach the wire as `"content":[]` because SDK stream accumulators append
+	// into it on the following response.content_part.added.
+	added := firstItemEvent(writer.events, "response.output_item.added", "message")
+	if added == nil {
+		t.Fatalf("no message output_item.added in %s", types)
+	}
+	frame, err := json.Marshal(added)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(frame), `"content":[]`) {
+		t.Fatalf("terminal-only message output_item.added must carry an empty content array: %s", frame)
 	}
 }
 
