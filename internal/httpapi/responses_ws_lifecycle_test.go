@@ -18,7 +18,7 @@ import (
 // when its context is cancelled. It is the shape of a real in-flight Copilot
 // turn: the work is upstream, and cancellation is the only thing that ends it.
 type blockedProducerGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	started        chan struct{}
 	producerExited chan struct{}
 }

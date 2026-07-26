@@ -28,7 +28,7 @@ import (
 // divergence between the streamed events, the terminal response and a later
 // GET.
 type identityGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	mu     sync.Mutex
 	stored map[string]*openai.Response
 }

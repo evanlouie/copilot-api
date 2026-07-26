@@ -23,7 +23,7 @@ import (
 )
 
 type modelsGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	models []copilotgw.Model
 }
 
@@ -32,7 +32,7 @@ func (g modelsGateway) ListModels(context.Context) ([]copilotgw.Model, error) {
 }
 
 type codexStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	got copilotgw.ResponseRequest
 }
 
@@ -48,7 +48,7 @@ func (g *codexStreamGateway) StreamResponse(_ context.Context, req copilotgw.Res
 }
 
 type websocketStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	mu             sync.Mutex
 	got            []copilotgw.ResponseRequest
 	text           string
@@ -125,7 +125,7 @@ func previousResponsePtr(id string) *string {
 }
 
 type errorResponseGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	err error
 	got copilotgw.ResponseRequest
 }
@@ -136,7 +136,7 @@ func (g *errorResponseGateway) StreamResponse(_ context.Context, req copilotgw.R
 }
 
 type captureChatGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	got copilotgw.ChatRequest
 }
 
@@ -146,7 +146,7 @@ func (g *captureChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest) 
 }
 
 type resolvingChatGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	got              copilotgw.ChatRequest
 	resolveCalls     int
 	resolveModel     string
@@ -177,7 +177,7 @@ func (g *resolvingChatGateway) ContinueChatToolCalls(_ context.Context, req copi
 }
 
 type streamChatGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	got copilotgw.ChatRequest
 }
 
@@ -207,7 +207,7 @@ func (g *streamChatGateway) StreamChat(_ context.Context, req copilotgw.ChatRequ
 }
 
 type captureResponseGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	got copilotgw.ResponseRequest
 }
 
@@ -218,7 +218,7 @@ func (g *captureResponseGateway) CreateResponse(_ context.Context, req copilotgw
 }
 
 type functionCallStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	got copilotgw.ResponseRequest
 }
 
@@ -242,7 +242,7 @@ func (g *functionCallStreamGateway) StreamResponse(_ context.Context, req copilo
 }
 
 type statefulResponseGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	resp    *openai.Response
 	deleted bool
 }

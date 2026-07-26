@@ -109,7 +109,7 @@ func TestChatAcceptsParallelToolCallsFalse(t *testing.T) {
 }
 
 type scriptedChatStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	events []copilotgw.StreamEvent
 	hold   bool
 	err    error

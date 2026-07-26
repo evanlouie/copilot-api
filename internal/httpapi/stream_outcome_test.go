@@ -18,7 +18,7 @@ import (
 // failingResponseStreamGateway commits a stream and then fails it, which is
 // what an upstream 502 looks like once SSE headers are on the wire.
 type failingResponseStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *failingResponseStreamGateway) StreamResponse(_ context.Context, _ copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
@@ -32,7 +32,7 @@ func (g *failingResponseStreamGateway) StreamResponse(_ context.Context, _ copil
 }
 
 type failingChatStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *failingChatStreamGateway) StreamChat(_ context.Context, _ copilotgw.ChatRequest) (<-chan copilotgw.StreamEvent, error) {
@@ -46,7 +46,7 @@ func (g *failingChatStreamGateway) StreamChat(_ context.Context, _ copilotgw.Cha
 }
 
 type completingChatStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *completingChatStreamGateway) StreamChat(_ context.Context, req copilotgw.ChatRequest) (<-chan copilotgw.StreamEvent, error) {

@@ -56,7 +56,7 @@ func (w *panicOnWriteRecorder) Write(b []byte) (int, error) {
 func (w *panicOnWriteRecorder) Flush() {}
 
 type panicModelsGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (panicModelsGateway) ListModels(context.Context) ([]copilotgw.Model, error) {

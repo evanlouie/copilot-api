@@ -21,7 +21,7 @@ import (
 // is a presentation policy, so nothing the edge does for the wire may change
 // what lands in (or comes back out of) this map.
 type storingReasoningGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	stored map[string]*openai.Response
 }
 

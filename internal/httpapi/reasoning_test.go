@@ -15,7 +15,7 @@ import (
 )
 
 type reasoningStreamChatGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *reasoningStreamChatGateway) StreamChat(_ context.Context, req copilotgw.ChatRequest) (<-chan copilotgw.StreamEvent, error) {
@@ -40,7 +40,7 @@ func (g *reasoningStreamChatGateway) StreamChat(_ context.Context, req copilotgw
 }
 
 type reasoningChatGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *reasoningChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest) (*copilotgw.TurnResult, error) {
@@ -57,7 +57,7 @@ func (g *reasoningChatGateway) Chat(_ context.Context, req copilotgw.ChatRequest
 }
 
 type reasoningResponseGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *reasoningResponseGateway) CreateResponse(_ context.Context, req copilotgw.ResponseRequest) (*copilotgw.ResponseResult, error) {
@@ -78,7 +78,7 @@ func (g *reasoningResponseGateway) CreateResponse(_ context.Context, req copilot
 }
 
 type reasoningResponseStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *reasoningResponseStreamGateway) StreamResponse(_ context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
@@ -459,7 +459,7 @@ func TestResponsesStreamReconcilesEncryptedOnlyReasoning(t *testing.T) {
 }
 
 type encryptedTextReasoningResponseStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *encryptedTextReasoningResponseStreamGateway) StreamResponse(_ context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {
@@ -476,7 +476,7 @@ func (g *encryptedTextReasoningResponseStreamGateway) StreamResponse(_ context.C
 }
 
 type encryptedReasoningResponseStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 }
 
 func (g *encryptedReasoningResponseStreamGateway) StreamResponse(_ context.Context, req copilotgw.ResponseRequest) (<-chan copilotgw.ResponseStreamEvent, error) {

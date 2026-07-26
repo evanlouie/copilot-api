@@ -37,7 +37,7 @@ func TestRequestContextCancelStopsTheContextWithoutATimeout(t *testing.T) {
 // deltas forever. A consumer that stops reading has to cancel the context to
 // release the producer; nothing else will.
 type leakingStreamGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	producerExited chan struct{}
 }
 
@@ -105,7 +105,7 @@ func TestWebSocketResponseCancelsItsGatewayProducerOnEarlyReturn(t *testing.T) {
 // deadlineCaptureGateway records whether the context each read handler passed it
 // carried the configured request deadline.
 type deadlineCaptureGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	resp        *openai.Response
 	getDeadline bool
 	delDeadline bool
@@ -155,7 +155,7 @@ func TestStoredResponseHandlersApplyTheRequestTimeout(t *testing.T) {
 
 // idCaptureGateway records whatever response id the transport handed it.
 type idCaptureGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	sawID string
 }
 

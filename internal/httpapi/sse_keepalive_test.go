@@ -19,7 +19,7 @@ import (
 // silentThenAnsweringGateway models a reasoning-heavy turn: nothing at all for a
 // while, then a complete response. Held open until release is closed.
 type silentThenAnsweringGateway struct {
-	copilotgw.Gateway
+	unimplementedGateway
 	release chan struct{}
 }
 
