@@ -123,16 +123,16 @@ func (t *responseSlotTransport) writeResponseEventPayload(ev openai.ResponseStre
 	return t.writer.writePayload(payload)
 }
 
-func (w *webSocketJSONWriter) writeError(err error, eventID string) error {
-	return w.write(NewWebSocketErrorEvent(err, eventID))
+func (w *webSocketJSONWriter) writeError(err error, eventID string, seq int64) error {
+	return w.write(NewWebSocketErrorEvent(err, eventID, seq))
 }
 
 // writeErrorReleasing ends a response with an error envelope and frees the
 // connection's response slot in the same place responseSlotTransport frees it
 // for a terminal event: an error is just as final, and a client is just as
 // entitled to retry the instant it sees one.
-func (w *webSocketJSONWriter) writeErrorReleasing(err error, eventID string, release func()) error {
-	return w.writeReleasing(NewWebSocketErrorEvent(err, eventID), release)
+func (w *webSocketJSONWriter) writeErrorReleasing(err error, eventID string, seq int64, release func()) error {
+	return w.writeReleasing(NewWebSocketErrorEvent(err, eventID, seq), release)
 }
 
 type responsesWebSocketState struct {
@@ -378,7 +378,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	// fires when no response is generating and the client has gone quiet.
 	if s.cfg.WebSocketIdleTimeout > 0 {
 		go watchResponsesWebSocketIdle(connCtx, state, s.cfg.WebSocketIdleTimeout, func() {
-			_ = writer.writeError(apierr.InvalidRequest("websocket idle timeout", "body"), "")
+			_ = writer.writeError(apierr.InvalidRequest("websocket idle timeout", "body"), "", 0)
 			closeWith(websocket.StatusGoingAway, "websocket idle timeout")
 		})
 	}
@@ -435,18 +435,18 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		fields := map[string]json.RawMessage{}
 		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-			_ = writer.writeError(apierr.InvalidRequest("invalid JSON websocket message", "body"), "")
+			_ = writer.writeError(apierr.InvalidRequest("invalid JSON websocket message", "body"), "", 0)
 			continue
 		}
 		eventType, eventID, err := webSocketEnvelopeFields(fields)
 		if err != nil {
-			_ = writer.writeError(err, eventID)
+			_ = writer.writeError(err, eventID, 0)
 			continue
 		}
 		switch eventType {
 		case "response.create":
 			if !state.tryStart() {
-				_ = writer.writeError(apierr.InvalidRequest("only one response.create may be active per WebSocket connection", "type"), eventID)
+				_ = writer.writeError(apierr.InvalidRequest("only one response.create may be active per WebSocket connection", "type"), eventID, 0)
 				continue
 			}
 			go func(fields map[string]json.RawMessage, eventID string) {
@@ -455,7 +455,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 						if s.log != nil {
 							s.log.Error("panic in Responses WebSocket response handler", "panic", v, "stack", string(debug.Stack()))
 						}
-						_ = writer.writeError(apierr.Internal("internal server error"), eventID)
+						_ = writer.writeError(apierr.Internal("internal server error"), eventID, 0)
 						closeWith(websocket.StatusInternalError, "internal server error")
 					}
 					state.finish()
@@ -463,9 +463,9 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				s.handleWebSocketResponseCreate(connCtx, r, writer, state, closeWith, fields)
 			}(fields, eventID)
 		case "":
-			_ = writer.writeError(apierr.InvalidRequest("websocket event type is required", "type"), eventID)
+			_ = writer.writeError(apierr.InvalidRequest("websocket event type is required", "type"), eventID, 0)
 		default:
-			_ = writer.writeError(apierr.InvalidRequest("unsupported websocket event type", "type"), eventID)
+			_ = writer.writeError(apierr.InvalidRequest("unsupported websocket event type", "type"), eventID, 0)
 		}
 	}
 	closeWith(websocket.StatusNormalClosure, "")
@@ -521,8 +521,17 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 	// the deferred finish for the paths that write neither - frees the
 	// connection's response slot no later than the frame that tells the client the
 	// response is over.
+	// The error envelope is one of this response's stream events, so it draws its
+	// sequence number from the same encoder the streamed events use rather than
+	// restarting a parallel count. Before that encoder exists the response has
+	// emitted nothing, so a failure there is event zero either way.
+	var events *responseStreamEncoder
 	fail := func(err error, eventID string) {
-		_ = writer.writeErrorReleasing(err, eventID, state.endActive)
+		var seq int64
+		if events != nil {
+			seq = events.nextSequence()
+		}
+		_ = writer.writeErrorReleasing(err, eventID, seq, state.endActive)
 	}
 	req, eventID, generate, err := decodeWebSocketResponseCreateFields(fields)
 	if err != nil {
@@ -534,7 +543,7 @@ func (s *Server) handleWebSocketResponseCreate(parent context.Context, r *http.R
 	}
 	ctx, cancel := requestContext(parent, s.cfg.RequestTimeout)
 	defer cancel()
-	events := newLoggedResponseEventWriter(s, ctx, &responseSlotTransport{writer: writer, release: state.endActive})
+	events = newResponseStreamEncoder(newLoggedResponseEventWriter(s, ctx, &responseSlotTransport{writer: writer, release: state.endActive}))
 	gwReq, logFields, err := s.prepareResponseRequest(ctx, &req, openai.NewID("resp_"))
 	if err != nil {
 		fail(err, eventID)

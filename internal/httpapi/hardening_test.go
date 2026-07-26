@@ -661,8 +661,8 @@ func TestAuthenticationFailureSamplerBoundsRepeatedLogs(t *testing.T) {
 
 func TestUnknownWebSocketErrorsAreGeneric(t *testing.T) {
 	t.Parallel()
-	event := NewWebSocketErrorEvent(errors.New("/secret/path"), "evt")
-	if strings.Contains(event.Error.Message, "/secret/path") || event.Error.Message != "internal server error" {
+	event := NewWebSocketErrorEvent(errors.New("/secret/path"), "evt", 0)
+	if strings.Contains(event.Message, "/secret/path") || event.Message != "internal server error" {
 		t.Fatalf("websocket error leaked details: %#v", event)
 	}
 }
