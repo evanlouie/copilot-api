@@ -150,8 +150,8 @@ func TestWarmSessionUseIsRefusedOnceTheRegistryIsClosed(t *testing.T) {
 	if err := gw.Stop(); err != nil {
 		t.Fatal(err)
 	}
-	if !warm.isDisconnected() || releases.Load() != 1 {
-		t.Fatalf("Stop left the refused session behind: disconnected=%t releases=%d", warm.isDisconnected(), releases.Load())
+	if !warm.Disconnected() || releases.Load() != 1 {
+		t.Fatalf("Stop left the refused session behind: disconnected=%t releases=%d", warm.Disconnected(), releases.Load())
 	}
 }
 

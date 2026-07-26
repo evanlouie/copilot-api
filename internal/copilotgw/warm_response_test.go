@@ -38,7 +38,7 @@ func TestStopDisconnectsWarmSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !warm.isDisconnected() {
+	if !warm.Disconnected() {
 		t.Fatal("Stop left the warm SDK session connected")
 	}
 	if got := releases.Load(); got != 1 {
@@ -133,7 +133,7 @@ func TestWarmSessionDisconnectIsIdempotentUnderConcurrentStop(t *testing.T) {
 	if stopErr != nil {
 		t.Fatal(stopErr)
 	}
-	if !warm.isDisconnected() {
+	if !warm.Disconnected() {
 		t.Fatal("warm session survived a concurrent client disconnect and gateway stop")
 	}
 	if got := releases.Load(); got != 1 {

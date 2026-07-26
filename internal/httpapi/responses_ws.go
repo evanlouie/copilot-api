@@ -85,7 +85,10 @@ type responsesWebSocketState struct {
 	// state on personal machines.
 	latestID string
 	warm     *copilotgw.WarmResponseSession
-	wg       sync.WaitGroup
+	// closed records that the connection has been torn down. Once set, warm is
+	// permanently nil and replaceWarm refuses rather than stores.
+	closed bool
+	wg     sync.WaitGroup
 }
 
 func (s *responsesWebSocketState) markActivity() {
@@ -145,13 +148,32 @@ func (s *responsesWebSocketState) evict(id string) {
 	s.mu.Unlock()
 }
 
+// replaceWarm installs the connection's warm session, disconnecting whatever it
+// replaces.
+//
+// Once the state is closed it refuses instead: the incoming session is
+// disconnected and nothing is stored. A response.create still in flight when
+// the connection is torn down would otherwise park a live SDK session and its
+// two retention pins in state that has already been dropped, and nothing in
+// this package would ever disconnect it. responsesWebSocket also waits for
+// that work before closing the state, but refusing here is what makes the
+// invariant structural rather than a property of one call ordering. It is the
+// same refuse-and-disconnect shape copilotgw's warm session registry uses.
 func (s *responsesWebSocketState) replaceWarm(warm *copilotgw.WarmResponseSession) {
 	s.mu.Lock()
 	old := s.warm
-	s.warm = warm
+	closed := s.closed
+	if closed {
+		s.warm = nil
+	} else {
+		s.warm = warm
+	}
 	s.mu.Unlock()
 	if old != nil && old != warm {
 		old.Disconnect()
+	}
+	if closed && warm != nil {
+		warm.Disconnect()
 	}
 }
 
@@ -174,8 +196,26 @@ func (s *responsesWebSocketState) takeWarm(previousResponseID string) *copilotgw
 	return warm
 }
 
+// shutdown ends the connection's state at the end of responsesWebSocket. It
+// waits for in-flight response.create work before dropping what that work can
+// still install: the !generate branch ends in replaceWarm, and close is what
+// disconnects the session it installs. Closing first left such a session in
+// state nobody owned any more.
+func (s *responsesWebSocketState) shutdown() {
+	s.wait()
+	s.close()
+}
+
+// close drops the connection's warm session and refuses any later one. Callers
+// must wait for in-flight response.create work first: this is what tears down
+// the session that work may have installed.
 func (s *responsesWebSocketState) close() {
-	s.replaceWarm(nil)
+	s.mu.Lock()
+	s.closed = true
+	old := s.warm
+	s.warm = nil
+	s.mu.Unlock()
+	old.Disconnect()
 }
 
 func (s *responsesWebSocketState) wait() {
@@ -352,8 +392,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	closeWith(websocket.StatusNormalClosure, "")
-	state.close()
-	state.wait()
+	state.shutdown()
 }
 
 func watchResponsesWebSocketIdle(ctx context.Context, state *responsesWebSocketState, idle time.Duration, onIdle func()) {

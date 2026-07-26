@@ -530,7 +530,7 @@ func TestGatewayStopDisconnectsWarmSessionsItStillOwns(t *testing.T) {
 	if got := session.disconnectCount(); got == 0 {
 		t.Fatal("gateway shutdown left a warm SDK session connected")
 	}
-	if !warm.WarmSession.isDisconnected() {
+	if !warm.WarmSession.Disconnected() {
 		t.Fatal("gateway shutdown did not mark the warm session disconnected")
 	}
 }

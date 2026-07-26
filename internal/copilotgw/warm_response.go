@@ -47,9 +47,14 @@ func (w *WarmResponseSession) attachRegistry(registry *warmSessionRegistry) {
 	w.mu.Unlock()
 }
 
-// isDisconnected reports whether this session's SDK session and retention pins
+// Disconnected reports whether this session's SDK session and retention pins
 // have already been handed away or torn down.
-func (w *WarmResponseSession) isDisconnected() bool {
+//
+// It is exported because the HTTP layer owns a warm session's lifetime between
+// requests on a WebSocket connection, and its tests assert that a session
+// offered to connection state that is already closed is disconnected rather
+// than stored - which is not observable from outside this package otherwise.
+func (w *WarmResponseSession) Disconnected() bool {
 	if w == nil {
 		return true
 	}
