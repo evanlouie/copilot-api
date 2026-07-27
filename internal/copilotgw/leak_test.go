@@ -1,6 +1,7 @@
 package copilotgw
 
 import (
+	"os"
 	"testing"
 
 	"go.uber.org/goleak"
@@ -18,5 +19,16 @@ import (
 // legitimately outlives a test. An unexplained ignore is how leak detection
 // stops detecting leaks.
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	var opts []goleak.Option
+	if os.Getenv("COPILOT_API_LIVE_TESTS") == "1" {
+		// The Copilot SDK owns both goroutines and can leave them alive briefly
+		// after Client.Stop returns: one waits on the spawned CLI process and the
+		// other monitors that process. They are present only in live child-process
+		// sessions, so normal unit-test leak detection remains unfiltered.
+		opts = append(opts,
+			goleak.IgnoreCreatedBy("os/exec.(*Cmd).Start"),
+			goleak.IgnoreCreatedBy("github.com/github/copilot-sdk/go.(*Client).monitorProcess"),
+		)
+	}
+	goleak.VerifyTestMain(m, opts...)
 }
