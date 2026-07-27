@@ -7,7 +7,7 @@
 STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.7.0
 
 .DEFAULT_GOAL := ci
-.PHONY: ci go-ci deno-ci fmt fmt-check build vet test test-short lint \
+.PHONY: ci go-ci deno-ci fmt fmt-check build vet test test-short test-live lint \
         deno-fmt-check deno-check deno-test
 
 # Everything CI runs.
@@ -47,6 +47,12 @@ test:
 # `make test` before pushing.
 test-short:
 	go test ./... -count=1 -short
+
+# Exercises the real Copilot backend. The tests select suitable models from the
+# live catalog; COPILOT_API_LIVE_MODEL and COPILOT_API_LIVE_REASONING_MODEL may
+# pin advertised models when a specific provider path needs verification.
+test-live:
+	COPILOT_API_LIVE_TESTS=1 go test ./internal/copilotgw -race -count=1 -run '^TestLive'
 
 lint:
 	go run $(STATICCHECK) ./...
