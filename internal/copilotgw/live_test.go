@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,33 +17,18 @@ import (
 
 func TestLiveCopilotTextCompletion(t *testing.T) {
 	t.Parallel()
-	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
-		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
-	}
-	root := t.TempDir()
-	cfg := config.Config{
-		DataDir:        root + "/data",
-		StateDir:       root + "/state",
-		ConfigDir:      root + "/config",
-		ToolCallTTL:    time.Minute,
-		ModelsCacheTTL: time.Minute,
-		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
-	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
-	if err := store.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if err := gw.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = gw.Stop() }()
-	turn, err := gw.Chat(t.Context(), ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: "gpt-5", FinalUser: openai.ChatMessage{Role: "user", Content: openai.NewTextContent("Reply with OK only.")}})
+	gw := newLiveGateway(t)
+	model := liveModel(t, gw, "COPILOT_API_LIVE_MODEL", "basic chat completion", func(model Model) bool {
+		// The Copilot model catalog contains inference models only. A non-empty ID
+		// is therefore the complete capability requirement for this smoke test.
+		return strings.TrimSpace(model.ID) != ""
+	})
+	turn, err := gw.Chat(t.Context(), ChatRequest{OpenAIID: openai.NewID("chatcmpl_"), Model: model, FinalUser: openai.ChatMessage{Role: "user", Content: openai.NewTextContent("Reply with OK only.")}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("live text completion with model %q failed: %v", model, err)
 	}
 	if turn.Text == "" {
-		t.Fatal("empty live response")
+		t.Fatalf("live text completion with model %q returned an empty response", model)
 	}
 }
 
@@ -50,31 +38,8 @@ func TestLiveCopilotTextCompletion(t *testing.T) {
 // counterpart to the deterministic encoder ordering tests.
 func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 	t.Parallel()
-	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
-		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
-	}
-	model := os.Getenv("COPILOT_API_LIVE_REASONING_MODEL")
-	if model == "" {
-		model = "claude-sonnet-4.6"
-	}
-	root := t.TempDir()
-	cfg := config.Config{
-		DataDir:        root + "/data",
-		StateDir:       root + "/state",
-		ConfigDir:      root + "/config",
-		ToolCallTTL:    time.Minute,
-		ModelsCacheTTL: time.Minute,
-		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
-	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
-	if err := store.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if err := gw.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = gw.Stop() }()
+	gw := newLiveGateway(t)
+	model := liveReasoningModel(t, gw)
 
 	ch, err := gw.StreamChat(t.Context(), ChatRequest{
 		OpenAIID:        openai.NewID("chatcmpl_"),
@@ -83,7 +48,7 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 		FinalUser:       openai.ChatMessage{Role: "user", Content: openai.NewTextContent("Think step by step, then answer: what is 17 * 23?")},
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("start live reasoning stream with model %q: %v", model, err)
 	}
 	sawReasoning := false
 	sawContentBeforeReasoning := false
@@ -112,7 +77,7 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 				}
 			}
 		case "error":
-			t.Fatalf("stream error: %v", ev.Error)
+			t.Fatalf("live reasoning stream with model %q failed: %v", model, ev.Error)
 		}
 	}
 	if !gotResult {
@@ -134,31 +99,8 @@ func TestLiveCopilotReasoningStreamsBeforeContent(t *testing.T) {
 
 func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 	t.Parallel()
-	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
-		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
-	}
-	model := os.Getenv("COPILOT_API_LIVE_REASONING_MODEL")
-	if model == "" {
-		model = "claude-sonnet-4.6"
-	}
-	root := t.TempDir()
-	cfg := config.Config{
-		DataDir:        root + "/data",
-		StateDir:       root + "/state",
-		ConfigDir:      root + "/config",
-		ToolCallTTL:    time.Minute,
-		ModelsCacheTTL: time.Minute,
-		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
-	}
-	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
-	if err := store.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if err := gw.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = gw.Stop() }()
+	gw := newLiveGateway(t)
+	model := liveReasoningModel(t, gw)
 
 	tools := []openai.Tool{{
 		Type: "function",
@@ -176,7 +118,7 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 		Tools:           tools,
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("start live tool-call stream with model %q: %v", model, err)
 	}
 	var first *TurnResult
 	for ev := range ch {
@@ -184,7 +126,7 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 		case "result":
 			first = ev.Result
 		case "error":
-			t.Fatalf("first stream error: %v", ev.Error)
+			t.Fatalf("first live tool-call stream with model %q failed: %v", model, ev.Error)
 		}
 	}
 	if first == nil || len(first.ToolCalls) == 0 {
@@ -205,7 +147,7 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 		ReasoningEffort: "high",
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("continue live tool-call stream with model %q: %v", model, err)
 	}
 	var second *TurnResult
 	sawSecondReasoningDelta := false
@@ -218,7 +160,7 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 		case "result":
 			second = ev.Result
 		case "error":
-			t.Fatalf("continuation stream error: %v", ev.Error)
+			t.Fatalf("continuation live stream with model %q failed: %v", model, ev.Error)
 		}
 	}
 	if second == nil {
@@ -232,5 +174,117 @@ func TestLiveCopilotReasoningAfterToolContinuation(t *testing.T) {
 	}
 	if second.ReasoningOpaque == "" && second.ReasoningEncrypted == "" {
 		t.Fatalf("continuation reasoning lacked opaque/encrypted continuity fields: %#v", second)
+	}
+}
+
+func newLiveGateway(t *testing.T) *RealGateway {
+	t.Helper()
+	if os.Getenv("COPILOT_API_LIVE_TESTS") != "1" {
+		t.Skip("set COPILOT_API_LIVE_TESTS=1 to run live Copilot integration tests")
+	}
+	root := t.TempDir()
+	cfg := config.Config{
+		DataDir:        root + "/data",
+		StateDir:       root + "/state",
+		ConfigDir:      root + "/config",
+		ToolCallTTL:    time.Minute,
+		ModelsCacheTTL: time.Minute,
+		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
+	}
+	store := sessionstore.New(cfg.DataDir, cfg.StateDir)
+	if err := store.Ensure(); err != nil {
+		t.Fatalf("prepare live test state: %v", err)
+	}
+	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err := gw.Start(t.Context()); err != nil {
+		t.Fatalf("start live Copilot gateway (authenticate with GITHUB_TOKEN or a logged-in Copilot CLI): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := gw.Stop(); err != nil {
+			t.Errorf("stop live Copilot gateway: %v", err)
+		}
+	})
+	return gw
+}
+
+func liveReasoningModel(t *testing.T, gw *RealGateway) string {
+	t.Helper()
+	return liveModel(t, gw, "COPILOT_API_LIVE_REASONING_MODEL", "high reasoning effort", func(model Model) bool {
+		if strings.TrimSpace(model.ID) == "" || !model.SupportsReasoningEffort {
+			return false
+		}
+		return len(model.SupportedReasoningEfforts) == 0 || slices.Contains(model.SupportedReasoningEfforts, "high")
+	})
+}
+
+func liveModel(t *testing.T, gw *RealGateway, envName, capability string, eligible func(Model) bool) string {
+	t.Helper()
+	models, err := gw.ListModels(t.Context())
+	if err != nil {
+		t.Fatalf("list live Copilot models (catalog/backend failure): %v", err)
+	}
+	requested := strings.TrimSpace(os.Getenv(envName))
+	model, reason := chooseLiveModel(models, requested, eligible)
+	if model == "" {
+		t.Skipf("no live model available for %s: %s", capability, reason)
+	}
+	return model
+}
+
+func chooseLiveModel(models []Model, requested string, eligible func(Model) bool) (string, string) {
+	if requested != "" {
+		for _, model := range models {
+			if model.ID != requested {
+				continue
+			}
+			if eligible(model) {
+				return model.ID, ""
+			}
+			return "", "requested model " + requested + " is advertised but lacks the required capability"
+		}
+		return "", "requested model " + requested + " is not advertised; available models: " + liveModelIDs(models)
+	}
+	for _, model := range models {
+		if eligible(model) {
+			return model.ID, ""
+		}
+	}
+	return "", "catalog has no eligible model; available models: " + liveModelIDs(models)
+}
+
+func liveModelIDs(models []Model) string {
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		if id := strings.TrimSpace(model.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return "<none>"
+	}
+	return strings.Join(ids, ", ")
+}
+
+func TestChooseLiveModel(t *testing.T) {
+	t.Parallel()
+	models := []Model{
+		{ID: "plain"},
+		{ID: "reasoning", SupportsReasoningEffort: true, SupportedReasoningEfforts: []string{"low", "high"}},
+	}
+	reasoning := func(model Model) bool {
+		return model.SupportsReasoningEffort && slices.Contains(model.SupportedReasoningEfforts, "high")
+	}
+	if got, reason := chooseLiveModel(models, "reasoning", reasoning); got != "reasoning" || reason != "" {
+		t.Fatalf("requested eligible model = %q, %q; want reasoning, empty reason", got, reason)
+	}
+	if got, reason := chooseLiveModel(models, "plain", reasoning); got != "" || !strings.Contains(reason, "lacks the required capability") {
+		t.Fatalf("requested ineligible model = %q, %q; want capability rejection", got, reason)
+	}
+	if got, reason := chooseLiveModel(models, "missing", reasoning); got != "" || !strings.Contains(reason, "not advertised") {
+		t.Fatalf("missing requested model = %q, %q; want catalog rejection", got, reason)
+	}
+	if got, reason := chooseLiveModel(models, "", reasoning); got != "reasoning" || reason != "" {
+		t.Fatalf("automatic model = %q, %q; want reasoning, empty reason", got, reason)
 	}
 }
