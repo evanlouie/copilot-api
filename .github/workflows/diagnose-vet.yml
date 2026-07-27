@@ -1,0 +1,34 @@
+name: Diagnose vet
+
+on:
+  push:
+    branches:
+      - fix/issue-13-live-tests
+
+permissions:
+  contents: read
+
+jobs:
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Capture vet output
+        shell: bash
+        run: |
+          set +e
+          go vet ./... > vet.log 2>&1
+          status=$?
+          cat vet.log
+          echo "$status" > vet.status
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vet-diagnostics
+          path: |
+            vet.log
+            vet.status
