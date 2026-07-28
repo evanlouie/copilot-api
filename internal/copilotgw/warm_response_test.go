@@ -308,9 +308,9 @@ func TestWarmResponseSessionUseRejectsMismatchedToolChoiceScope(t *testing.T) {
 		"different forced tools": {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "function", Name: "get_weather"}},
 		"none then auto":         {warm: openai.ToolChoice{Kind: "none"}, req: openai.ToolChoice{Kind: "auto"}},
 		"same forced tool":       {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "function", Name: "lookup"}, reusing: true},
-		// An allow-list and a forced choice that leave the same single tool visible
-		// leave the same SDK session behind them.
-		"equivalent scopes": {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "allowed_tools", AllowedMode: "auto", Allowed: []string{"lookup"}}, reusing: true},
+		// A kind-specific forced scope and a name-only allow-list are not generally
+		// interchangeable: a valid mixed-kind catalog can narrow them differently.
+		"kind-specific versus name-only": {warm: openai.ToolChoice{Kind: "function", Name: "lookup"}, req: openai.ToolChoice{Kind: "allowed_tools", AllowedMode: "auto", Allowed: []string{"lookup"}}},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

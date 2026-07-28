@@ -1865,6 +1865,19 @@ func TestUnhonoredControlsAreLoggedAtDebug(t *testing.T) {
 			t.Fatalf("responses debug log missing %q: %s", want, buf.String())
 		}
 	}
+
+	buf.Reset()
+	ambiguous := `{"model":"gpt-5","input":"hi","tools":[{"type":"namespace","name":"a","tools":[{"name":"read","parameters":{"type":"object"}}]},{"type":"namespace","name":"b","tools":[{"name":"read","parameters":{"type":"object"}}]}],"tool_choice":{"type":"function","name":"read"}}`
+	w = httptest.NewRecorder()
+	responses.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(ambiguous)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ambiguous responses status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"bare forced tool_choice matches multiple tools", "a.read", "b.read"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("ambiguous forced-choice debug log missing %q: %s", want, buf.String())
+		}
+	}
 }
 
 // Structured output is not accepted-and-ignored: ignoring it would return prose

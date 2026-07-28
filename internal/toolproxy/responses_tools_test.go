@@ -261,17 +261,82 @@ func TestForcedToolChoiceForAnUnknownToolIsRejected(t *testing.T) {
 	}
 }
 
-// An allow-list matching nothing is a filter that permits nothing, not a client
-// error: a Responses catalog can still grow through tool_search, so the honest
-// outcome is the same withheld catalog tool_choice: "none" produces.
-func TestAllowedToolsMatchingNothingWithholdsTheCatalog(t *testing.T) {
+// Every allowed_tools entry names a tool the request claims to permit. Dropping
+// an unknown entry silently makes the effective catalog narrower than the
+// client wrote, so both wholly and partially unknown lists are client errors.
+func TestAllowedToolsNamingUnknownToolsAreRejected(t *testing.T) {
 	t.Parallel()
-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, openai.ToolScope{Only: []string{"not_installed_yet"}})
+	tools := []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}
+	for name, scope := range map[string]openai.ToolScope{
+		"all unknown":    {Only: []string{"not_installed_yet"}},
+		"partly unknown": {Only: []string{"lookup", "missing"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewResponseRequestTools(NewBroker(time.Minute), tools, scope)
+			var domain *apierr.Error
+			if !errors.As(err, &domain) || domain.Kind != apierr.KindInvalidInput || domain.Param != "tool_choice" {
+				t.Fatalf("error = %#v, want an invalid_request blaming tool_choice", err)
+			}
+			if !strings.Contains(domain.Message, scope.Only[len(scope.Only)-1]) {
+				t.Fatalf("message = %q, want the unknown tool named", domain.Message)
+			}
+		})
+	}
+}
+
+// Bare namespace-child names have historically matched every child with that
+// name. Preserve that compatible superset while the dotted spelling remains the
+// exact way to choose one child.
+func TestForcedBareNamespaceChildKeepsEveryMatch(t *testing.T) {
+	t.Parallel()
+	tools := []toolcatalog.NormalizedTool{
+		{Kind: toolcatalog.ToolKindNamespace, Name: "a", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "read"}}},
+		{Kind: toolcatalog.ToolKindNamespace, Name: "b", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "read"}}},
+	}
+	bare, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{Only: []string{"read"}, Forced: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := rt.AvailableTools(), []string{NoToolsSentinel}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("available tools = %#v, want %#v", got, want)
+	if len(bare.Tools()) != 2 {
+		t.Fatalf("bare forced choice exposed %#v, want both namespace matches", bare.Tools())
+	}
+	dotted, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{Only: []string{"a.read"}, Forced: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dotted.Tools()) != 1 || !strings.Contains(dotted.Tools()[0].Name, "a") {
+		t.Fatalf("dotted forced choice exposed %#v, want only a.read", dotted.Tools())
+	}
+}
+
+// A forced selector includes both a public name and a kind. Same-named tools of
+// other kinds must not survive catalog narrowing; the compatible bare-name
+// superset applies only to function children from multiple namespaces.
+func TestForcedToolChoiceMatchesRequestedKind(t *testing.T) {
+	t.Parallel()
+	tools := []ClientTool{
+		{SDKName: "a__read", ResponseKind: toolcatalog.ToolKindFunction, ResponseName: "read", Namespace: "a"},
+		{SDKName: "read_custom", ResponseKind: toolcatalog.ToolKindCustom, ResponseName: "read"},
+		{SDKName: "read_search", ResponseKind: toolcatalog.ToolKindToolSearch, ResponseName: "read"},
+	}
+	for _, tt := range []struct {
+		name string
+		kind toolcatalog.ResponsesToolKind
+	}{
+		{name: "function excludes custom and tool_search", kind: toolcatalog.ToolKindFunction},
+		{name: "custom excludes function and tool_search", kind: toolcatalog.ToolKindCustom},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := scopeClientTools(tools, openai.ToolScope{Only: []string{"read"}, Kind: string(tt.kind), Forced: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ResponseKind != tt.kind {
+				t.Fatalf("scoped tools = %#v, want only kind %q", got, tt.kind)
+			}
+		})
 	}
 }
 

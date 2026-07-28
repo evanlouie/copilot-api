@@ -732,23 +732,40 @@ func scopeClientTools(tools []ClientTool, scope openai.ToolScope) ([]ClientTool,
 	for _, name := range scope.Only {
 		allowed[name] = struct{}{}
 	}
+	matched := make(map[string]bool, len(scope.Only))
 	kept := make([]ClientTool, 0, len(tools))
 	for _, tool := range tools {
+		if scope.Forced && scope.Kind != "" && string(tool.ResponseKind) != scope.Kind {
+			continue
+		}
+		keep := false
 		for _, name := range clientToolChoiceNames(tool) {
 			if _, ok := allowed[name]; ok {
-				kept = append(kept, tool)
-				break
+				matched[name] = true
+				keep = true
 			}
 		}
+		if keep {
+			kept = append(kept, tool)
+		}
 	}
-	if scope.Forced && len(kept) == 0 {
-		// OpenAI rejects a forced choice for a tool the request did not declare,
-		// and so must this: narrowing to nothing would hand the model an empty
-		// catalog and no way at all to do what the client asked for. An
-		// allow-list is a filter by nature and gets no such treatment - a
-		// Responses catalog can still grow through tool_search, so a name that
-		// matches nothing yet is not necessarily a client mistake.
-		return nil, apierr.InvalidRequest(fmt.Sprintf("tool_choice names tool %q, which is not in this request's tool catalog", scope.Only[0]), "tool_choice")
+	missing := make([]string, 0, len(scope.Only))
+	for _, name := range scope.Only {
+		if !matched[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		if scope.Forced {
+			// OpenAI rejects a forced choice for a tool the request did not
+			// declare, and so must this: narrowing to nothing would hand the model
+			// an empty catalog and no way at all to do what the client asked for.
+			return nil, apierr.InvalidRequest(fmt.Sprintf("tool_choice names tool %q, which is not in this request's tool catalog", missing[0]), "tool_choice")
+		}
+		// Silently dropping an unknown allow-list entry withholds a tool the
+		// client explicitly permitted. Reject the whole malformed restriction
+		// instead of pretending the smaller catalog is what was requested.
+		return nil, apierr.InvalidRequest(fmt.Sprintf("allowed_tools names tools not in this request's tool catalog: %s", strings.Join(missing, ", ")), "tool_choice")
 	}
 	return kept, nil
 }

@@ -526,6 +526,10 @@ type ToolScope struct {
 	// Only is the set of client-facing tool names the catalog is narrowed to,
 	// sorted and deduplicated. It is empty when nothing is narrowed.
 	Only []string
+	// Kind records the requested kind for a forced function/custom choice. It is
+	// empty for other scopes and participates in equality because same-named
+	// tools of different kinds produce different narrowed catalogs.
+	Kind string
 	// Forced records that Only came from a choice naming a single tool the model
 	// is supposed to call. It changes how an unmatched name is treated - a forced
 	// choice for a tool that does not exist is a client error - but not the
@@ -539,7 +543,7 @@ func (c ToolChoice) Scope() ToolScope {
 	case "none":
 		return ToolScope{None: true}
 	case "function", "custom":
-		return ToolScope{Only: []string{c.Name}, Forced: true}
+		return ToolScope{Only: sortedUnique([]string{c.Name}), Kind: c.Kind, Forced: true}
 	case "allowed_tools":
 		// An allow-list that permits nothing is a request for no tools, which is
 		// what "none" already spells; reading it as "no restriction" would honour
@@ -558,7 +562,7 @@ func (c ToolChoice) Scope() ToolScope {
 // with one scope's catalog and cannot be reconfigured, may serve a request that
 // arrived with another.
 func (s ToolScope) Equal(other ToolScope) bool {
-	if s.None != other.None || len(s.Only) != len(other.Only) {
+	if s.None != other.None || s.Kind != other.Kind || len(s.Only) != len(other.Only) {
 		return false
 	}
 	for i, name := range s.Only {
@@ -596,14 +600,14 @@ func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 		Function struct {
 			Name string `json:"name"`
 		} `json:"function"`
-		Mode  string             `json:"mode"`
-		Tools []toolChoiceMember `json:"tools"`
+		Mode  string              `json:"mode"`
+		Tools *[]toolChoiceMember `json:"tools"`
 		// AllowedTools is the Chat Completions nesting of an allowed_tools choice;
 		// Responses puts mode and tools at the top level instead. Both spellings
 		// reach this proxy, exactly as they do for a forced tool name.
 		AllowedTools *struct {
-			Mode  string             `json:"mode"`
-			Tools []toolChoiceMember `json:"tools"`
+			Mode  string              `json:"mode"`
+			Tools *[]toolChoiceMember `json:"tools"`
 		} `json:"allowed_tools"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -626,8 +630,14 @@ func ParseToolChoice(raw json.RawMessage) (ToolChoice, error) {
 		if obj.AllowedTools != nil {
 			mode, members = obj.AllowedTools.Mode, obj.AllowedTools.Tools
 		}
-		allowed := make([]string, 0, len(members))
-		for _, member := range members {
+		if mode != "auto" && mode != "required" {
+			return ToolChoice{}, apierr.InvalidRequest("allowed_tools mode must be auto or required", "tool_choice")
+		}
+		if members == nil || len(*members) == 0 {
+			return ToolChoice{}, apierr.InvalidRequest("allowed_tools.tools must contain at least one tool", "tool_choice")
+		}
+		allowed := make([]string, 0, len(*members))
+		for _, member := range *members {
 			name := member.name()
 			if name == "" {
 				// The allow-list is enforced by narrowing the catalog to these names,

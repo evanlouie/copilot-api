@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 
 	"github.com/evanlouie/copilot-api/internal/apierr"
 	"github.com/evanlouie/copilot-api/internal/copilotgw"
@@ -119,6 +122,40 @@ func (s *Server) logUnhonoredResponseControls(ctx context.Context, req *openai.R
 	s.logUnhonoredToolChoice(ctx, "responses", req.ToolChoice)
 }
 
+// logAmbiguousForcedResponseToolChoice makes the one deliberately compatible
+// forced-choice ambiguity visible. A bare name may match the same child under
+// more than one namespace; catalog filtering keeps that superset so existing
+// clients do not break, while the dotted spelling selects exactly one child.
+func (s *Server) logAmbiguousForcedResponseToolChoice(ctx context.Context, raw json.RawMessage, tools []toolcatalog.NormalizedTool) {
+	if !s.debugEnabled(ctx) {
+		return
+	}
+	choice, err := openai.ParseToolChoice(raw)
+	if err != nil || !choice.ForcesTool() || choice.Name == "" || strings.Contains(choice.Name, ".") {
+		return
+	}
+	matches := make([]string, 0, 2)
+	for _, tool := range tools {
+		switch tool.Kind {
+		case toolcatalog.ToolKindNamespace:
+			for _, child := range tool.Children {
+				if child.Name == choice.Name {
+					matches = append(matches, tool.Name+"."+child.Name)
+				}
+			}
+		case toolcatalog.ToolKindFunction, toolcatalog.ToolKindCustom, toolcatalog.ToolKindToolSearch:
+			if tool.Name == choice.Name {
+				matches = append(matches, tool.Name)
+			}
+		}
+	}
+	if len(matches) <= 1 {
+		return
+	}
+	sort.Strings(matches)
+	s.debugStream(ctx, "bare forced tool_choice matches multiple tools; retaining every match for compatibility", "surface", "responses", "tool_choice", choice.Kind, "tool_choice_name", choice.Name, "matches", matches)
+}
+
 func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.ResponsesRequest, responseID string) (copilotgw.ResponseRequest, preparedResponseLogFields, error) {
 	selector, err := openai.ParseModelSelector(req.Model)
 	if err != nil {
@@ -143,6 +180,7 @@ func (s *Server) prepareResponseRequest(ctx context.Context, req *openai.Respons
 	if err != nil {
 		return copilotgw.ResponseRequest{}, preparedResponseLogFields{}, err
 	}
+	s.logAmbiguousForcedResponseToolChoice(ctx, req.ToolChoice, normalizedTools)
 	if s.cfg.LogContent {
 		s.logResponsesToolSummary(ctx, normalizedTools)
 	}
