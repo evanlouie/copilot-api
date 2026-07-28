@@ -26,20 +26,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
+          # Track the toolchain declared by the module instead of pinning twice.
           go-version-file: go.mod
+          # Built-in module + build cache keyed off go.sum. Free, so use it.
           cache: true
-
-      - name: Archive checkout
-        run: git archive --format=tar.gz --output=source-checkout.tar.gz HEAD
-
-      - name: Upload source checkout
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-checkout
-          path: source-checkout.tar.gz
 
       - name: Check formatting (gofmt)
         run: |
+          # `gofmt -l` exits 0 even when it lists unformatted files, so the
+          # output has to be inspected explicitly for this to gate anything.
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
             echo "::error::Files are not gofmt-formatted. Run 'make fmt' to fix:"
@@ -52,22 +47,16 @@ jobs:
         run: go build ./...
 
       - name: Vet
-        shell: bash
-        run: |
-          set -o pipefail
-          go vet ./... 2>&1 | tee vet.log
-
-      - name: Upload vet diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vet-diagnostics
-          path: vet.log
+        run: go vet ./...
 
       - name: Test (race)
+        # -count=1 defeats the test cache so this is a real run every time.
+        # Credentialed live tests stay skipped: COPILOT_API_LIVE_TESTS is unset.
         run: go test ./... -race -count=1
 
       - name: Lint (staticcheck)
+        # Pinned rather than @latest so a new staticcheck release cannot turn a
+        # green branch red. Bump deliberately.
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 
   docker:
@@ -88,6 +77,9 @@ jobs:
           tags: copilot-api:ci
 
       - name: Verify state directories are scaffolded for uid 65532
+        # Load-bearing: when a compose mountpoint is absent from the image,
+        # Docker initializes the fresh named volume as root:root and the
+        # uid-65532 process cannot chmod it.
         run: |
           docker create --name probe --entrypoint /nonexistent copilot-api:ci
           docker export probe | tar -tv > layout.txt
@@ -106,6 +98,13 @@ jobs:
           exit $status
 
       - name: Smoke test the container
+        # No Copilot credentials here, so this deliberately stops at the
+        # "Not authenticated" models.list call. Everything before that point is
+        # what previously made the image unstartable: the volumes must be
+        # claimable by uid 65532, and the embedded CLI must extract, dynamically
+        # link, exec, and complete a JSON-RPC handshake. The named volumes do
+        # not exist yet, which is deliberate: a fresh volume is the case that
+        # used to break.
         run: |
           timeout 300 docker run --rm \
             --read-only --tmpfs /tmp:size=64m,mode=1777 \
@@ -127,6 +126,10 @@ jobs:
           echo "Embedded CLI started and handshook; stopped at authentication as expected."
 
       - name: Verify the non-loopback bind requires COPILOT_API_KEY
+        # The image sets COPILOT_API_ADDR=0.0.0.0:8080, so this guard is the only
+        # thing keeping the default posture authenticated. No --read-only here:
+        # serve() creates the config dir before it checks the key, so a
+        # read-only rootfs would fail earlier and never exercise the guard.
         run: |
           if docker run --rm copilot-api:ci serve > guard.log 2>&1; then
             cat guard.log
@@ -152,7 +155,12 @@ jobs:
         run: deno fmt --check
 
       - name: Type check
+        # The `test:ai-sdk` task only type-checks mcp_server.ts; checking the
+        # whole directory also covers ai_sdk_integration_test.ts.
         run: deno check tests/ai-sdk-deno
 
       - name: Test
+        # COPILOT_API_AI_SDK_DENO_TESTS is intentionally unset, so the 22
+        # credentialed cases skip. This still proves the suite compiles, that
+        # deno.lock resolves, and that the gate itself works.
         run: deno task test:ai-sdk
