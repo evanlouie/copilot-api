@@ -735,6 +735,9 @@ func scopeClientTools(tools []ClientTool, scope openai.ToolScope) ([]ClientTool,
 	matched := make(map[string]bool, len(scope.Only))
 	kept := make([]ClientTool, 0, len(tools))
 	for _, tool := range tools {
+		if scope.Forced && scope.Kind != "" && string(tool.ResponseKind) != scope.Kind {
+			continue
+		}
 		keep := false
 		for _, name := range clientToolChoiceNames(tool) {
 			if _, ok := allowed[name]; ok {

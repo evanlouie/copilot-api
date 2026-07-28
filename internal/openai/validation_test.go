@@ -223,13 +223,13 @@ func TestToolChoiceScope(t *testing.T) {
 		`"auto"`:                                 {},
 		`"required"`:                             {},
 		`"none"`:                                 {None: true},
-		`{"type":"function","name":"lookup"}`:    {Only: []string{"lookup"}, Forced: true},
-		`{"type":"custom","name":"apply_patch"}`: {Only: []string{"apply_patch"}, Forced: true},
+		`{"type":"function","name":"lookup"}`:    {Only: []string{"lookup"}, Kind: "function", Forced: true},
+		`{"type":"custom","name":"apply_patch"}`: {Only: []string{"apply_patch"}, Kind: "custom", Forced: true},
 		`{"type":"allowed_tools","mode":"auto","tools":[{"name":"b"},{"name":"a"},{"name":"b"}]}`: {Only: []string{"a", "b"}},
 	}
 	for raw, want := range tests {
 		got := mustParseToolChoice(t, raw).Scope()
-		if got.None != want.None || got.Forced != want.Forced || !slices.Equal(got.Only, want.Only) {
+		if got.None != want.None || got.Kind != want.Kind || got.Forced != want.Forced || !slices.Equal(got.Only, want.Only) {
 			t.Fatalf("ParseToolChoice(%s).Scope() = %#v, want %#v", raw, got, want)
 		}
 	}
@@ -248,9 +248,12 @@ func TestToolScopeEqualComparesCatalogsNotSpellings(t *testing.T) {
 	}
 	forced := mustParseToolChoice(t, `{"type":"function","name":"lookup"}`).Scope()
 	allowed := mustParseToolChoice(t, `{"type":"allowed_tools","mode":"auto","tools":[{"name":"lookup"}]}`).Scope()
-	if !forced.Equal(allowed) {
-		// Forced is about how an unmatched name is treated, not about the catalog.
-		t.Fatal("choices narrowing to the same single tool must compare equal")
+	if forced.Equal(allowed) {
+		t.Fatal("a kind-specific forced choice must not reuse a name-only allowed_tools catalog")
+	}
+	custom := mustParseToolChoice(t, `{"type":"custom","name":"lookup"}`).Scope()
+	if forced.Equal(custom) {
+		t.Fatal("same-named forced choices of different kinds must not compare equal")
 	}
 	if forced.Equal(mustParseToolChoice(t, `{"type":"function","name":"other"}`).Scope()) {
 		t.Fatal("forced choices for different tools must not compare equal")

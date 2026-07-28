@@ -310,6 +310,36 @@ func TestForcedBareNamespaceChildKeepsEveryMatch(t *testing.T) {
 	}
 }
 
+// A forced selector includes both a public name and a kind. Same-named tools of
+// other kinds must not survive catalog narrowing; the compatible bare-name
+// superset applies only to function children from multiple namespaces.
+func TestForcedToolChoiceMatchesRequestedKind(t *testing.T) {
+	t.Parallel()
+	tools := []ClientTool{
+		{SDKName: "a__read", ResponseKind: toolcatalog.ToolKindFunction, ResponseName: "read", Namespace: "a"},
+		{SDKName: "read_custom", ResponseKind: toolcatalog.ToolKindCustom, ResponseName: "read"},
+		{SDKName: "read_search", ResponseKind: toolcatalog.ToolKindToolSearch, ResponseName: "read"},
+	}
+	for _, tt := range []struct {
+		name string
+		kind toolcatalog.ResponsesToolKind
+	}{
+		{name: "function excludes custom and tool_search", kind: toolcatalog.ToolKindFunction},
+		{name: "custom excludes function and tool_search", kind: toolcatalog.ToolKindCustom},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := scopeClientTools(tools, openai.ToolScope{Only: []string{"read"}, Kind: string(tt.kind), Forced: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ResponseKind != tt.kind {
+				t.Fatalf("scoped tools = %#v, want only kind %q", got, tt.kind)
+			}
+		})
+	}
+}
+
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
