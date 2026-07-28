@@ -1,0 +1,171 @@
+diff --git a/internal/copilotgw/strict_enforcement_test.go b/internal/copilotgw/strict_enforcement_test.go
+index bdbbd7e..be30d2a 100644
+--- a/internal/copilotgw/strict_enforcement_test.go
++++ b/internal/copilotgw/strict_enforcement_test.go
+@@ -90,6 +90,37 @@ func TestFailClosedStrictEnforcementRefusesTheRequest(t *testing.T) {
+ 	}
+ }
+ 
++// A tuple-form items schema compiles in jsonschema-go but enforces nothing.
++// Detection has to feed the same fail-closed path as an outright compile
++// failure, otherwise the operator's policy can still be bypassed silently.
++func TestFailClosedStrictEnforcementRefusesTupleItems(t *testing.T) {
++	t.Parallel()
++	runtime := &fakeSDKRuntime{respond: answerWith("answer")}
++	gw := newSDKTestGateway(t, runtime)
++	gw.cfg.StrictEnforcement = config.StrictEnforcementFailClosed
++
++	req := chatRequest("gpt-test", "hi")
++	req.Tools = []openai.Tool{{
++		Type: "function",
++		Function: openai.FunctionTool{
++			Name:       "lookup",
++			Parameters: json.RawMessage(`{"type":"array","items":[{"type":"string"}]}`),
++			Strict:     boolPtr(true),
++		},
++	}}
++	_, err := gw.Chat(context.Background(), req)
++	if err == nil {
++		t.Fatal("fail-closed accepted tuple-form items as an enforceable strict contract")
++	}
++	var apiErr *apierr.Error
++	if !errors.As(err, &apiErr) || apiErr.Kind != apierr.KindInvalidInput {
++		t.Fatalf("error = %#v, want an invalid-request error", err)
++	}
++	if !strings.Contains(apiErr.Message, "tuple-form `items`") {
++		t.Fatalf("message = %q, want the silently ignored keyword named", apiErr.Message)
++	}
++}
++
+ // A strict tool whose schema does compile is enforced rather than refused, so
+ // fail-closed narrows what is served without rejecting strict outright.
+ func TestFailClosedStrictEnforcementAcceptsAnEnforceableTool(t *testing.T) {
+diff --git a/internal/toolproxy/strict_tools_test.go b/internal/toolproxy/strict_tools_test.go
+index f4b625d..2ff8da0 100644
+--- a/internal/toolproxy/strict_tools_test.go
++++ b/internal/toolproxy/strict_tools_test.go
+@@ -89,6 +89,55 @@ func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
+ 	}
+ }
+ 
++// jsonschema-go compiles Draft-04/07 tuple-form items but applies none of the
++// positional schemas. A strict request must therefore be reported as
++// unenforceable instead of looking successfully constrained.
++func TestTupleItemsStrictSchemaIsAcceptedAndReported(t *testing.T) {
++	t.Parallel()
++	for _, tc := range []struct {
++		name   string
++		schema string
++	}{
++		{name: "top level", schema: `{"type":"array","items":[{"type":"string"}]}`},
++		{name: "nested through properties", schema: `{"type":"object","properties":{"pair":{"type":"array","items":[{"type":"string"},{"type":"number"}]}}}`},
++		{name: "nested through composition", schema: `{"allOf":[{"type":"object","properties":{"pair":{"type":"array","items":[{"type":"string"}]}}}]}`},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", tc.schema, boolPtr(true))}, openai.ToolScope{})
++			if err != nil {
++				t.Fatalf("tuple-form items should follow best-effort strict handling: %v", err)
++			}
++			if len(rt.UnenforceableStrict) != 1 {
++				t.Fatalf("UnenforceableStrict = %#v, want the tuple schema reported", rt.UnenforceableStrict)
++			}
++			if reason := rt.UnenforceableStrict[0].Reason; !strings.Contains(reason, "tuple-form `items`") || !strings.Contains(reason, "does not enforce") {
++				t.Fatalf("reason = %q, want the silent under-enforcement named", reason)
++			}
++			// Best-effort still offers the tool, but with no validator attached. The
++			// important invariant is that this is explicitly reported rather than
++			// represented as an enforced strict contract.
++			if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(`[123]`)); err != nil {
++				t.Fatalf("best-effort tuple schema unexpectedly installed a validator: %v", err)
++			}
++		})
++	}
++}
++
++// Tuple detection follows schema positions only. Client data may contain an
++// object named items without declaring the tuple keyword.
++func TestTupleItemsDetectionLeavesSchemaDataAlone(t *testing.T) {
++	t.Parallel()
++	const schema = `{"type":"object","properties":{"config":{"type":"object","default":{"items":[{"type":"string"}]}}}}`
++	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", schema, boolPtr(true))}, openai.ToolScope{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(rt.UnenforceableStrict) != 0 {
++		t.Fatalf("UnenforceableStrict = %#v, want data under default ignored", rt.UnenforceableStrict)
++	}
++}
++
+ // The external $ref stays unresolved on purpose, so pin that the reason is a
+ // compile failure and not a fetch. Handing a loader to Resolve would turn any
+ // client that can name a URL into an SSRF primitive against this process's
+diff --git a/internal/toolproxy/toolproxy.go b/internal/toolproxy/toolproxy.go
+index f5e7b4a..8abb078 100644
+--- a/internal/toolproxy/toolproxy.go
++++ b/internal/toolproxy/toolproxy.go
+@@ -105,6 +105,14 @@ func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, string) {
+ 	if t.ResponseKind == toolcatalog.ToolKindCustom {
+ 		return nil, "a custom tool declares its input with `format`, which cannot be schema-constrained"
+ 	}
++	// jsonschema-go accepts Draft-04/07 tuple-form items but silently ignores
++	// every positional schema. Treating that as enforced is worse than a compile
++	// failure because neither the best-effort warning nor fail-closed policy sees
++	// it. Detect it before compilation so it follows the same honest reporting
++	// path as every other strict contract this proxy cannot apply.
++	if hasTupleItems(t.Parameters) {
++		return nil, "its parameters use tuple-form `items`, which this proxy's JSON Schema validator accepts but does not enforce"
++	}
+ 	resolved, unenforceable := compileStrictSchema(t.Parameters)
+ 	if unenforceable == "" {
+ 		return resolved, ""
+@@ -122,6 +130,49 @@ func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, string) {
+ 	return nil, unenforceable
+ }
+ 
++// hasTupleItems reports whether a schema uses the Draft-04/07 array form of
++// `items` anywhere a subschema may appear. jsonschema-go accepts that form but
++// does not enforce its positional schemas, so a strict contract containing one
++// must be reported as unenforceable rather than silently compiled as a no-op.
++//
++// The walk follows schema-bearing keywords only. Objects under default, const,
++// enum and examples are client data, not schemas, and must not trigger this
++// guard merely because they contain an `items` member.
++func hasTupleItems(schema map[string]any) bool {
++	if _, tuple := schema["items"].([]any); tuple {
++		return true
++	}
++	for _, keyword := range subschemaKeywords {
++		child, ok := schema[keyword].(map[string]any)
++		if ok && hasTupleItems(child) {
++			return true
++		}
++	}
++	for _, keyword := range subschemaListKeywords {
++		children, ok := schema[keyword].([]any)
++		if !ok {
++			continue
++		}
++		for _, child := range children {
++			if sub, ok := child.(map[string]any); ok && hasTupleItems(sub) {
++				return true
++			}
++		}
++	}
++	for _, keyword := range subschemaMapKeywords {
++		children, ok := schema[keyword].(map[string]any)
++		if !ok {
++			continue
++		}
++		for _, child := range children {
++			if sub, ok := child.(map[string]any); ok && hasTupleItems(sub) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
+ // compileStrictSchema compiles declared parameters into a validator, returning
+ // the reason it could not rather than an error, because every caller reports it
+ // as prose alongside the tool name.
