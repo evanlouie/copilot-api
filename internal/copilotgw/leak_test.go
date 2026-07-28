@@ -22,12 +22,12 @@ func TestMain(m *testing.M) {
 	var opts []goleak.Option
 	if os.Getenv("COPILOT_API_LIVE_TESTS") == "1" {
 		// The Copilot SDK owns both goroutines and can leave them alive briefly
-		// after Client.Stop returns: one waits on the spawned CLI process and the
-		// other monitors that process. They are present only in live child-process
+		// after Client.Stop returns: os/exec's command-context watcher and the
+		// SDK's process waiter. They are present only in live child-process
 		// sessions, so normal unit-test leak detection remains unfiltered.
 		opts = append(opts,
-			goleak.IgnoreCreatedBy("os/exec.(*Cmd).Start"),
-			goleak.IgnoreCreatedBy("github.com/github/copilot-sdk/go.(*Client).monitorProcess"),
+			goleak.IgnoreAnyFunction("os/exec.(*Cmd).watchCtx"),
+			goleak.IgnoreAnyFunction("github.com/github/copilot-sdk/go.(*Client).monitorProcess.func1"),
 		)
 	}
 	goleak.VerifyTestMain(m, opts...)
