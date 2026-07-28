@@ -42,7 +42,7 @@ func newLiveGateway(t *testing.T) *RealGateway {
 			// The SDK can report a process-reap timeout after the request itself has
 			// completed. Keep that teardown signal distinct from request/backend
 			// failures; goleak still catches every non-SDK-owned goroutine below.
-			t.Logf("live Copilot SDK/runtime teardown reported an error: %v", err)
+			t.Errorf("live Copilot SDK/runtime teardown reported an error: %v", err)
 		}
 	})
 	return gw
