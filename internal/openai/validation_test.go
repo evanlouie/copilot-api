@@ -90,7 +90,13 @@ func TestValidateToolChoice(t *testing.T) {
 		{name: "required", choice: `"required"`, accepted: true},
 		{name: "chat forced function", choice: `{"type":"function","function":{"name":"lookup"}}`, accepted: true},
 		{name: "responses forced function", choice: `{"type":"function","name":"lookup"}`, accepted: true},
-		{name: "allowed tools", choice: `{"mode":"auto","type":"allowed_tools","tools":[]}`, accepted: true},
+		{name: "allowed tools", choice: `{"mode":"auto","type":"allowed_tools","tools":[{"name":"lookup"}]}`, accepted: true},
+		{name: "allowed tools missing mode", choice: `{"type":"allowed_tools","tools":[{"name":"lookup"}]}`, accepted: false},
+		{name: "allowed tools invalid mode", choice: `{"type":"allowed_tools","mode":"requird","tools":[{"name":"lookup"}]}`, accepted: false},
+		{name: "allowed tools missing tools", choice: `{"type":"allowed_tools","mode":"auto"}`, accepted: false},
+		{name: "allowed tools null tools", choice: `{"type":"allowed_tools","mode":"auto","tools":null}`, accepted: false},
+		{name: "allowed tools empty tools", choice: `{"type":"allowed_tools","mode":"auto","tools":[]}`, accepted: false},
+		{name: "chat allowed tools missing nested tools", choice: `{"type":"allowed_tools","allowed_tools":{"mode":"auto"}}`, accepted: false},
 		{name: "unknown mode", choice: `"any"`, accepted: false},
 		{name: "unknown type", choice: `{"type":"web_search"}`, accepted: false},
 		{name: "forced function without a name", choice: `{"type":"function"}`, accepted: false},
@@ -149,6 +155,32 @@ func mustParseToolChoice(t *testing.T, raw string) ToolChoice {
 	return choice
 }
 
+// The shape and enum are part of OpenAI's grammar. Guessing that an absent
+// list means "none", or treating a typo as auto, silently removes tools the
+// client may have intended to expose.
+func TestParseToolChoiceRejectsMalformedAllowedTools(t *testing.T) {
+	t.Parallel()
+	for name, raw := range map[string]string{
+		"missing mode":         `{"type":"allowed_tools","tools":[{"name":"lookup"}]}`,
+		"unknown mode":         `{"type":"allowed_tools","mode":"Required","tools":[{"name":"lookup"}]}`,
+		"missing tools":        `{"type":"allowed_tools","mode":"auto"}`,
+		"null tools":           `{"type":"allowed_tools","mode":"auto","tools":null}`,
+		"empty tools":          `{"type":"allowed_tools","mode":"auto","tools":[]}`,
+		"nested missing tools": `{"type":"allowed_tools","allowed_tools":{"mode":"required"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseToolChoice(json.RawMessage(raw))
+			if err == nil {
+				t.Fatalf("ParseToolChoice(%s) accepted malformed allowed_tools", raw)
+			}
+			if !strings.Contains(err.Error(), "allowed_tools") {
+				t.Fatalf("error = %v, want it to name allowed_tools", err)
+			}
+		})
+	}
+}
+
 // The allow-list is what makes allowed_tools enforceable by catalog filtering,
 // so it has to survive parsing from both the Chat Completions nesting and the
 // flat Responses one.
@@ -194,9 +226,6 @@ func TestToolChoiceScope(t *testing.T) {
 		`{"type":"function","name":"lookup"}`:    {Only: []string{"lookup"}, Forced: true},
 		`{"type":"custom","name":"apply_patch"}`: {Only: []string{"apply_patch"}, Forced: true},
 		`{"type":"allowed_tools","mode":"auto","tools":[{"name":"b"},{"name":"a"},{"name":"b"}]}`: {Only: []string{"a", "b"}},
-		// An allow-list permitting nothing is a request for no tools, not for no
-		// restriction.
-		`{"type":"allowed_tools","mode":"auto","tools":[]}`: {None: true},
 	}
 	for raw, want := range tests {
 		got := mustParseToolChoice(t, raw).Scope()
