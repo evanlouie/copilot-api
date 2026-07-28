@@ -1,6 +1,7 @@
 package copilotgw
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -196,7 +197,11 @@ func newLiveGateway(t *testing.T) *RealGateway {
 		t.Fatalf("prepare live test state: %v", err)
 	}
 	gw := NewReal(cfg, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if err := gw.Start(t.Context()); err != nil {
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
+	// Cleanup callbacks run in LIFO order. Register cancellation first so Stop
+	// gets a live SDK process and can complete its graceful RPC shutdown.
+	t.Cleanup(cancel)
+	if err := gw.Start(lifecycleCtx); err != nil {
 		t.Fatalf("start live Copilot gateway (authenticate with GITHUB_TOKEN or a logged-in Copilot CLI): %v", err)
 	}
 	t.Cleanup(func() {
