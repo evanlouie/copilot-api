@@ -1,0 +1,122 @@
+itting nothing is a request for no tools, not for no
+-		// restriction.
+-		`{"type":"allowed_tools","mode":"auto","tools":[]}`: {None: true},
+ 	}
+ 	for raw, want := range tests {
+ 		got := mustParseToolChoice(t, raw).Scope()
+diff --git a/internal/toolproxy/responses_tools_test.go b/internal/toolproxy/responses_tools_test.go
+index 730af1a..5938904 100644
+--- a/internal/toolproxy/responses_tools_test.go
++++ b/internal/toolproxy/responses_tools_test.go
+@@ -261,17 +261,52 @@ func TestForcedToolChoiceForAnUnknownToolIsRejected(t *testing.T) {
+ 	}
+ }
+ 
+-// An allow-list matching nothing is a filter that permits nothing, not a client
+-// error: a Responses catalog can still grow through tool_search, so the honest
+-// outcome is the same withheld catalog tool_choice: "none" produces.
+-func TestAllowedToolsMatchingNothingWithholdsTheCatalog(t *testing.T) {
++// Every allowed_tools entry names a tool the request claims to permit. Dropping
++// an unknown entry silently makes the effective catalog narrower than the
++// client wrote, so both wholly and partially unknown lists are client errors.
++func TestAllowedToolsNamingUnknownToolsAreRejected(t *testing.T) {
+ 	t.Parallel()
+-	rt, err := NewResponseRequestTools(NewBroker(time.Minute), []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}, openai.ToolScope{Only: []string{"not_installed_yet"}})
++	tools := []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "lookup"}}
++	for name, scope := range map[string]openai.ToolScope{
++		"all unknown":    {Only: []string{"not_installed_yet"}},
++		"partly unknown": {Only: []string{"lookup", "missing"}},
++	} {
++		t.Run(name, func(t *testing.T) {
++			t.Parallel()
++			_, err := NewResponseRequestTools(NewBroker(time.Minute), tools, scope)
++			var domain *apierr.Error
++			if !errors.As(err, &domain) || domain.Kind != apierr.KindInvalidInput || domain.Param != "tool_choice" {
++				t.Fatalf("error = %#v, want an invalid_request blaming tool_choice", err)
++			}
++			if !strings.Contains(domain.Message, scope.Only[len(scope.Only)-1]) {
++				t.Fatalf("message = %q, want the unknown tool named", domain.Message)
++			}
++		})
++	}
++}
++
++// Bare namespace-child names have historically matched every child with that
++// name. Preserve that compatible superset while the dotted spelling remains the
++// exact way to choose one child.
++func TestForcedBareNamespaceChildKeepsEveryMatch(t *testing.T) {
++	t.Parallel()
++	tools := []toolcatalog.NormalizedTool{
++		{Kind: toolcatalog.ToolKindNamespace, Name: "a", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "read"}}},
++		{Kind: toolcatalog.ToolKindNamespace, Name: "b", Children: []toolcatalog.NormalizedTool{{Kind: toolcatalog.ToolKindFunction, Name: "read"}}},
++	}
++	bare, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{Only: []string{"read"}, Forced: true})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if got, want := rt.AvailableTools(), []string{NoToolsSentinel}; !reflect.DeepEqual(got, want) {
+-		t.Fatalf("available tools = %#v, want %#v", got, want)
++	if len(bare.Tools()) != 2 {
++		t.Fatalf("bare forced choice exposed %#v, want both namespace matches", bare.Tools())
++	}
++	dotted, err := NewResponseRequestTools(NewBroker(time.Minute), tools, openai.ToolScope{Only: []string{"a.read"}, Forced: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(dotted.Tools()) != 1 || !strings.Contains(dotted.Tools()[0].Name, "a") {
++		t.Fatalf("dotted forced choice exposed %#v, want only a.read", dotted.Tools())
+ 	}
+ }
+ 
+diff --git a/internal/toolproxy/toolproxy.go b/internal/toolproxy/toolproxy.go
+index f5e7b4a..3bb0b38 100644
+--- a/internal/toolproxy/toolproxy.go
++++ b/internal/toolproxy/toolproxy.go
+@@ -732,23 +732,37 @@ func scopeClientTools(tools []ClientTool, scope openai.ToolScope) ([]ClientTool,
+ 	for _, name := range scope.Only {
+ 		allowed[name] = struct{}{}
+ 	}
++	matched := make(map[string]bool, len(scope.Only))
+ 	kept := make([]ClientTool, 0, len(tools))
+ 	for _, tool := range tools {
++		keep := false
+ 		for _, name := range clientToolChoiceNames(tool) {
+ 			if _, ok := allowed[name]; ok {
+-				kept = append(kept, tool)
+-				break
++				matched[name] = true
++				keep = true
+ 			}
+ 		}
++		if keep {
++			kept = append(kept, tool)
++		}
++	}
++	missing := make([]string, 0, len(scope.Only))
++	for _, name := range scope.Only {
++		if !matched[name] {
++			missing = append(missing, name)
++		}
+ 	}
+-	if scope.Forced && len(kept) == 0 {
+-		// OpenAI rejects a forced choice for a tool the request did not declare,
+-		// and so must this: narrowing to nothing would hand the model an empty
+-		// catalog and no way at all to do what the client asked for. An
+-		// allow-list is a filter by nature and gets no such treatment - a
+-		// Responses catalog can still grow through tool_search, so a name that
+-		// matches nothing yet is not necessarily a client mistake.
+-		return nil, apierr.InvalidRequest(fmt.Sprintf("tool_choice names tool %q, which is not in this request's tool catalog", scope.Only[0]), "tool_choice")
++	if len(missing) > 0 {
++		if scope.Forced {
++			// OpenAI rejects a forced choice for a tool the request did not
++			// declare, and so must this: narrowing to nothing would hand the model
++			// an empty catalog and no way at all to do what the client asked for.
++			return nil, apierr.InvalidRequest(fmt.Sprintf("tool_choice names tool %q, which is not in this request's tool catalog", missing[0]), "tool_choice")
++		}
++		// Silently dropping an unknown allow-list entry withholds a tool the
++		// client explicitly permitted. Reject the whole malformed restriction
++		// instead of pretending the smaller catalog is what was requested.
++		return nil, apierr.InvalidRequest(fmt.Sprintf("allowed_tools names tools not in this request's tool catalog: %s", strings.Join(missing, ", ")), "tool_choice")
+ 	}
+ 	return kept, nil
+ }
