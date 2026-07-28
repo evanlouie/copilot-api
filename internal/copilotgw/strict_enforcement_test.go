@@ -90,6 +90,37 @@ func TestFailClosedStrictEnforcementRefusesTheRequest(t *testing.T) {
 	}
 }
 
+// A tuple-form items schema compiles in jsonschema-go but enforces nothing.
+// Detection has to feed the same fail-closed path as an outright compile
+// failure, otherwise the operator's policy can still be bypassed silently.
+func TestFailClosedStrictEnforcementRefusesTupleItems(t *testing.T) {
+	t.Parallel()
+	runtime := &fakeSDKRuntime{respond: answerWith("answer")}
+	gw := newSDKTestGateway(t, runtime)
+	gw.cfg.StrictEnforcement = config.StrictEnforcementFailClosed
+
+	req := chatRequest("gpt-test", "hi")
+	req.Tools = []openai.Tool{{
+		Type: "function",
+		Function: openai.FunctionTool{
+			Name:       "lookup",
+			Parameters: json.RawMessage(`{"type":"array","items":[{"type":"string"}]}`),
+			Strict:     boolPtr(true),
+		},
+	}}
+	_, err := gw.Chat(context.Background(), req)
+	if err == nil {
+		t.Fatal("fail-closed accepted tuple-form items as an enforceable strict contract")
+	}
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) || apiErr.Kind != apierr.KindInvalidInput {
+		t.Fatalf("error = %#v, want an invalid-request error", err)
+	}
+	if !strings.Contains(apiErr.Message, "tuple-form `items`") {
+		t.Fatalf("message = %q, want the silently ignored keyword named", apiErr.Message)
+	}
+}
+
 // A strict tool whose schema does compile is enforced rather than refused, so
 // fail-closed narrows what is served without rejecting strict outright.
 func TestFailClosedStrictEnforcementAcceptsAnEnforceableTool(t *testing.T) {

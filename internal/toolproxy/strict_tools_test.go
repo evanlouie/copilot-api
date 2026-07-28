@@ -89,6 +89,55 @@ func TestStrictToolWithUnusableSchemaIsAcceptedAndReported(t *testing.T) {
 	}
 }
 
+// jsonschema-go compiles Draft-04/07 tuple-form items but applies none of the
+// positional schemas. A strict request must therefore be reported as
+// unenforceable instead of looking successfully constrained.
+func TestTupleItemsStrictSchemaIsAcceptedAndReported(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		schema string
+	}{
+		{name: "top level", schema: `{"type":"array","items":[{"type":"string"}]}`},
+		{name: "nested through properties", schema: `{"type":"object","properties":{"pair":{"type":"array","items":[{"type":"string"},{"type":"number"}]}}}`},
+		{name: "nested through composition", schema: `{"allOf":[{"type":"object","properties":{"pair":{"type":"array","items":[{"type":"string"}]}}}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", tc.schema, boolPtr(true))}, openai.ToolScope{})
+			if err != nil {
+				t.Fatalf("tuple-form items should follow best-effort strict handling: %v", err)
+			}
+			if len(rt.UnenforceableStrict) != 1 {
+				t.Fatalf("UnenforceableStrict = %#v, want the tuple schema reported", rt.UnenforceableStrict)
+			}
+			if reason := rt.UnenforceableStrict[0].Reason; !strings.Contains(reason, "tuple-form `items`") || !strings.Contains(reason, "does not enforce") {
+				t.Fatalf("reason = %q, want the silent under-enforcement named", reason)
+			}
+			// Best-effort still offers the tool, but with no validator attached. The
+			// important invariant is that this is explicitly reported rather than
+			// represented as an enforced strict contract.
+			if err := validateStrictArguments(rt.client["lookup"], json.RawMessage(`[123]`)); err != nil {
+				t.Fatalf("best-effort tuple schema unexpectedly installed a validator: %v", err)
+			}
+		})
+	}
+}
+
+// Tuple detection follows schema positions only. Client data may contain an
+// object named items without declaring the tuple keyword.
+func TestTupleItemsDetectionLeavesSchemaDataAlone(t *testing.T) {
+	t.Parallel()
+	const schema = `{"type":"object","properties":{"config":{"type":"object","default":{"items":[{"type":"string"}]}}}}`
+	rt, err := NewRequestTools(NewBroker(time.Minute), []openai.Tool{strictChatTool(t, "lookup", schema, boolPtr(true))}, openai.ToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.UnenforceableStrict) != 0 {
+		t.Fatalf("UnenforceableStrict = %#v, want data under default ignored", rt.UnenforceableStrict)
+	}
+}
+
 // The external $ref stays unresolved on purpose, so pin that the reason is a
 // compile failure and not a fetch. Handing a loader to Resolve would turn any
 // client that can name a URL into an SSRF primitive against this process's
