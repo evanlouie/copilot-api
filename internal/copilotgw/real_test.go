@@ -301,6 +301,22 @@ func TestRealClientOptionsUseV1ModeEmpty(t *testing.T) {
 	}
 }
 
+// TestRealClientOptionsLogLevel pins the CLI log level to configuration.
+//
+// The default must stay empty so the SDK omits --log-level: Copilot CLI
+// 1.0.76-x exits 1 silently at startup for the canonical levels
+// (none/error/warning/info/debug), which takes the whole gateway down
+// (github/copilot-cli#4285).
+func TestRealClientOptionsLogLevel(t *testing.T) {
+	t.Parallel()
+	if got := newRealClientOptions(config.Config{}).LogLevel; got != "" {
+		t.Fatalf("default LogLevel = %q, want empty so --log-level is omitted", got)
+	}
+	if got := newRealClientOptions(config.Config{CLILogLevel: "all"}).LogLevel; got != "all" {
+		t.Fatalf("LogLevel = %q, want %q", got, "all")
+	}
+}
+
 func TestSessionConfigBuildersApplyV1Hardening(t *testing.T) {
 	t.Parallel()
 	rt, err := toolproxy.NewRequestTools(toolproxy.NewBroker(time.Minute), nil, openai.ToolScope{})

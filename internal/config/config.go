@@ -81,6 +81,7 @@ type Config struct {
 	APIKey                 string
 	GitHubToken            string
 	CLIPath                string
+	CLILogLevel            string
 	DefaultReasoningEffort string
 	ModelsCacheTTL         time.Duration
 	ToolCallTTL            time.Duration
@@ -110,6 +111,7 @@ func Load() (Config, error) {
 		APIKey:                 os.Getenv("COPILOT_API_KEY"),
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 		CLIPath:                os.Getenv("COPILOT_CLI_PATH"),
+		CLILogLevel:            strings.ToLower(strings.TrimSpace(os.Getenv("COPILOT_CLI_LOG_LEVEL"))),
 		DefaultReasoningEffort: strings.ToLower(strings.TrimSpace(os.Getenv("COPILOT_DEFAULT_REASONING_EFFORT"))),
 		ModelsCacheTTL:         DefaultModelsCacheTTL,
 		ToolCallTTL:            DefaultToolCallTTL,

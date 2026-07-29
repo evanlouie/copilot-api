@@ -57,9 +57,15 @@ func newRealClientOptions(cfg config.Config) *copilot.ClientOptions {
 		Connection:       copilot.StdioConnection{Path: cfg.CLIPath},
 		WorkingDirectory: cfg.StateDir,
 		BaseDirectory:    cfg.ConfigDir,
-		LogLevel:         "error",
-		GitHubToken:      cfg.GitHubToken,
-		Mode:             copilot.ModeEmpty,
+		// LogLevel is left unset by default. The SDK only forwards --log-level
+		// when this is non-empty, and Copilot CLI 1.0.76-1 through 1.0.76-4 exit 1
+		// silently at startup for the canonical levels (none/error/warning/info/
+		// debug), which takes the whole gateway down
+		// (github/copilot-cli#4285). Operators can opt back in (or use the
+		// still-working "all"/"default" aliases) via COPILOT_CLI_LOG_LEVEL.
+		LogLevel:    cfg.CLILogLevel,
+		GitHubToken: cfg.GitHubToken,
+		Mode:        copilot.ModeEmpty,
 		SessionFS: &copilot.SessionFSConfig{
 			InitialWorkingDirectory: "/",
 			SessionStatePath:        sessionfs.SessionStatePath,
