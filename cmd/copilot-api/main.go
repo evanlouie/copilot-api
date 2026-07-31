@@ -340,5 +340,5 @@ func usage() {
   copilot-api prune [--dry-run]
   copilot-api healthcheck
 
-Environment configuration is documented in README.md.`)
+Environment configuration is documented in README.adoc.`)
 }
