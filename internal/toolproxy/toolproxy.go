@@ -105,6 +105,14 @@ func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, string) {
 	if t.ResponseKind == toolcatalog.ToolKindCustom {
 		return nil, "a custom tool declares its input with `format`, which cannot be schema-constrained"
 	}
+	// jsonschema-go accepts Draft-04/07 tuple-form items but silently ignores
+	// every positional schema. Treating that as enforced is worse than a compile
+	// failure because neither the best-effort warning nor fail-closed policy sees
+	// it. Detect it before compilation so it follows the same honest reporting
+	// path as every other strict contract this proxy cannot apply.
+	if hasTupleItems(t.Parameters) {
+		return nil, "its parameters use tuple-form `items`, which this proxy's JSON Schema validator accepts but does not enforce"
+	}
 	resolved, unenforceable := compileStrictSchema(t.Parameters)
 	if unenforceable == "" {
 		return resolved, ""
@@ -120,6 +128,49 @@ func (t ClientTool) resolveStrictSchema() (*jsonschema.Resolved, string) {
 	// Reported as the original failure, not the retry's: the first attempt is the
 	// one that describes what the client actually sent.
 	return nil, unenforceable
+}
+
+// hasTupleItems reports whether a schema uses the Draft-04/07 array form of
+// `items` anywhere a subschema may appear. jsonschema-go accepts that form but
+// does not enforce its positional schemas, so a strict contract containing one
+// must be reported as unenforceable rather than silently compiled as a no-op.
+//
+// The walk follows schema-bearing keywords only. Objects under default, const,
+// enum and examples are client data, not schemas, and must not trigger this
+// guard merely because they contain an `items` member.
+func hasTupleItems(schema map[string]any) bool {
+	if _, tuple := schema["items"].([]any); tuple {
+		return true
+	}
+	for _, keyword := range subschemaKeywords {
+		child, ok := schema[keyword].(map[string]any)
+		if ok && hasTupleItems(child) {
+			return true
+		}
+	}
+	for _, keyword := range subschemaListKeywords {
+		children, ok := schema[keyword].([]any)
+		if !ok {
+			continue
+		}
+		for _, child := range children {
+			if sub, ok := child.(map[string]any); ok && hasTupleItems(sub) {
+				return true
+			}
+		}
+	}
+	for _, keyword := range subschemaMapKeywords {
+		children, ok := schema[keyword].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, child := range children {
+			if sub, ok := child.(map[string]any); ok && hasTupleItems(sub) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // compileStrictSchema compiles declared parameters into a validator, returning
