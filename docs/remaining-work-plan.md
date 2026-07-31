@@ -1,26 +1,25 @@
 # Review Follow-Up: Completion Record
 
-This document began life as a forward-looking resolution plan for the 24
-findings that survived the first round of code-review fixes
-(`002cfc9..f33fbd4`). Those findings have since been executed: **35 commits on
-`evlouie/code-review-fixes` (`e9520e2..0fc27a8`)** closed Workstreams A, B, C, D
-and E in full. Workstream F was re-evaluated and **declined**, which the plan
-itself explicitly invited.
+This document was a plan to correct the 24 findings that stayed open after the
+first cycle of code-review fixes (`002cfc9..f33fbd4`). The team then did that
+work: **35 commits on `evlouie/code-review-fixes` (`e9520e2..0fc27a8`)** closed
+Workstreams A, B, C, D and E completely. The team examined Workstream F again
+and **declined** it. The plan asked for this examination.
 
-It is now a **completion record**: each item maps to the commit that resolved
-it, the measured evidence that resolution produced, and — where the plan was
-wrong — the correction the executing work forced. What genuinely remains is
-collected in one place, in [Residual backlog](#residual-backlog).
+The document is now a **completion record**. Each item shows the commit that
+closed it, and the measured evidence that the commit produced. Where the plan
+was incorrect, the item also shows the correction that the work made necessary.
+The [Residual backlog](#residual-backlog) collects the work that remains.
 
-**Scope reminder, unchanged:** backwards compatibility with this proxy's own
-past behaviour is explicitly a non-goal. Matching the real OpenAI API and the
-target functionality is the only compatibility constraint that matters.
+**The scope does not change.** Compatibility with the past behavior of this
+proxy is not a goal. The only compatibility limit is the real OpenAI API and the
+target functionality.
 
 ---
 
 ## Contents
 
-- [The headline outcome](#the-headline-outcome)
+- [The main outcome](#the-main-outcome)
 - [Three corrections to the plan](#three-corrections-to-the-plan)
 - [Prioritisation framework](#prioritisation-framework)
 - [Sequencing — what shipped](#sequencing--what-shipped)
@@ -37,139 +36,146 @@ target functionality is the only compatibility constraint that matters.
 
 ---
 
-## The headline outcome
+## The main outcome
 
-The plan opened by claiming nothing remaining was in the P0 "wedges or kills the
-process" class. That claim was wrong, and the work that disproved it is the
-single most valuable thing this cycle produced.
+The plan said that no remaining item was in the P0 class. The P0 class contains
+a defect that blocks or kills the process. That statement was incorrect. The
+work that showed the error is the most valuable result of this cycle.
 
 > [!CAUTION]
-> **D2 found a real P0 livelock, fixed in `41a06db`.** A Responses WebSocket
-> client that vanished _without_ a close handshake — a dropped network, a killed
-> client, anything yielding a RST rather than a close frame — left the
-> connection's handler goroutine spinning at full speed **for the life of the
-> process**.
+> **D2 found a true P0 livelock. `41a06db` corrects it.** A Responses WebSocket
+> client can stop _without_ a close handshake. A lost network or a killed client
+> does this, and so does any condition that gives a RST in place of a close
+> frame. The handler goroutine of the connection then ran at full speed **for
+> the full life of the process**.
 >
-> `wsjson.Read` failed, but with none of the errors the loop treated as
-> terminal: `coder/websocket` had already closed the connection, so the error
-> was `net.ErrClosed` rather than a `CloseError`, and `connCtx` was still live
-> because nothing had torn the connection down. `net/http` does not cancel a
-> hijacked request's context either. The loop wrote an error frame (which also
-> failed instantly) and read again, forever.
+> `wsjson.Read` failed, but it gave no error that the loop accepted as terminal.
+> `coder/websocket` closed the connection before this point, thus the error was
+> `net.ErrClosed` and not a `CloseError`. `connCtx` was still active, because
+> nothing stopped the connection. `net/http` also does not cancel the context of
+> a hijacked request. The loop wrote an error frame, which also failed
+> immediately, and then read again. This continued without end.
 >
-> The handler never returned, so it never reached `state.close`/`state.wait`:
-> the connection's **warm SDK session stayed connected and its `sessionstore`
-> retention pins stayed held**, on top of burning a core per dead client. A
-> single `-count=1` run of `internal/httpapi` left **three** of these behind,
-> all at the same site, still present after 55 s of retries.
+> The handler never returned, thus it never got to `state.close` or
+> `state.wait`. The **warm SDK session of the connection stayed connected, and
+> its `sessionstore` retention pins stayed held**. Each dead client also used
+> one CPU core fully. One `-count=1` run of `internal/httpapi` left **three** of
+> these goroutines. All three were at the same code position, and all three were
+> still present after 55 s of retries.
 
-This is the ordinary case, not an exotic one. Clients die without saying goodbye
-all the time.
+This is the usual case, and not a rare one. Clients stop frequently without a
+close handshake.
 
 > [!IMPORTANT]
-> This vindicates the plan's own claim that D4/D2 were the highest-leverage
-> items in the document. Adding `go.uber.org/goleak` to one package found, in
-> **one test run**, a process-lifetime bug that had survived a full manual code
-> review and the entire prior fix cycle. Leak detection is not a hygiene chore;
-> it is the only tool here that observes what the code does after the assertions
-> pass.
+> This result agrees with the claim of the plan. The plan said that D4 and D2
+> gave the largest result for the effort. The addition of `go.uber.org/goleak`
+> to one package found a bug in **one test run**. The bug stayed for the full
+> life of the process. A complete manual code review and the full previous fix
+> cycle did not find it. Leak detection is not a small task of hygiene. It is
+> the only tool here that looks at the behavior of the code after the
+> assertions pass.
 
 ---
 
 ## Three corrections to the plan
 
-Three items were prescribed wrongly. The executing work caught each, and each is
-recorded here as a correction rather than quietly dropped, because in every case
-the plan's version was plausible and would have been implemented as written.
+Three items had incorrect instructions in the plan. The work found each error.
+This document records each error as a correction, and does not remove it. In
+every case the version of the plan looked correct. A person would have written
+the code as the plan said.
 
 ### B2 — the premise was false
 
 > [!WARNING]
-> The plan claimed `len([]rune(s))` allocates `4×len(s)` bytes that are
-> immediately discarded — "~800 KB per 200 KB response". **It does not.** The Go
-> compiler rewrites `len([]rune(s))` into a rune count, and the two spellings
-> measure identically:
+> The plan said that `len([]rune(s))` allocates `4×len(s)` bytes and then
+> discards them immediately. The plan gave the figure "about 800 KB for each 200
+> KB response". **This is not correct.** The Go compiler changes
+> `len([]rune(s))` into a count of the runes. The two forms measure the same:
 >
 > ```
 > BenchmarkRuneSliceLen-10        138471 ns/op   1685.00 MB/s   0 B/op   0 allocs/op
 > BenchmarkRuneCountInString-10   138252 ns/op   1687.67 MB/s   0 B/op   0 allocs/op
 > ```
 >
-> There was no hidden 800 KB. The real cost, which `8451210` removed, was an
-> unconditional **O(n) rune scan** of every final assistant message, reasoning
-> block and turn text, plus **854 B / 5 allocs of `[]any` attribute slices per
-> turn event, at `info` level** — because Go evaluates arguments before the
-> call, so the level check inside `r.debug` bought nothing. Gating the three
-> sites behind the `debugEnabled` flag the loop already computes: **139061 ns/op
-> → 0.32 ns/op, 854 B → 0 B, 5 allocs → 0 allocs** with debug off.
-> `utf8.RuneCountInString` was kept as the clearer spelling, not as the fix.
+> There was no hidden 800 KB. `8451210` removed the true cost. The true cost was
+> an **O(n) scan of the runes** of every final assistant message, reasoning
+> block and turn text. The code did this scan always. The code also made **854 B
+> and 5 allocations of `[]any` attribute slices for each turn event, at the
+> `info` level**. Go evaluates the arguments before the call, thus the check of
+> the level inside `r.debug` gave no advantage. The fix puts the three code
+> positions behind the `debugEnabled` flag that the loop calculates already.
+> With debug off: **139061 ns/op → 0.32 ns/op, 854 B → 0 B, 5 allocs → 0
+> allocs**. The code keeps `utf8.RuneCountInString` because it is clearer, and
+> not because it is the fix.
 
 ### C2 — the prescribed fix was unsafe
 
 > [!WARNING]
 > The plan said: _"Swap the order: `cancel()` first, then `conn.Close(...)`."_
-> With `coder/websocket` v1.8.15 that severs the TCP connection and races the
-> close frame, because the library installs a `context.AfterFunc` on the read
-> context that calls `Conn.close`.[^wsclose]
+> With `coder/websocket` v1.8.15 this cuts the TCP connection, and it races the
+> close frame. The library installs a `context.AfterFunc` on the read context,
+> and that function calls `Conn.close`.[^wsclose]
 >
-> **Measured:** the naive swap turned `TestServerShutdownClosesActiveWebSockets`
-> from a graceful `StatusGoingAway` close into an **abnormal closure 4 times out
-> of 10**.
+> **Measured:** the simple swap changed
+> `TestServerShutdownClosesActiveWebSockets`. The test gave a controlled
+> `StatusGoingAway` close before the swap. After the swap it gave an **abnormal
+> close 4 times out of 10**.
 >
-> `0747461` split the two roles instead. `connCtx` is the **work** context and
-> is cancelled first; the read loop reads with the connection's **parent**
-> context and is woken by `conn.Close`, with `connCtx.Err()` telling it that a
-> failed read is our own teardown rather than a client fault. The graceful close
-> frame is preserved and a new test pins it. (That teardown surfaces as
-> `net.ErrClosed` — the same error class as the P0 livelock above, which is not
-> a coincidence.)
+> `0747461` divided the two roles in place of the swap. `connCtx` is the
+> **work** context, and the code cancels it first. The read loop reads with the
+> **parent** context of the connection, and `conn.Close` wakes it.
+> `connCtx.Err()` tells the loop that a failed read comes from our own shutdown,
+> and not from a fault of the client. The controlled close frame stays, and a
+> new test holds this behavior. That shutdown shows as `net.ErrClosed`. This is
+> the same class of error as the P0 livelock above, which is not an accident.
 
 ### C6 — the prescribed error shape was wrong
 
 > [!WARNING]
-> The plan implied `"type": "rate_limit_error"`. **That is Anthropic's
-> vocabulary and appears nowhere in OpenAI's.** OpenAI puts the exhausted
-> _dimension_ in `type` — `"requests"` or `"tokens"` — and
-> `"rate_limit_exceeded"` in `code`.[^ratelimit] The Copilot SDK throttles
-> requests rather than a token budget, so `8f824a0` emits `type: "requests"`,
-> and `internal/httpapi/errors.go` carries a comment saying why so it cannot
-> drift back.
+> The plan showed `"type": "rate_limit_error"`. **That name comes from
+> Anthropic. OpenAI does not use it.** OpenAI puts the _dimension_ that the
+> client used fully in `type`, as `"requests"` or `"tokens"`. OpenAI puts
+> `"rate_limit_exceeded"` in `code`.[^ratelimit] The Copilot SDK limits the rate
+> of the requests, and not a budget of tokens. Thus `8f824a0` writes
+> `type: "requests"`. `internal/httpapi/errors.go` has a comment that gives the
+> reason, thus the code cannot go back to the incorrect name.
 
 ---
 
 ## Prioritisation framework
 
-Retained because the [Residual backlog](#residual-backlog) is sized with it.
-Items were ranked by a single question: **what does the user lose if this is
-never fixed?**
+This section stays, because the [Residual backlog](#residual-backlog) uses it
+for the sizes. One question gives the order of the items: **what does the user
+lose if nobody corrects this?**
 
-| Class                           | Meaning                                                         | Response                 |
-| ------------------------------- | --------------------------------------------------------------- | ------------------------ |
-| **Silent wrong data**           | The client receives or stores something incorrect with no error | Fix first, always        |
-| **Cross-request contamination** | One request can affect another                                  | Fix first, always        |
-| **Resource growth**             | Unbounded goroutines, memory, or disk under normal use          | Fix in the same cycle    |
-| **Wasted work**                 | Correct, but pays a cost proportional to load                   | Batch into one perf pass |
-| **Ergonomics**                  | Correct and cheap, but confusing or awkward                     | Opportunistic            |
+| Class                           | Meaning                                                      | Response                 |
+| ------------------------------- | ------------------------------------------------------------ | ------------------------ |
+| **Silent wrong data**           | The client gets or stores incorrect data, and sees no error  | Fix first, always        |
+| **Cross-request contamination** | One request can affect another                               | Fix first, always        |
+| **Resource growth**             | Goroutines, memory or disk grow without a limit in usual use | Fix in the same cycle    |
+| **Wasted work**                 | Correct, but the cost increases with the load                | Group into one perf pass |
+| **Ergonomics**                  | Correct and cheap, but not clear or not convenient           | When convenient          |
 
 ### Effort sizing
 
-Sizes describe **scope and blast radius**, not duration — they are deliberately
-not calendar estimates, since the right pace depends on who picks the work up.
+The sizes give the **scope and the effect on the other code**. They do not give
+a duration. They are not calendar estimates, because the correct speed depends
+on the person who does the work.
 
-| Size   | Meaning                                                                                                                                                    |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **XS** | One-line or one-expression change. No new test needed beyond an assertion                                                                                  |
-| **S**  | Single function or file. Localised, one focused regression test                                                                                            |
-| **M**  | Several files within one package, or a change that crosses one package boundary. Needs a small test group and a deliberate look at neighbouring invariants |
-| **L**  | Crosses multiple packages, or changes a shared type/interface. Needs new test infrastructure and a staged rollout across commits                           |
+| Size   | Meaning                                                                                                                                                 |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **XS** | A change of one line or one expression. No new test is necessary, only an assertion                                                                     |
+| **S**  | One function or one file. The change is local, with one regression test                                                                                 |
+| **M**  | More files in one package, or a change that crosses one package boundary. It needs a small group of tests and a careful look at the adjacent invariants |
+| **L**  | It crosses more than one package, or changes a shared type or interface. It needs new test infrastructure and a release in stages across commits        |
 
 ---
 
 ## Sequencing — what shipped
 
-Phases 1–5 all shipped. Phase 6's hard prerequisite (the D4 SDK seam) shipped
-too, which is what made a real decision on Phase 6 possible rather than a
-deferral.
+Phases 1 to 5 all shipped. The necessary prerequisite of Phase 6 (the D4 SDK
+seam) also shipped. This made a true decision on Phase 6 possible, in place of a
+delay.
 
 ```mermaid
 flowchart TD
@@ -212,235 +218,248 @@ flowchart TD
 | 2     | Performance         | M      | 6       | Shipped, every fix measured                                    |
 | 3     | Test infrastructure | L      | 10      | Shipped; found the P0 livelock                                 |
 | 4     | Transport polish    | M      | 8       | Shipped; C2 and C6 corrected                                   |
-| 5     | Surface reduction   | S      | 4       | Shipped; 2 env vars deleted, 2 behaviours added                |
+| 5     | Surface reduction   | S      | 4       | Shipped; 2 env vars deleted, 2 behaviors added                |
 | 6     | Chat adapter        | L      | 0       | **Declined** — see [Workstream F](#workstream-f--the-decision) |
 
 ---
 
 ## Workstream A — Correctness & data integrity
 
-| ID     | Commit(s)            | Outcome                                                                                                                                                                                                                                                                                                                                                                                    |
-| ------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **A1** | `99f760a`            | Suppression is now purely an edge concern. `responseParams.suppressReasoning` and `ResponseRequest.SuppressReasoning` are deleted; the gateway always builds the complete response. `internal/httpapi` resolves the policy once per request and applies `filterResponseReasoning` at the single stream funnel, and `GET /v1/responses/{id}` filters the stored record **on read**.         |
-| **A2** | `7842784`            | `ensureCall` always mints `"call_" + uuid.NewString()`. The model's id is kept on `Call.SDKID` and indexed in a new **per-batch** `Batch.bySDKID`, so colliding model ids can no longer reach across requests in either direction.                                                                                                                                                         |
-| **A3** | `0eb98d1`, `bec6806` | `warmSessionRegistry` sits alongside `active`/`pending` with the same close-then-drain contract; `use` and `Disconnect` both deregister. Register-after-close is **rejected**, not absorbed, so a shutdown is visible on the wire rather than hidden behind a `WarmResponseResult` whose session is dead. The warm-input question was then decided explicitly rather than documented away. |
-| **A4** | `6c2d1c3`            | Counters became plain `int64` with no `omitempty` on both `Usage` and `ResponseUsage`; the Responses details objects became non-pointer values. Optionality moved up one level and stays there. `usageFromSDK` returns `nil` unless the SDK reported at least one token count, and otherwise fills all three.                                                                              |
-| **A5** | `4e5076f`, `680ed71` | A trailing `:suffix` is a reasoning effort **only** when it names a canonical effort; anything else stays on the model id. The canonical enum moved to `internal/openai/reasoning_effort.go` as the single ordered set and `copilotgw` dropped its duplicate rank table and normalizer. Explicit `reasoning_effort` and `reasoning.effort` are now validated against it.                   |
+| ID     | Commit(s)            | Outcome                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A1** | `99f760a`            | Suppression is now only a task of the edge. The code deletes `responseParams.suppressReasoning` and `ResponseRequest.SuppressReasoning`. The gateway always builds the complete response. `internal/httpapi` finds the policy one time for each request and applies `filterResponseReasoning` at the one stream funnel. `GET /v1/responses/{id}` filters the stored record **when it reads it**. |
+| **A2** | `7842784`            | `ensureCall` always makes `"call_" + uuid.NewString()`. The code keeps the id of the model on `Call.SDKID`, and indexes it in a new `Batch.bySDKID` **for each batch**. Equal model ids can no longer go from one request to another request, in either direction.                                                                                                                               |
+| **A3** | `0eb98d1`, `bec6806` | `warmSessionRegistry` is adjacent to `active` and `pending`, with the same contract: close, then drain. `use` and `Disconnect` both deregister. A registration after a close is **rejected**, and not absorbed. Thus a shutdown is visible to the client, and not hidden behind a `WarmResponseResult` with a dead session. The team then made a clear decision about the warm input.            |
+| **A4** | `6c2d1c3`            | The counters became simple `int64` values with no `omitempty`, on `Usage` and on `ResponseUsage`. The details objects of Responses became values and not pointers. The option to be absent moved up one level, and stays there. `usageFromSDK` returns `nil` if the SDK reported no token count. If the SDK reported one count or more, the function fills all three.                            |
+| **A5** | `4e5076f`, `680ed71` | A final `:suffix` is a reasoning effort **only** when it gives a canonical effort. All other text stays part of the model id. The canonical enum moved to `internal/openai/reasoning_effort.go`, as the one ordered set. `copilotgw` removed its second rank table and its normalizer. The code now checks an explicit `reasoning_effort` and `reasoning.effort` against the enum.               |
 
-**A1's regression was real, and the plan's diagnosis of it was right.** The test
-failed against the parent commit with the stored record having lost its
-reasoning item entirely — `f6dcb69` had made a single filtered object flow to
-both the wire and the store, exactly as the plan's `[!WARNING]` predicted.
+**The regression of A1 was true, and the plan found the cause correctly.** The
+test failed against the parent commit. The stored record lost its reasoning item
+completely. `f6dcb69` sent one filtered object to the client and to the store.
+The `[!WARNING]` of the plan gave exactly this result.
 
-**A2's consequence was demonstrated, not asserted.** Against the pre-fix tree,
-both concurrent requests published `tool_call_id: "call_1"`; with that first
-assertion relaxed so the consequence was visible, request A's `tool_call_id`
-resolved to **request B's batch**.
+**The team showed the consequence of A2, and did not only state it.** In the
+tree before the fix, the two concurrent requests both published
+`tool_call_id: "call_1"`. The team made that first assertion less strict, to
+make the consequence visible. The `tool_call_id` of request A then pointed to
+**the batch of request B**.
 
-**A3's second half was a judgement call, made deliberately.** `bec6806` chose to
-consume the persisted input on resume rather than document the loss: losing
-input a client was told was accepted is a correctness bug, not a best-effort
-optimisation, and the data was already on disk. The crux is that "delivered" and
-"buffered" input cannot be inferred apart, so a durable
-`ResponseRecord.InputPending` marker was added (default `false` = already
-delivered, so v0–2 records migrate into v3 unchanged). It is replayed on exactly
-one path: the branch where the previous record's own SDK session resumed
-successfully. Two limits are documented at `pendingInputPrompt` — only text
-survives, and the flag is not cleared once consumed.
+**The second part of A3 was a decision of judgement, and the team made it with
+care.** `bec6806` uses the stored input on a resume. It does not only record the
+loss in the documentation. The loss of input that the client was told was
+accepted is a correctness defect. It is not an optimisation that tries its best.
+The data was on the disk already. The main difficulty is that the code cannot
+tell "delivered" input from "buffered" input. Thus the team added a durable
+`ResponseRecord.InputPending` marker. The default value `false` means "delivered
+already", thus records of v0 to v2 move to v3 with no change. The code replays
+the input on one path only: the branch where the SDK session of the previous
+record resumed correctly. Two limits are in the documentation at
+`pendingInputPrompt`. Only text stays, and the code does not clear the flag
+after it uses the input.
 
 > [!NOTE]
-> A4 and `bec6806` both changed the persisted record format, and the golden
-> tests failed as designed. A4's `goldenResponseRecordJSON` was byte-for-byte
-> unchanged because its record already sets every usage member; a new
-> `goldenSparseUsageRecordJSON` was added to pin the sparse case the
-> fully-populated golden could never catch on its own. That is the golden doing
-> its job in both directions.
+> A4 and `bec6806` both changed the format of the stored record. The golden
+> tests failed, as their design intends. The bytes of `goldenResponseRecordJSON`
+> in A4 did not change, because its record sets every member of the usage
+> already. The team added a new `goldenSparseUsageRecordJSON`. It holds the
+> sparse case, which the fully-populated golden alone can never find. The golden
+> thus operates correctly in the two directions.
 
-A5's cost is stated on the function: a model-specific effort outside the enum
-can no longer be spelled as a suffix. That is the intended trade — an
-unrecognised token is now a name, not a control. A hypothetical real model named
-`foo:low` would be unreachable, and the resolution order is documented rather
-than left ambiguous.
+The cost of A5 is written at the function. An effort for one model that is not
+in the enum can no longer be a suffix. This is the intended exchange. An unknown
+token is now a name, and not a control. A true model with the name `foo:low`
+would not be accessible. The documentation gives the order of resolution, and
+does not leave it unclear.
 
 ---
 
 ## Workstream B — Hot-path performance
 
-Benchmarks landed **first**, in `98d1ab0`, so every fix below is reported as a
-measured delta against a committed baseline rather than an assertion.
+The benchmarks came **first**, in `98d1ab0`. Thus each fix below gives a
+measured difference against a committed baseline, and not a statement.
 `internal/copilotgw`, `internal/sessionstore` and `internal/toolproxy` had no
-benchmark files at all, which is why these regressions went unnoticed.
+benchmark files. This is the reason why nobody saw these regressions.
 
 All figures: darwin/arm64 (Apple M1 Max), `-benchmem`, median of 6.
 
-| ID     | Commit    | Measured outcome                                                                                                                                                                                                                                                                                 |
-| ------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **B1** | `a14b4cf` | `FindModelCacheHit` **78873 → 1665 ns/op**, 1201 → 25 allocs (135170 → 2688 B/op). `ModelLookupsPerRequest` 235063 → 5119 ns/op, **405 KB → 8 KB** per image-carrying request. `ListModels` is ~4% slower (it now takes `cache.mu` twice) and allocates exactly as before.                       |
-| **B2** | `8451210` | **139061 ns/op → 0.32 ns/op**, 854 B → 0 B, 5 → 0 allocs with debug off. See [the correction](#b2--the-premise-was-false).                                                                                                                                                                       |
-| **B3** | `14f760b` | Large-record save (4 MiB) **37.0 → 17.5 ms**, 2913 → 563 allocs, **23.6 MB → 11.3 MB** per save. Small-record save unchanged in time (it is fsync-bound) and allocates 42% fewer bytes but 62 more objects — a streamed token decode makes more small allocations when there is nothing to skip. |
-| **B4** | `b41389c` | Closing a 128-tool turn **691474 → 485085 ns/op** (~30% cheaper), 1583 → 1317 allocs, **705362 → 405062 B/op**. `BenchmarkBrokerRegisterRepeat` 870 → 766 ns/op, 2 → 1 allocs.                                                                                                                   |
-| **B5** | `594a07b` | Correctness, not speed. `{"enum":[9007199254740993]}` was silently re-encoding as `…992` and `{"maximum":1e21}` as `1e+21`. Now decoded with `UseNumber`, matching `toolcatalog.CanonicalRawJSON`, which had always done this.                                                                   |
+| ID     | Commit    | Measured outcome                                                                                                                                                                                                                                                                                                                             |
+| ------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **B1** | `a14b4cf` | `FindModelCacheHit` **78873 → 1665 ns/op**, 1201 → 25 allocs (135170 → 2688 B/op). `ModelLookupsPerRequest` 235063 → 5119 ns/op, **405 KB → 8 KB** for each request that carries an image. `ListModels` is about 4% slower, because it now takes `cache.mu` two times. It allocates the same quantity as before.                             |
+| **B2** | `8451210` | **139061 ns/op → 0.32 ns/op**, 854 B → 0 B, 5 → 0 allocs with debug off. See [the correction](#b2--the-premise-was-false).                                                                                                                                                                                                                   |
+| **B3** | `14f760b` | A save of a large record (4 MiB): **37.0 → 17.5 ms**, 2913 → 563 allocs, **23.6 MB → 11.3 MB** for each save. The time of a save of a small record does not change, because fsync controls it. It allocates 42% fewer bytes, but 62 more objects. A decode of a stream of tokens makes more small allocations when there is nothing to skip. |
+| **B4** | `b41389c` | To close a turn with 128 tools: **691474 → 485085 ns/op**, about 30% cheaper. 1583 → 1317 allocs, **705362 → 405062 B/op**. `BenchmarkBrokerRegisterRepeat` 870 → 766 ns/op, 2 → 1 allocs.                                                                                                                                                   |
+| **B5** | `594a07b` | This is a correction, and not a change of speed. The code encoded `{"enum":[9007199254740993]}` again as `…992`, and `{"maximum":1e21}` as `1e+21`, with no message. The code now decodes with `UseNumber`. This agrees with `toolcatalog.CanonicalRawJSON`, which always did this.                                                          |
 
-B1's whole risk is keeping the id index consistent with `cache.models`, so that
-was made structural: `setModelsLocked` assigns both fields in one critical
-section and is the only writer of either.
+The only risk of B1 is to keep the index of the ids in agreement with
+`cache.models`. Thus the code makes this structural. `setModelsLocked` sets the
+two fields in one critical section, and it is the only writer of the two fields.
 `TestModelIndexStaysConsistentAcrossRefreshPaths` drives every path that can
-replace the catalog and fails loudly when the rebuild is weakened.
+replace the catalog. The test fails clearly if a change makes the rebuild
+weaker.
 
-B3 rejected both alternatives the plan suggested, with reasons:
-`Store.deletedIDs` is not a tombstone set (it is only populated while a pin is
-held, so it cannot answer for a record deleted before this process started), and
-deriving `previousSession` from the `.links` index means a `ReadDir` plus a
-`Stat` per session on every save — trading a bounded cost for one that grows
-with the store. Reading four header fields answers both exactly. Two deliberate
-divergences are documented at the call site (a record with a corrupt tail is now
-healed rather than stranded; duplicate object names resolve first-wins).
+B3 rejected the two alternatives of the plan, and gives the reasons. First,
+`Store.deletedIDs` is not a set of markers for deleted records. The code fills
+it only while a pin is held. Thus it cannot answer for a record that was deleted
+before this process started. Second, to get `previousSession` from the `.links`
+index needs a `ReadDir` and a `Stat` for each session on every save. This
+exchanges a limited cost for a cost that grows with the store. A read of four
+fields of the header answers the two questions exactly. Two intended differences
+are in the documentation at the call position. The code now repairs a record
+with a corrupt end, and does not leave it unusable. If two objects have the same
+name, the first name wins.
 
-B5 also fixed a leaked internal error: `schemaMap(true)` used to hand the client
+B5 also corrected an internal error that went to the client. `schemaMap(true)`
+gave the client the text
 `"json: cannot unmarshal bool into Go value of type map[string]interface {}"`,
-unclassified. It now returns `apierr.InvalidRequest` naming the offending tool
-and the `tools` request field.
+with no classification. It now returns `apierr.InvalidRequest`. The error names
+the incorrect tool and the `tools` request field.
 
 > [!NOTE]
-> B4 is only partly closed. Growth is still superlinear because `Register`
-> republishes the batch's whole call-id set on each of its N+1 calls — a
-> **separate** O(N²) term, in `Register` itself rather than in expiry. See
-> [Residual backlog](#residual-backlog).
+> B4 is only partly closed. The growth is still more than linear, because
+> `Register` publishes the full set of the call ids of the batch again on each
+> of its N+1 calls. This is a **different** O(N²) term. It is in `Register`
+> itself, and not in the expiry. See [Residual backlog](#residual-backlog).
 
 ---
 
 ## Workstream C — Transport & protocol polish
 
-| ID      | Commit(s) | Outcome                                                                                                                                                                                                                                                                                                                                                        |
-| ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **C1**  | `a7453b0` | `requestContext` always derives with `context.WithCancel`. A `CancelFunc` whose meaning depends on which transport called it is not a usable contract. Pre-fix, every early return in `handleWebSocketResponseCreate` stranded a gateway goroutine blocked on a send nobody would read.                                                                        |
-| **C2**  | `0747461` | **Corrected** — see [above](#c2--the-prescribed-fix-was-unsafe). Roles split rather than order swapped.                                                                                                                                                                                                                                                        |
-| **C3**  | `0747461` | `connCtx` threaded into `webSocketJSONWriter`; the write context is now a 30 s child of `connCtx`, so it is bounded by both. Pre-fix a frame to a black-holed peer held the writer mutex for the full 30 s even when the connection had been cancelled seconds earlier.                                                                                        |
-| **C4**  | `dcf7dde` | The mux is wrapped in a `ResponseWriter` that converts a 404/405 into the standard envelope via `writeErrorObject`. It only rewrites a response whose `Content-Type` is not already JSON — the exact discriminator between `net/http`'s routing defaults and a handler's deliberate 404. Both bodies match the real API rather than being invented.[^errshape] |
-| **C5**  | `9cd3820` | `GET`/`DELETE /v1/responses/{id}` registered as a wildcard, read via `r.PathValue("id")`, validated against `openai.ValidResponseID`. Pre-fix, `GET /v1/responses/%2E%2E` returned 404 having handed the gateway an id of `".."`. A malformed id is now a **400** naming param `response_id`, which is what the real API returns.                              |
-| **C6**  | `8f824a0` | **Corrected** — see [above](#c6--the-prescribed-error-shape-was-wrong). `KindRateLimit` → 429 with a transport-neutral `RetryAfter`; `KindUnavailable` → 503, used for `WarmResponse`'s "gateway is shutting down", which had been a 502.                                                                                                                      |
-| **C7**  | `c1dc663` | `: keep-alive` comment frames on an idle SSE stream, `COPILOT_SSE_KEEP_ALIVE_INTERVAL` default 15 s.[^proxy] The ticker runs at half the interval and only writes when the stream is actually idle, so a busy stream carries no keep-alives and the worst-case gap is one and a half intervals.                                                                |
-| **C8**  | `80160aa` | `stream_outcome` on the access line, with three values: `completed`, `failed`, `abandoned`. The HTTP status stays 200 (it is correctly 200 once committed) but the record's **severity** now follows the outcome, so a failed stream is an ERROR line and an abandoned one a WARN.                                                                             |
-| **C9**  | `a7453b0` | Folded into C1: `getResponse`/`deleteResponse` now bound their store reads with `COPILOT_REQUEST_TIMEOUT` like every other handler.                                                                                                                                                                                                                            |
-| **C10** | `1929ee1` | `logprobs`/`top_logprobs` relaxed to accept-and-ignore, matching `include: ["message.output_text.logprobs"]` on the other surface. `logprobs: false` keeps its allow predicate — it asks for nothing.                                                                                                                                                          |
+| ID      | Commit(s) | Outcome                                                                                                                                                                                                                                                                                                                                                                      |
+| ------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **C1**  | `a7453b0` | `requestContext` always derives with `context.WithCancel`. A `CancelFunc` with a meaning that depends on the transport that called it is not a usable contract. Before the fix, each early return in `handleWebSocketResponseCreate` left a gateway goroutine blocked on a send that no code would read.                                                                     |
+| **C2**  | `0747461` | **Corrected** — see [above](#c2--the-prescribed-fix-was-unsafe). The code divides the roles, and does not swap the order.                                                                                                                                                                                                                                                    |
+| **C3**  | `0747461` | `connCtx` goes into `webSocketJSONWriter`. The write context is now a 30 s child of `connCtx`, thus the two contexts limit it. Before the fix, a frame to a peer that received nothing held the mutex of the writer for the full 30 s. This happened also when the code cancelled the connection some seconds before.                                                        |
+| **C4**  | `dcf7dde` | A `ResponseWriter` contains the mux. It changes a 404 or a 405 into the standard envelope with `writeErrorObject`. It changes only a response whose `Content-Type` is not JSON already. This is the exact difference between the routing defaults of `net/http` and an intended 404 from a handler. The two bodies agree with the real API. Nobody invented them.[^errshape] |
+| **C5**  | `9cd3820` | The code registers `GET`/`DELETE /v1/responses/{id}` as a wildcard. It reads the id with `r.PathValue("id")` and checks it against `openai.ValidResponseID`. Before the fix, `GET /v1/responses/%2E%2E` returned 404, and it gave the gateway an id of `".."`. An incorrect id now gives a **400** that names the param `response_id`. The real API returns the same.        |
+| **C6**  | `8f824a0` | **Corrected** — see [above](#c6--the-prescribed-error-shape-was-wrong). `KindRateLimit` → 429 with a `RetryAfter` that is independent of the transport. `KindUnavailable` → 503. The code uses the 503 for the message "gateway is shutting down" of `WarmResponse`, which was a 502 before.                                                                                 |
+| **C7**  | `c1dc663` | The code writes `: keep-alive` comment frames on an idle SSE stream. `COPILOT_SSE_KEEP_ALIVE_INTERVAL` has the default 15 s.[^proxy] The ticker runs at one half of the interval, and it writes only when the stream is idle. Thus a busy stream carries no keep-alive frames, and the largest gap is one and one half intervals.                                            |
+| **C8**  | `80160aa` | `stream_outcome` is on the access line, with three values: `completed`, `failed`, `abandoned`. The HTTP status stays 200, which is correct after the response starts. The **severity** of the record now follows the outcome. Thus a failed stream gives an ERROR line, and an abandoned stream gives a WARN line.                                                           |
+| **C9**  | `a7453b0` | Included in C1. `getResponse` and `deleteResponse` now limit their reads of the store with `COPILOT_REQUEST_TIMEOUT`, as every other handler does.                                                                                                                                                                                                                           |
+| **C10** | `1929ee1` | The code now accepts `logprobs` and `top_logprobs` and ignores them. This agrees with `include: ["message.output_text.logprobs"]` on the other surface. `logprobs: false` keeps its allow predicate, because it asks for nothing.                                                                                                                                            |
 
-C7 required a real concurrency change, not just a ticker: two writers now share
-one `http.ResponseWriter`, so `SSEWriter` grew a mutex and every frame goes
-through a single `writeFrame` that takes it, or two writers would interleave
-halves of two frames into one unparseable event. The `stop` func returned by
-`KeepAlive` waits for the goroutine before returning, which is what makes
-`defer stop()` safe against `requestLoggingMiddleware` reading the byte counter
-the instant the handler returns.
+C7 needed a true change of the concurrency, and not only a ticker. Two writers
+now use one `http.ResponseWriter`. Thus `SSEWriter` got a mutex, and every frame
+goes through one `writeFrame` that takes the mutex. Without the mutex, the two
+writers mix halves of two frames into one event that no client can parse. The
+`stop` function that `KeepAlive` returns waits for the goroutine before it
+returns. This makes `defer stop()` safe when `requestLoggingMiddleware` reads
+the counter of the bytes immediately after the handler returns.
 
-C8's Chat path needed different handling from Responses: Chat has no single
-terminal point (its write-error returns are scattered through the event loop),
-so it defaults to `abandoned` on entry and the two terminal paths overwrite it.
-The panic path works out because the metadata is last-write-wins.
+The Chat path of C8 needs a different process from Responses. Chat has no single
+terminal point, because its returns for a write error are at many positions in
+the event loop. Thus Chat uses `abandoned` as the default value at the entry,
+and the two terminal paths replace this value. The path of a panic is correct,
+because the last write of the metadata wins.
 
 > [!NOTE]
-> C10 was superseded within the same cycle. It moved `logprobs`/`top_logprobs`
-> into the strict-only rejection table; `846871a` (E2) then deleted strict mode
-> entirely, so both fields are now simply never rejected, and
-> `RequestedLogprobs` drives the unhonoured-control debug line. The end state is
-> the one C10 wanted, reached by a shorter path.
+> A later change in the same cycle replaced C10. C10 moved `logprobs` and
+> `top_logprobs` into the table of rejections for strict mode only. `846871a`
+> (E2) then deleted strict mode completely. Thus the code now never rejects the
+> two fields, and `RequestedLogprobs` drives the debug line for a control that
+> the proxy does not honour. The final state is the state that C10 wanted,
+> reached by a shorter path.
 
-C6 has an honest gap, recorded in its own commit body: no pre-fix failing
-assertion exists and none could, because the taxonomy had no way to spell "429"
-— an assertion about a 429 does not compile against the parent. The concrete
-pre-fix observation was that `rg StatusTooManyRequests internal/` found nothing.
+C6 has a gap, and its own commit body records it. No failing assertion exists
+from before the fix, and none is possible. The taxonomy had no way to give a
+"429". An assertion about a 429 does not compile against the parent commit. The
+concrete observation before the fix was that
+`rg StatusTooManyRequests internal/` found nothing.
 
 ---
 
 ## Workstream D — Test & release engineering
 
-### D1 — Flaky wall-clock tests · `54abe94`
+### D1 — Unreliable tests with clock budgets · `54abe94`
 
-Three tests gated a `t.Fatal` on a short wall-clock budget. Two were made
-genuinely deterministic:
+Three tests made a `t.Fatal` conditional on a short budget of clock time. The
+team made two of them fully deterministic:
 
-- `TestRetentionLoopPrunesIdleExpiredState` — `runRetentionLoop` took an
-  `onSweep` hook (nil in production, mirroring the existing `modelsFetcher`
-  seam), so the test blocks on a prune the loop reports as finished and then
-  asserts on what that prune did.
-- `TestRefreshModelsDeduplicatesConcurrentForcedRefreshes` — moved into a
-  `testing/synctest` bubble, where `synctest.Wait` returns only once every other
-  goroutine is durably blocked, which is exactly the precondition the assertion
-  needs.
+- `TestRetentionLoopPrunesIdleExpiredState` — `runRetentionLoop` got an
+  `onSweep` hook. The hook is nil in production, as the `modelsFetcher` seam is.
+  The test waits for a prune that the loop reports as complete. The test then
+  asserts on the result of that prune.
+- `TestRefreshModelsDeduplicatesConcurrentForcedRefreshes` — the test moved into
+  a `testing/synctest` bubble. There, `synctest.Wait` returns only after every
+  other goroutine is durably blocked. This is exactly the condition that the
+  assertion needs.
 
 > [!NOTE]
-> The third was **not** made deterministic, and the commit says so.
-> `TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating` had its idle
-> budget widened from 30 ms to **250 ms**, which is _wider_, not deterministic —
-> its idle timeout doubles as the budget for accepting the socket and scheduling
-> the read loop. The watchdog's actual rules are pinned deterministically
-> instead, in `internal/httpapi/responses_ws_idle_test.go`, which drives
-> `watchResponsesWebSocketIdle` under a `testing/synctest` fake clock with no
-> socket involved.
+> The team did **not** make the third test deterministic, and the commit says
+> so. `TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating` got a larger
+> idle budget, from 30 ms to **250 ms**. The budget is _larger_, but the test is
+> not deterministic. Its idle timeout is also the budget to accept the socket
+> and to schedule the read loop. A different test holds the true rules of the
+> watchdog in a deterministic way. That test is
+> `internal/httpapi/responses_ws_idle_test.go`. It drives
+> `watchResponsesWebSocketIdle` with a false clock of `testing/synctest`, and it
+> uses no socket.
 
 ### D2 — Goroutine-leak detection · `fc5e272`, `41a06db`
 
-`go.uber.org/goleak` with a `TestMain` in the four packages whose goroutines own
-an SDK session, a parked tool handler, or a retention pin that only that
-goroutine releases: `internal/httpapi`, `internal/copilotgw`,
-`internal/toolproxy`, `internal/sessionstore`. Only **two** ignores were needed,
-both in `internal/httpapi` and both for `net/http`'s own client-side connection
-pool; each carries a comment naming the loop and why it is not ours. The other
-three verify with no ignores at all.
+The code uses `go.uber.org/goleak` with a `TestMain` in four packages. The
+goroutines of these packages own an SDK session, a tool handler that waits, or a
+retention pin that only that goroutine releases. The packages are
+`internal/httpapi`, `internal/copilotgw`, `internal/toolproxy` and
+`internal/sessionstore`. Only **two** ignores were necessary. The two are in
+`internal/httpapi`, and both are for the client-side connection pool of
+`net/http`. Each ignore has a comment. The comment names the loop, and gives the
+reason why the loop is not ours. The other three packages check with no ignores.
 
-Eight further packages were probed and are clean but deliberately not wired up:
-they start no long-lived goroutines, so the check would be inert there.
+The team examined eight more packages. These packages are clean, but they do not
+use the check. They start no long-lived goroutines, thus the check would do
+nothing there.
 
-The payoff was immediate and is described in
-[The headline outcome](#the-headline-outcome).
+The result came immediately. [The main outcome](#the-main-outcome) describes it.
 
 ### D3 — `t.Parallel()` · `fb09b70`, `a330ad0`, `fd6aecf`, `62fe47a`, `650c8d1`
 
-Rolled out package by package in five commits, riskiest last, each independently
-revertible. The point was never wall-clock: it is that `-race` now observes
-these packages actually running concurrently, so hidden shared state shows up as
-a race rather than as an ordering coincidence. Verified with `-race -count=8`
-(`-count=10` for `copilotgw`).
+The change came package by package, in five commits. The commit with the largest
+risk came last, and a person can revert each commit alone. The goal was never
+the clock time. The goal is that `-race` now sees these packages run
+concurrently. Thus hidden shared state shows as a race, and not as an accident
+of the order. The team checked this with `-race -count=8`, and with `-count=10`
+for `copilotgw`.
 
-Every exception is sequential **with a comment saying why**:
+Each exception is sequential, **with a comment that gives the reason**:
 
-| Package                              | Sequential exception                                                                                                                                                                                 |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cmd/copilot-api`, `internal/config` | Not parallelised at all — they mutate the process environment via `t.Setenv`                                                                                                                         |
-| `internal/copilotgw`                 | `TestResolvePromptFetchesRemoteImage`, `TestWarmResolvedImageIsReusedWithoutRefetch` swap the package-level `imageHTTPClient`                                                                        |
-| `internal/httpapi`                   | `TestWebSocketReadLoopEndsWhenTheClientVanishesWithoutAClose` (uses `goleak.IgnoreCurrent`); `TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating` (CPU contention is what used to break it) |
-| `internal/sessionstore`              | The hand-written-shapes table in `TestSaveResponseHeaderAgreesWithTheFullRecord`                                                                                                                     |
+| Package                              | Sequential exception                                                                                                                                                                                        |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/copilot-api`, `internal/config` | Not parallel at all, because they change the environment of the process with `t.Setenv`                                                                                                                     |
+| `internal/copilotgw`                 | `TestResolvePromptFetchesRemoteImage`, `TestWarmResolvedImageIsReusedWithoutRefetch` replace the `imageHTTPClient` of the package                                                                           |
+| `internal/httpapi`                   | `TestWebSocketReadLoopEndsWhenTheClientVanishesWithoutAClose` (it uses `goleak.IgnoreCurrent`); `TestResponsesWebSocketKeepsLongResponseAliveWhileGenerating` (competition for the CPU made it fail before) |
+| `internal/sessionstore`              | The hand-written-shapes table in `TestSaveResponseHeaderAgreesWithTheFullRecord`                                                                                                                            |
 
-That last one is the exercise finding exactly the hazard it exists to find:
-those subtests all write and read the same `"z"` record path, and parallelising
-them made them read each other's bytes.
+The last exception is the exercise that finds exactly the danger that it must
+find. All those subtests write and read the same `"z"` record path. In parallel,
+they read the bytes of each other.
 
-`a330ad0` also widened three `toolproxy` wall-clock waits from 1 s to 5 s, since
-running the suite concurrently makes a 1 s budget tighter for no benefit.
-Nothing about what they assert changed.
+`a330ad0` also made three waits of clock time in `toolproxy` larger, from 1 s to
+5 s. A concurrent run of the suite makes a budget of 1 s more difficult, with no
+advantage. The assertions of these tests did not change.
 
 ### D4 — The gateway↔SDK seam · `9b0749e`, `e5ad960`
 
 `9b0749e` replaced the embedded **nil** `copilotgw.Gateway` in all 17
-hand-written fakes with `unimplementedGateway`, whose methods panic naming
-themselves. A test drives a misroute through the real mux and asserts the
-recovered panic log identifies `Gateway.CreateResponse`. No fake needed a new
-override, which confirms none of them were silently reaching an unimplemented
-method.
+hand-written fakes with `unimplementedGateway`. Its methods panic and give their
+own name. A test sends an incorrect route through the real mux. The test asserts
+that the log of the recovered panic names `Gateway.CreateResponse`. No fake
+needed a new override. This shows that no fake called a method with no
+implementation.
 
-`e5ad960` did the substantive half, as a **type-level extraction only** — no
-control flow changed:
+`e5ad960` did the larger part, as an **extraction at the level of the types
+only**. The control flow did not change:
 
-- `copilotSession` — the four things the gateway does with an SDK session (`ID`,
-  `Send`, `Abort`, `Disconnect`). The id is a method because `*copilot.Session`
-  already has a `SessionID` field.
-- `sdkSessionOpener` plus a `RealGateway.sessionOpener` field, nil in
-  production, mirroring the existing `modelsFetcher` seam.
-- `wrapSDKSession` keeps "no session and no error" a nil interface, so existing
-  `session == nil` guards keep working.
+- `copilotSession` — the four operations that the gateway does with an SDK
+  session (`ID`, `Send`, `Abort`, `Disconnect`). The id is a method, because
+  `*copilot.Session` has a `SessionID` field already.
+- `sdkSessionOpener` and a `RealGateway.sessionOpener` field. The field is nil
+  in production, as the `modelsFetcher` seam is.
+- `wrapSDKSession` keeps "no session and no error" as a nil interface. Thus the
+  `session == nil` guards continue to operate.
 
-The tests then run the **real** `RealGateway` — real model cache, prompt
-resolution, session filesystem, tool broker, turn runner and `sessionstore` —
-with only the runtime replaced.
+The tests then run the **true** `RealGateway`. This includes the true model
+cache, prompt resolution, session filesystem, tool broker, turn runner and
+`sessionstore`. Only the runtime is a replacement.
 
 `internal/copilotgw` coverage **60.1% → 71.5%**:
 
@@ -458,43 +477,44 @@ with only the runtime replaced.
 
 ## Workstream E — Surface reduction
 
-| ID     | Commit    | Resolution                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **E1** | `9105ba7` | **Deleted.** `COPILOT_API_CACHE_DIR` had no producer: every hit of `rg -n 'CacheDir\|CACHE_DIR' --type go` was plumbing or a test of that plumbing. It cost a managed-root claim, a marker write with two fsyncs, a per-cycle retention scan over an always-empty directory, and a purge target — to guarantee an empty directory stays empty. **BREAKING.**                                               |
-| **E2** | `846871a` | **Deleted.** `COPILOT_STRICT_COMPAT` reached three call sites, and every one of its additions was a _rejection_ of an item the permissive policy had already classified as safe to ignore. Its stated purpose (debugging client conformance) is already served by the debug-level unhonoured-control logs, without breaking the client. **BREAKING.**                                                      |
-| **E3** | `0fc27a8` | **Enforced locally.** Tool `strict` now compiles the client's declared parameters at request time and validates the model's arguments against them, at _both_ materialisation points (`CaptureRequests` and `handleInvocation`, because their ordering is not guaranteed). `defer_loading` is **forwarded**, not rejected: `true` → `ToolDeferAuto`, `false` → `ToolDeferNever`, absent → runtime decides. |
-| **E4** | `7b2f085` | **Fsynced.** `AppendFile` was the last write path in `sessionfs` with no durability guarantee. The parent directory is synced only when the append created the name, so the extra barrier is paid once per file rather than once per append.                                                                                                                                                               |
+| ID     | Commit    | Resolution                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **E1** | `9105ba7` | **Deleted.** `COPILOT_API_CACHE_DIR` had no producer. Every result of `rg -n 'CacheDir\|CACHE_DIR' --type go` was connection code, or a test of that connection code. It cost a claim on a managed root, a write of a marker with two fsyncs, a retention scan of an always-empty directory in each cycle, and a purge target. The result was only a guarantee that an empty directory stays empty. **BREAKING.**                                                                    |
+| **E2** | `846871a` | **Deleted.** `COPILOT_STRICT_COMPAT` reached three call positions. Each of its additions was a _rejection_ of an item that the permissive policy classified as safe to ignore already. Its stated purpose was to debug the conformance of a client. The debug logs for a control that the proxy does not honour give this already, and they do not break the client. **BREAKING.**                                                                                                   |
+| **E3** | `0fc27a8` | **Enforced in this proxy.** The tool field `strict` now compiles the parameters that the client declares, at the time of the request. It then checks the arguments of the model against them. It does this at _both_ points of materialisation (`CaptureRequests` and `handleInvocation`), because their order is not guaranteed. The code **forwards** `defer_loading`, and does not reject it: `true` → `ToolDeferAuto`, `false` → `ToolDeferNever`, absent → the runtime decides. |
+| **E4** | `7b2f085` | **Fsynced.** `AppendFile` was the last write path in `sessionfs` with no guarantee of durability. The code syncs the parent directory only when the append created the name. Thus the code pays for the extra barrier one time for each file, and not one time for each append.                                                                                                                                                                                                      |
 
-E2 did not leave the decision open, which the plan explicitly demanded. The
-answer is that permissive is the only policy: every mainstream OpenAI client
-sends `temperature` or `user` by default, so strict mode 400'd essentially every
-real client, all-or-nothing, with no per-field granularity.
+E2 did not leave the decision open. The plan demanded this clearly. The answer
+is that the permissive policy is the only policy. Every common OpenAI client
+sends `temperature` or `user` by default. Thus strict mode returned a 400 to
+almost every true client. The mode was all or nothing, with no control for each
+field.
 
-E3's choice between "enforce" and "400" was settled by evidence rather than
-taste. `TestHTTPAcceptsValidOpenAIClientRequests` already pins a Chat request
-carrying `{"strict":true}` at 200, and says why: these are calls a widely-used
-client emits by default. Real OpenAI accepts `strict` and honours it, so a 400
-could not be justified against real OpenAI behaviour. Two consequences are
-deliberate: a strict tool whose schema will not compile is a 400 **at request
-time** (a guarantee that was never enforceable should fail before tokens are
-spent), and `strict` on a freeform custom tool is a 400 (there is nothing
-client-declared to constrain).
+Evidence decided the choice of E3 between "enforce" and "400", and not a
+preference. `TestHTTPAcceptsValidOpenAIClientRequests` holds a Chat request with
+`{"strict":true}` at 200 already, and gives the reason. A client with many users
+sends these calls by default. Real OpenAI accepts `strict` and honours it. Thus
+a 400 is not correct against the behavior of real OpenAI. Two consequences are
+intentional. First, a strict tool with a schema that does not compile gets a 400
+**at the time of the request**. A guarantee that the proxy can never enforce
+must fail before the user pays for tokens. Second, `strict` on a custom tool
+with free text gets a 400, because the client declares nothing to limit.
 
-E4's reasoning is worth keeping, because "a lost append costs nothing" was the
-tempting answer and it is wrong. A Responses continuation first tries
-`resumeSession` on the SDK session id named by the previous record, and only
-rehydrates from the session store when that resume fails. A silently short event
-log therefore means the resume **succeeds** and the model answers without the
-turn whose id the client just passed as `previous_response_id` — silent context
-loss, not a visible fallback.
+Keep the reasons for E4. The answer "a lost append costs nothing" is attractive,
+but it is incorrect. A continuation of Responses first tries `resumeSession` on
+the SDK session id from the previous record. It reads the session store again
+only when that resume fails. Thus an event log that is short, with no message,
+means that the resume **succeeds**. The model then answers without the turn
+whose id the client gave as `previous_response_id`. This is a loss of context
+with no message, and not a visible fallback.
 
 > [!NOTE]
-> **Verified config surface: 24 → 23 documented variables** in `README.md`'s
-> Configuration table (including `GITHUB_TOKEN`). E1 and E2 removed two; C7
-> added `COPILOT_SSE_KEEP_ALIVE_INTERVAL`. The managed storage root went away
-> with E1, which is the larger structural win: `prune` and `purge` no longer
-> touch anything under `.cache`, and the Dockerfile, compose file and README now
-> say so plainly.
+> **The team checked the configuration surface: 24 → 23 documented variables**
+> in the Configuration table of `README.md`, with `GITHUB_TOKEN`. E1 and E2
+> removed two variables. C7 added `COPILOT_SSE_KEEP_ALIVE_INTERVAL`. E1 also
+> removed the managed storage root, which is the larger structural advantage.
+> `prune` and `purge` no longer touch any file under `.cache`. The Dockerfile,
+> the compose file and the README now say this clearly.
 
 ---
 
@@ -503,10 +523,10 @@ loss, not a visible fallback.
 ### F1 — Chat Completions as an adapter over Responses: **declined**
 
 The plan said: _"Re-evaluate whether the dedup is worth it before committing to
-Phase 6; the honest answer may be no."_ It was re-evaluated against HEAD. **The
-answer is no.**
+Phase 6; the honest answer may be no."_ The team examined it again against HEAD.
+**The answer is no.**
 
-This is recorded as a decision with evidence, not a deferral.
+This is a decision with evidence, and not a delay.
 
 ```mermaid
 flowchart TD
@@ -540,212 +560,221 @@ flowchart TD
 
 #### The prerequisite is satisfied — F1 is not blocked, it is not worth it
 
-`e5ad960` introduced the SDK-boundary seam (`copilotSession` +
-`sdkSessionOpener`) the plan named as F1's hard prerequisite, and with it all
-six previously-0% gateway entry points now execute under test. Blocker 5 of the
-original five — "the compatibility-contract tests are written against the Chat
-types, so the refactor removes the safety net and the thing it protects in the
-same change" — is therefore gone. The `[!CAUTION]` the plan attached to F1 no
-longer applies.
+`e5ad960` added the seam at the boundary of the SDK (`copilotSession` and
+`sdkSessionOpener`). The plan named this seam as the necessary prerequisite of
+F1. With the seam, all six gateway entry points that had 0% coverage now execute
+in the tests. Blocker 5 of the original five is thus not present. That blocker
+said: "the compatibility-contract tests are written against the Chat types, so
+the refactor removes the safety net and the thing it protects in the same
+change". The `[!CAUTION]` that the plan gave to F1 does not apply now.
 
-Everything below is a judgement about value, not about safety.
+The text below is a judgement about value, and not about safety.
 
 #### Four of the five original blockers still stand, verified against HEAD
 
-1. **`ReasoningOpaque` still has no field on `openai.Response`.** It lives on
-   `copilotgw.TurnResult` (`internal/copilotgw/types.go:108`) and is consumed
-   only by `internal/httpapi/chat.go:299`, which builds `reasoning_details` from
-   it. Deriving a `ChatCompletion` from a `Response` still drops it.
-2. **`finish_reason` is still not derivable from a `Response`.**
-   `responseFromTurn` hardcodes `Status: "completed"`
-   (`internal/copilotgw/turn_runner.go:1153`), and `FinishReason` exists only on
-   the Chat type (`internal/openai/chat.go:175`) and its `TurnResult` carrier
+1. **`ReasoningOpaque` still has no field on `openai.Response`.** It is on
+   `copilotgw.TurnResult` (`internal/copilotgw/types.go:108`), and only
+   `internal/httpapi/chat.go:299` uses it. That code builds `reasoning_details`
+   from it. To derive a `ChatCompletion` from a `Response` still loses it.
+2. **A `Response` still cannot give `finish_reason`.** `responseFromTurn` writes
+   `Status: "completed"` as a constant
+   (`internal/copilotgw/turn_runner.go:1153`). `FinishReason` exists only on the
+   Chat type (`internal/openai/chat.go:175`) and on its `TurnResult` carrier
    (`types.go:114`).
-3. **Reasoning identity still diverges by design.**
-   `TurnResult.reasoningOutputItemID()` (`turn_runner.go:1277`) mints the `rs_`
-   output-item id, while `reasoning_details[].id` is the SDK reasoning id.
-   Different things, deliberately.
-4. **Usage mapping is still one-way.** `NewResponseUsage` adds
-   `input_tokens_details.cached_tokens` (`internal/openai/models.go:92`), which
-   has no Chat home. `6c2d1c3` changed usage substantially, but it did not make
-   the mapping bidirectional — it made both sides complete, which is a different
-   property.
+3. **The identity of the reasoning is still different on the two sides, by
+   design.** `TurnResult.reasoningOutputItemID()` (`turn_runner.go:1277`) makes
+   the `rs_` id of the output item. `reasoning_details[].id` is the reasoning id
+   of the SDK. These are different values, and this is intentional.
+4. **The mapping of the usage still goes in one direction.** `NewResponseUsage`
+   adds `input_tokens_details.cached_tokens` (`internal/openai/models.go:92`).
+   Chat has no field for it. `6c2d1c3` changed the usage very much, but it did
+   not make the mapping work in two directions. It made the two sides complete,
+   which is a different property.
 
 #### The dedup itself does not pay
 
 Measured at HEAD:
 
-- `prepareChatTurn` is **53 lines** (`internal/copilotgw/chat.go:28-80`) and is
-  **always stateless**. It mints a fresh `chat_` session per request, hydrates
-  full history into session events, and never consults a previous record, a warm
-  session, or a tool catalog.
-- `prepareResponseTurn` is **125 lines**
-  (`internal/copilotgw/response_session.go:28-152`), built around exactly those
-  three branches.
+- `prepareChatTurn` has **53 lines** (`internal/copilotgw/chat.go:28-80`), and
+  it is **always stateless**. It makes a new `chat_` session for each request.
+  It puts the full history into session events. It never reads a previous
+  record, a warm session or a tool catalog.
+- `prepareResponseTurn` has **125 lines**
+  (`internal/copilotgw/response_session.go:28-152`). Its structure is exactly
+  those three branches.
 
-Merging them needs, at minimum: a `stateless` flag, a catalog-vs-raw-tools
-branch, a persistence opt-out, a batch-kind parameter, a `retained`-path
-flavour, and a wire-visible error-`param` prefix (`"messages"` vs `"input"`).
-That is six-plus parameters to save roughly 15 lines.
+A merge of the two functions needs a minimum of: a `stateless` flag, a branch
+for a catalog or for raw tools, an option to stop the persistence, a parameter
+for the kind of the batch, a variant for the `retained` path, and a prefix for
+the error `param` that the client sees (`"messages"` against `"input"`). These
+are six parameters or more, and they save about 15 lines.
 
-And those 15 lines are **already shared**. `requestReasoningEffort`,
+The two functions **share those 15 lines already**. `requestReasoningEffort`,
 `resolvePromptWithImageBudget`, `newSessionEventSink` and `resumeSession` are
-common helpers today — the duplication the plan wanted to remove has already
-been factored out by every other means. What is left in each function is the
-part that genuinely differs.
+common helper functions today. Other work removed the duplication that the plan
+wanted to remove. Each function keeps only the part that is truly different.
 
 > [!IMPORTANT]
-> The merge would produce a **parameterised union, not a simplification** —
-> precisely what the plan suspected when it wrote the caveat. Declining is the
-> plan's own recommendation followed, not overridden.
+> The merge gives a **union with parameters, and not a simpler design**. The
+> plan gave exactly this warning in its caveat. To decline is to follow the
+> recommendation of the plan, and not to reject it.
 
-The independently valuable parts of the original attempt
-(`6e9d3ce`/`ed2d02c`/`f33fbd4`) had already shipped and remain: hydration replay
-for Responses cold-continuation, unified terminal-text reconciliation, and the
-unified stream sink.
+The parts of the first attempt (`6e9d3ce`, `ed2d02c`, `f33fbd4`) that have value
+alone shipped before, and they stay. These parts are the replay of the hydration
+for a cold continuation of Responses, the unified reconciliation of the terminal
+text, and the unified stream sink.
 
 ---
 
 ## Round two — adversarial review
 
-After the workstreams landed, three sub-agents reviewed the result adversarially
-with disjoint scopes — concurrency and lifecycle, wire-protocol conformance, and
-data integrity. They were told that "looks good" was a failed review. Between
-them they found **fourteen** defects in the work above, four of them serious
-enough to have shipped real breakage, and two of the fixes they proposed were
-themselves wrong.
+After the workstreams shipped, three sub-agents reviewed the result. Each
+sub-agent had a different scope: concurrency and lifecycle, conformance of the
+wire protocol, and data integrity. Each sub-agent had the instruction to find
+defects. The instruction said that a report of "looks good" is a failed review.
+Together they found **fourteen** defects in the work above. Four defects were
+serious, and they would have caused true damage. Two of the fixes that the
+sub-agents proposed were also incorrect.
 
 > [!CAUTION]
-> Two of the highest-severity findings were **regressions introduced by the
-> fixes in this very document**, not pre-existing bugs. `0747461` (C2) fixed one
-> abnormal-close race and reintroduced the same race one layer over, through the
-> frame writer it had just bound to `connCtx`. `bec6806` (A3) fixed one
-> warm-input loss and left two more on adjacent paths. A fix landing green is
-> not evidence that it is correct.
+> Two of the findings with the highest severity were **regressions from the
+> fixes in this document**, and not defects from before. `0747461` (C2)
+> corrected one race of an abnormal close. It then made the same race again one
+> layer higher, through the frame writer that it connected to `connCtx`.
+> `bec6806` (A3) corrected one loss of warm input, and left two more losses on
+> adjacent paths. A fix that passes the tests is not evidence that the fix is
+> correct.
 
 ### What was found and fixed
 
-| Finding                                                                                                                                                            | Severity | Fix       |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | --------- |
-| Close handshake severed by the write-timeout `AfterFunc` — the C2 fix reintroduced the race it avoided, measured **15/20 runs failing, 28/160 shutdowns abnormal** | High     | `b18e0ca` |
-| A request reaching `newTurnRunner` after `Stop()` hung **forever** and leaked its goroutine; `0eb98d1`'s own reasoning about the registry ordering was wrong       | High     | `8a6a582` |
-| Chained warm requests silently dropped the earlier input; `InputPending` was never cleared, so an ordinary retry double-sent it                                    | High     | `5ff87ec` |
-| A truncated record decoded as a _complete_ header — `json.Decoder.More` swallows the read error — resurrecting deleted responses and stranding retention links     | High     | `78eec33` |
-| Warm session installable into already-closed WebSocket state                                                                                                       | Medium   | `a47c536` |
-| `state.finish()` raced the next `response.create`, so a correct client got a spurious "only one response.create may be active" — **4/10 runs**                     | Medium   | `5c902fe` |
-| `cached_tokens` hardcoded to 0 though the SDK reports it, and `cache_write_tokens` missing though the schema requires it                                           | Medium   | `4e36ce0` |
-| Legacy usage records served with a `total_tokens` contradicting their own addends                                                                                  | Medium   | `4e36ce0` |
-| The terminal Chat usage chunk could carry `"usage": null`                                                                                                          | Medium   | `4e36ce0` |
-| Strict tool schemas this proxy merely cannot _compile_ were 400s — Draft-07 spellings and any external `$ref`, both accepted by real OpenAI                        | Medium   | `cd51cc7` |
-| Strict-argument violations reached the client as an unclassified 502/500 with the tool name gone                                                                   | Medium   | `cd51cc7` |
-| Rate-limit classification never ran on SDK call sites — the most likely throttle point still returned 502                                                          | Medium   | `93e3239` |
-| `metadata` accepted and silently discarded, though the real API echoes it                                                                                          | Medium   | `10b9195` |
-| `GET /v1/models` published `model:effort` aliases that `POST` then answered with 404                                                                               | Medium   | `10b9195` |
-| Accept-and-ignore was unobservable for ~12 fields; `AppendFile` could skip its directory sync; `bindBroker` inherited rather than enforced its invariant           | Low      | `08ea85d` |
+| Finding                                                                                                                                                                              | Severity | Fix       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | --------- |
+| The `AfterFunc` of the write timeout cut the close handshake. The C2 fix made the race again. Measured: **15/20 runs failed, 28/160 shutdowns abnormal**                             | High     | `b18e0ca` |
+| A request that got to `newTurnRunner` after `Stop()` waited **without end** and leaked its goroutine. The reasoning of `0eb98d1` about the order of the registry was incorrect       | High     | `8a6a582` |
+| Warm requests in a chain lost the earlier input with no message. The code never cleared `InputPending`, thus a usual retry sent the input two times                                  | High     | `5ff87ec` |
+| A record with a cut end decoded as a _complete_ header, because `json.Decoder.More` hides the read error. This made deleted responses live again, and left retention links unusable  | High     | `78eec33` |
+| The code could install a warm session into a WebSocket state that was closed already                                                                                                 | Medium   | `a47c536` |
+| `state.finish()` raced the next `response.create`. Thus a correct client got an incorrect error "only one response.create may be active" in **4/10 runs**                            | Medium   | `5c902fe` |
+| `cached_tokens` was the constant 0, but the SDK reports it. `cache_write_tokens` was absent, but the schema needs it                                                                 | Medium   | `4e36ce0` |
+| Old usage records had a `total_tokens` that did not agree with their own parts                                                                                                       | Medium   | `4e36ce0` |
+| The terminal Chat usage chunk could carry `"usage": null`                                                                                                                            | Medium   | `4e36ce0` |
+| Strict tool schemas that this proxy only cannot _compile_ gave a 400. These include Draft-07 forms and any external `$ref`, which real OpenAI accepts                                | Medium   | `cd51cc7` |
+| A violation of a strict argument reached the client as a 502 or a 500 with no class, and with no tool name                                                                           | Medium   | `cd51cc7` |
+| The classification of the rate limit never ran at the SDK call positions. The most probable point of a limit still returned 502                                                      | Medium   | `93e3239` |
+| The code accepted `metadata` and removed it with no message, but the real API returns it                                                                                             | Medium   | `10b9195` |
+| `GET /v1/models` published `model:effort` aliases, and `POST` then answered them with 404                                                                                            | Medium   | `10b9195` |
+| The accept-and-ignore behavior was not visible for about 12 fields. `AppendFile` could omit its sync of the directory. `bindBroker` inherited its invariant, and did not enforce it | Low      | `08ea85d` |
 
 ### Two proposed fixes that were wrong
 
-Both were rejected on measurement rather than argument, which is the same
-standard that caught the three plan errors in the previous round.
+A measurement rejected the two fixes, and not an argument. This is the same
+standard that found the three errors of the plan in the previous round.
 
-- **`UseNumber` for strict arguments.** The review proposed decoding tool
-  arguments with `UseNumber` to match `schemaMap`. Measured against
-  `jsonschema-go` v0.4.3, that breaks **every numeric strict tool**: the library
-  reflects over the instance and types a `json.Number` as `"string"`, so
-  `{"n":5}` against `{"type":"integer"}` reports
-  `5 has type "string", want "integer"`. Both the schema's literals and the
-  instance already round through `float64` and therefore compare correctly. Not
-  changed; the reason is now recorded at the call site so it is not re-proposed.
-- **`quota` → keep 502.** The previous round argued retrying cannot clear a
-  billing block. That argument inverts itself: the official SDKs retry 5xx on
-  their generic schedule, so 502 produced _more_ automatic retries than the 429
-  it was avoiding. Now 429 `insufficient_quota`, matching the real API. This
-  reversed the round-one decision and **deleted** its backlog entry; the `R6`
-  slot below has since been reused for an unrelated item.
+- **`UseNumber` for strict arguments.** The review proposed to decode the
+  arguments of a tool with `UseNumber`, to agree with `schemaMap`. A measurement
+  against `jsonschema-go` v0.4.3 shows that this breaks **every strict tool with
+  a number**. The library reflects over the instance, and it gives a
+  `json.Number` the type `"string"`. Thus `{"n":5}` against `{"type":"integer"}`
+  reports `5 has type "string", want "integer"`. The literals of the schema and
+  the instance go through `float64` already, thus they compare correctly. The
+  code did not change. The reason is now at the call position, thus nobody
+  proposes the change again.
+- **`quota` → keep 502.** The previous round said that a retry cannot remove a
+  block on the billing. That argument gives the opposite result. The official
+  SDKs retry a 5xx on their usual schedule. Thus the 502 caused _more_ automatic
+  retries than the 429 that it avoided. The code now returns 429
+  `insufficient_quota`, as the real API does. This changed the decision of round
+  one, and it **deleted** the entry of that decision in the backlog. The `R6`
+  position below now holds a different item.
 
-### The one that justifies the exercise
+### The finding that justifies the work
 
-`goleak` (D2) found a **P0 livelock** that a full manual review had missed. A
-WebSocket client vanishing without a close handshake — a dropped network or a
-killed client, i.e. the ordinary case — left the handler goroutine spinning at
-full speed for the life of the process, because `wsjson.Read` returned
-`net.ErrClosed`, which none of the loop's terminal conditions matched, while
-`connCtx` was still live. The handler never returned, so the connection's warm
-SDK session was never disconnected and its retention pins were never released.
-One `-count=1` run left three behind.
+`goleak` (D2) found a **P0 livelock**. A complete manual review did not find it.
+A WebSocket client can stop without a close handshake. A lost network or a
+killed client does this, and this is the usual case. The handler goroutine then
+ran at full speed for the full life of the process. `wsjson.Read` returned
+`net.ErrClosed`, and no terminal condition of the loop matched that error.
+`connCtx` was still active. The handler never returned. Thus the code never
+disconnected the warm SDK session of the connection, and never released its
+retention pins. One `-count=1` run left three goroutines.
 
 ---
 
 ## Round three — the live suite
 
-Everything above was verified against unit tests and fakes. The Deno AI SDK
-suite — the only gate that pairs the **real** Vercel AI SDK parser with **real**
-Copilot upstream — is `ignore`d unless `COPILOT_API_AI_SDK_DENO_TESTS=1`, so CI
-had only ever run the one test asserting the suite is disabled. Running it
-against a live subscription reported **19 passed, 3 failed**.
+Unit tests and fakes checked all the work above. The Deno AI SDK suite is the
+only check that uses the **true** parser of the Vercel AI SDK with the **true**
+Copilot upstream. The suite is `ignore`d if `COPILOT_API_AI_SDK_DENO_TESTS=1` is
+not set. Thus CI ran only the one test that asserts that the suite is disabled.
+A run against a live subscription reported **19 passed, 3 failed**.
 
-All three failed identically on `002cfc9`, so none was a regression from this
-work. The test file is byte-identical between the two, which made the comparison
-exact. They split two ways.
+The three tests failed in the same way on `002cfc9`. Thus no failure was a
+regression from this work. The test file has the same bytes in the two commits,
+which makes the comparison exact. The three failures divide into two groups.
 
 > [!CAUTION]
-> **One was a real defect: the Responses WebSocket error frame omitted
-> `sequence_number`, fixed in `825e3dc`.** Every schema an OpenAI client matches
-> an `error` stream event with requires that field. Against `@ai-sdk/openai`
-> 4.0.20, whose chunk union is
-> `[nested-error, flat-error, {type: string}.loose()]`, both error branches fail
-> without it, the frame matches the catch-all, and the stream transform maps it
-> to `unknown_chunk` and **drops it**.
+> **One failure was a true defect. The error frame of the Responses WebSocket
+> had no `sequence_number`. `825e3dc` corrects it.** Every schema that an OpenAI
+> client uses for an `error` stream event needs that field. `@ai-sdk/openai`
+> 4.0.20 has the chunk union
+> `[nested-error, flat-error, {type: string}.loose()]`. Without the field, the
+> two error branches fail, and the frame matches the last branch. The transform
+> of the stream then maps the frame to `unknown_chunk` and **removes it**.
 >
-> Observed live: a client sending an unknown `previous_response_id` over the
-> WebSocket transport saw a clean, empty, _successful_ stream. The same request
-> over REST correctly returned `400 previous_response_not_found` — the proxy's
-> logic was right and only the frame's shape was wrong, which is precisely the
-> class of bug no amount of Go-side testing was going to find.
+> Observed live: a client sent an unknown `previous_response_id` on the
+> WebSocket transport. The client saw an empty stream with no error, and the
+> stream reported success. The same request on REST correctly returned
+> `400 previous_response_not_found`. The logic of the proxy was correct, and
+> only the shape of the frame was incorrect. No quantity of tests on the Go side
+> can find this class of defect.
 
-The frame now carries the error **both flat and nested**, because OpenAI's own
-clients disagree about where to look and this proxy has to satisfy both:
-openai-dotnet reads `code`/`message`/`param` at the top level per the published
-`ResponseErrorEvent`,[^errorevent] while the live service emits
-`{"error": {...}}` — confirmed by an OpenAI maintainer as the service failing to
-honour its own contract[^dotnet881] — and openai-python's streaming reads
-`error.message` and works only against that nested shape.[^python2487]
+The frame now carries the error **flat and nested**. The clients of OpenAI do
+not agree about the position of the error, and this proxy must satisfy the two
+forms. openai-dotnet reads `code`, `message` and `param` at the top level, as
+the published `ResponseErrorEvent` shows.[^errorevent] The live service writes
+`{"error": {...}}`. An OpenAI maintainer confirmed that the service does not
+honour its own contract.[^dotnet881] The streaming code of openai-python reads
+`error.message`, and it operates only with that nested shape.[^python2487]
 
-### The other two were the tests being wrong
+### The other two failures came from incorrect tests
 
-The two reasoning-effort cases asserted that a reasoning-capable model _emits_
-reasoning. That is not this proxy's contract and not a property a model owes
-anyone.
+The two cases of the reasoning effort asserted that a model with reasoning
+_writes_ reasoning. That is not the contract of this proxy. A model does not
+guarantee this property.
 
 > [!WARNING]
-> Measured against `claude-sonnet-5` at `effort=low`, the prompt they sent —
-> _"reply with one concise sentence about why 19 \* 37 = 703"_ — produced **zero
-> reasoning items and zero reasoning tokens on 3 of 3 runs**. The same model, at
-> the same effort, with _"What is 17\*24? Think it through."_ produced a
-> reasoning item every time. The proxy was forwarding the effort correctly and
-> faithfully reporting that the model chose not to think.
+> Measured against `claude-sonnet-5` at `effort=low`: the prompt _"reply with
+> one concise sentence about why 19 \* 37 = 703"_ gave **zero reasoning items
+> and zero reasoning tokens in 3 of 3 runs**. The same model, at the same
+> effort, with the prompt _"What is 17\*24? Think it through."_ gave a reasoning
+> item every time. The proxy forwarded the effort correctly. It reported
+> correctly that the model did not do reasoning.
 
-`28f392d` rewrote them to assert the property the proxy _is_ answerable for:
-that whatever reasoning its own response carries is consumable by a real OpenAI
-client. A recording `fetch` captures the exact bytes returned for the very turn
-the SDK parsed, so ground truth and surface come from one response rather than
-two nondeterministic calls. Three claims are checked separately because they are
-not equally strong — text on the wire must reach the client (the sharp one), a
-textless item must survive as a reasoning part, and reported reasoning tokens
-must reach `usage` (weakest, since the SDK reads the same field). If upstream
-emitted nothing, the assertion is skipped rather than failed.
+`28f392d` wrote the two tests again. They now assert the property that the proxy
+_is_ responsible for: a real OpenAI client can use the reasoning that the
+response of the proxy carries. A `fetch` that records captures the exact bytes
+of the turn that the SDK parsed. Thus the true data and the visible surface come
+from one response, and not from two calls with different results. The tests
+check three claims separately, because the claims are not equally strong. First,
+text on the wire must reach the client. This claim is the strongest. Second, an
+item with no text must stay as a part of the reasoning. Third, reported
+reasoning tokens must reach `usage`. The third claim is the weakest, because the
+SDK reads the same field. If the upstream service wrote nothing, the test skips
+the assertion, and does not fail it.
 
 > [!TIP]
-> **The rewrite was verified by fault injection, not by passing.** With the
-> proxy patched to write reasoning text under `"summary_text"` instead of
-> `"text"` — still on the wire, just under a key the SDK's parser does not read
-> — both tests fail. An earlier draft of the same check passed under that fault
-> and was discarded; "the assertion is green" and "the assertion can fail" are
-> different claims, and only the second one is worth anything.
+> **An injected fault checked the new tests. A pass alone did not check them.**
+> A patch made the proxy write the reasoning text under `"summary_text"` and not
+> under `"text"`. The text was still on the wire, but under a key that the
+> parser of the SDK does not read. The two tests fail with this patch. An
+> earlier version of the same check passed with the fault, and the team removed
+> it. "The assertion passes" and "the assertion can fail" are different claims.
+> Only the second claim has value.
 
-That round also fixed a latent bug in the old assertion: it read
-`usage.reasoningTokens`, but the AI SDK nests it under
-`usage.outputTokenDetails.reasoningTokens`, so that fallback was always `0`.
+That round also corrected a hidden defect in the old assertion. The assertion
+read `usage.reasoningTokens`. The AI SDK puts this value under
+`usage.outputTokenDetails.reasoningTokens`. Thus that fallback value was always
+`0`.
 
 Live suite after this round: **22 passed, 0 failed.**
 
@@ -753,37 +782,37 @@ Live suite after this round: **22 passed, 0 failed.**
 
 ## Residual backlog
 
-What genuinely remains after both rounds. Nothing here is a correctness or
-contamination bug; the highest class present is **wasted work**, plus several
-deliberate scope limits. R6–R9 were added by round two and are documented limits
-rather than open defects.
+This is the work that remains after the two rounds. No item here is a defect of
+correctness or of contamination. The highest class here is **wasted work**, with
+some intended limits of the scope. Round two added R6 to R9. These are limits in
+the documentation, and not open defects.
 
-| ID     | Item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Class       | Effort |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------ |
-| **R1** | `Broker.Register` (`internal/toolproxy/toolproxy.go:174-198`) still republishes the batch's **whole** call-id set on each of its N+1 calls — a residual O(N²) term, separate from the expiry-hook one `b41389c` fixed. A tracked "already published" set was implemented, measured and **reverted**: it removed only the map inserts, not the dominant O(N) iteration, and _cost_ allocations at small N (1720 → 1992 B/op at `tools=1`) for under 4% at `tools=128`. Fixing it properly needs `ensureCall` to hand `Register` the ids it created, which is an API change. | Wasted work | **M**  |
-| **R2** | `prepareResponseTurn` retries `resumeSession` once **per instruction candidate**. `openai.InstructionCandidates("")` yields two (`" "` and a fallback system prompt), and `resumeSession` loops over them (`internal/copilotgw/sessions.go:92-107`), so a single refused resume issues two SDK calls before falling back — doubling cold-continuation latency for requests with no instructions.                                                                                                                                                                           | Wasted work | **S**  |
-| **R3** | E3 does **not** enforce OpenAI's strict _schema subset_ (`additionalProperties: false`, every property listed in `required`).[^strict] Real OpenAI 400s a strict schema that violates it; this proxy validates arguments against whatever schema the client declared. A client whose schema is strict-shaped gets the same guarantee either way; one whose schema is not gets a weaker guarantee than OpenAI would give, silently.                                                                                                                                         | Ergonomics  | **S**  |
-| **R4** | E3 added **no retry loop** for strict violations. A non-conforming tool call fails the turn with an error naming the tool rather than being fed back to the model for correction. This is stated as deliberate in `0fc27a8` — this proxy does not own the model's decoding loop — but it is a real behavioural gap against OpenAI's constrained decoding, which cannot emit a non-conforming call at all.                                                                                                                                                                  | Ergonomics  | **M**  |
-| **R5** | `apierr.RateLimited`'s `RetryAfter` is plumbed, mapped to an RFC 9110 `Retry-After` header and tested end to end, but is **unreachable in production**: the Copilot SDK exposes no retry-after on `SessionErrorData`, so `0` is passed and the header is never emitted today. The field exists so the taxonomy can carry a wait the moment anything can supply one.                                                                                                                                                                                                        | Ergonomics  | **XS** |
-| **R6** | `classifyUpstreamError` classifies SDK-call failures by **string match** on the rendered error. The SDK returns `*internal/jsonrpc2.Error`, an unexported type, so `err.Error()` — `"JSON-RPC Error %d: %s"` — is the only signal available; nothing can read its `Code` or `Data`. A false positive costs a client an unnecessary backoff. Revisit if the SDK ever exports its error type.                                                                                                                                                                                | Ergonomics  | **S**  |
-| **R7** | An unencoded `..` in a response-id path is swallowed by `ServeMux`'s `cleanPath` **before** any handler runs, so `GET /v1/responses/..` returns a `307` with an HTML body — outside the JSON envelope `dcf7dde` guarantees. Encoded traversal (`%2E%2E`) is correctly rejected with a 400. Left alone deliberately: intercepting redirects to rewrite them risks breaking legitimate ones, for a path no client sends on purpose.                                                                                                                                          | Ergonomics  | **S**  |
-| **R8** | Warm-input delivery is **at-least-once**, not exactly-once. The pending claim is retired only after `Send` returns, so a crash between that return and the store write replays input the conversation already has. Clearing first would turn every failed send into silently dropped input the client was told had been accepted — a repeated turn is recoverable, a lost one is not. On the streaming path the claim writes are issued from the send goroutine, widening the window from "a crash" to "another request resumed the same warm id within milliseconds".     | Ergonomics  | **M**  |
-| **R9** | Strict tool schemas this proxy cannot compile are accepted and **not enforced**, logged at warn. That is the graceful degradation — a 400 would break integrations over schemas real OpenAI accepts — but it does mean `strict: true` is not a guarantee on those tools.                                                                                                                                                                                                                                                                                                   | Ergonomics  | **S**  |
-| **F1** | Chat Completions as an adapter over Responses. **Declined** with evidence — see [Workstream F](#workstream-f--the-decision). Recorded here so it is not silently re-proposed; re-open only if a _new_ reason appears, not because the prerequisite now exists.                                                                                                                                                                                                                                                                                                             | —           | **L**  |
+| ID     | Item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Class       | Effort |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------ |
+| **R1** | `Broker.Register` (`internal/toolproxy/toolproxy.go:174-198`) publishes the **full** set of the call ids of the batch again on each of its N+1 calls. This is a remaining O(N²) term, separate from the term of the expiry hook that `b41389c` corrected. The team wrote a set of the ids that are published already, measured it, and **reverted** it. The set removed only the inserts into the map, and not the O(N) iteration that dominates. It also _added_ allocations at a small N (1720 → 1992 B/op at `tools=1`), for less than 4% at `tools=128`. A correct fix needs `ensureCall` to give `Register` the ids that it made, which changes the API. | Wasted work | **M**  |
+| **R2** | `prepareResponseTurn` tries `resumeSession` again one time **for each candidate of the instructions**. `openai.InstructionCandidates("")` gives two candidates: `" "` and a fallback system prompt. `resumeSession` loops over them (`internal/copilotgw/sessions.go:92-107`). Thus one refused resume makes two SDK calls before the fallback. This makes the latency of a cold continuation two times larger for requests with no instructions.                                                                                                                                                                                                             | Wasted work | **S**  |
+| **R3** | E3 does **not** enforce the strict _subset of the schema_ of OpenAI (`additionalProperties: false`, and every property in `required`).[^strict] Real OpenAI returns a 400 for a strict schema that does not obey this subset. This proxy checks the arguments against the schema that the client declared. A client with a schema in the strict form gets the same guarantee in the two cases. A client with a different schema gets a weaker guarantee than OpenAI gives, and sees no message.                                                                                                                                                               | Ergonomics  | **S**  |
+| **R4** | E3 added **no retry loop** for a violation of a strict schema. A tool call that does not obey the schema fails the turn with an error that names the tool. The proxy does not send the call back to the model for a correction. `0fc27a8` says that this is intentional, because this proxy does not own the decoding loop of the model. It is a true difference of behavior against the constrained decoding of OpenAI, which cannot write a call that does not obey the schema.                                                                                                                                                                            | Ergonomics  | **M**  |
+| **R5** | The `RetryAfter` field of `apierr.RateLimited` is connected, mapped to an RFC 9110 `Retry-After` header, and tested from end to end. But the field is **not reachable in production**. The Copilot SDK gives no retry-after value on `SessionErrorData`. Thus the code passes `0`, and it never writes the header today. The field exists so that the taxonomy can carry a wait time when a source for that value exists.                                                                                                                                                                                                                                     | Ergonomics  | **XS** |
+| **R6** | `classifyUpstreamError` classifies the failures of an SDK call by a **match of the text** of the error. The SDK returns `*internal/jsonrpc2.Error`, which is not an exported type. Thus `err.Error()` — `"JSON-RPC Error %d: %s"` — is the only signal. No code can read its `Code` or its `Data`. An incorrect match costs the client an unnecessary backoff. Examine this again if the SDK exports its error type.                                                                                                                                                                                                                                          | Ergonomics  | **S**  |
+| **R7** | The `cleanPath` function of `ServeMux` removes an unencoded `..` in a path with a response id **before** any handler runs. Thus `GET /v1/responses/..` returns a `307` with an HTML body. This is outside the JSON envelope that `dcf7dde` guarantees. The code correctly rejects an encoded `..` (`%2E%2E`) with a 400. The team leaves this as it is, with intent. To intercept the redirects and change them can break correct redirects, for a path that no client sends on purpose.                                                                                                                                                                      | Ergonomics  | **S**  |
+| **R8** | The delivery of the warm input happens **one time or more**, and not exactly one time. The code retires the pending claim only after `Send` returns. Thus a crash between that return and the write to the store replays input that the conversation has already. To clear the claim first makes every failed send a loss of input with no message, and the client was told that the input was accepted. A repeated turn is recoverable, but a lost turn is not. On the streaming path, the send goroutine writes the claim. This makes the window larger, from "a crash" to "another request resumed the same warm id some milliseconds later".              | Ergonomics  | **M**  |
+| **R9** | The proxy accepts a strict tool schema that it cannot compile, and it does **not enforce** the schema. It writes a log line at the warn level. This is the controlled degradation, because a 400 would break integrations with schemas that real OpenAI accepts. But `strict: true` is not a guarantee on those tools.                                                                                                                                                                                                                                                                                                                                        | Ergonomics  | **S**  |
+| **F1** | Chat Completions as an adapter over Responses. **Declined**, with evidence — see [Workstream F](#workstream-f--the-decision). The item is here so that nobody proposes it again with no discussion. Open it again only for a _new_ reason, and not because the prerequisite exists now.                                                                                                                                                                                                                                                                                                                                                                       | —           | **L**  |
 
 > [!TIP]
-> R1 and R2 remain the only two with a load-proportional cost, and R2 is by far
-> the cheaper: it is one conditional on whether instructions were actually
-> empty. Take it first if this list is picked up. R8 is the only entry that can
-> still surprise a user, and only across a crash.
+> R1 and R2 are the only two items with a cost that increases with the load. R2
+> is much cheaper. It is one condition on the question if the instructions were
+> empty. Do R2 first when you start this list. R8 is the only entry that can
+> still give a user an unexpected result, and only after a crash.
 
 ---
 
 ## Definition of done
 
-Every commit in this record satisfied the gates enforced by
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and reproducible
-locally via `make ci`:
+Every commit in this record satisfied the checks of
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). You can do the same
+checks locally with `make ci`:
 
 - [x] `gofmt -l .` — empty
 - [x] `go build ./...`
@@ -793,75 +822,76 @@ locally via `make ci`:
 - [x] `deno fmt --check`, `deno check tests/ai-sdk-deno`,
       `deno task test:ai-sdk`
 
-The Deno suite is gated off by default, so that last line proves only that the
-suite is disabled. It was additionally run **against a live Copilot
-subscription** — 22 passed, 0 failed — which is what round three above records.
-Nothing else here has ever exercised real upstream.
+The Deno suite is off by default. Thus the last line shows only that the suite
+is disabled. The team also ran the suite **against a live Copilot
+subscription**: 22 passed, 0 failed. Round three above records this run. No
+other test here used the true upstream service.
 
-Three standards were carried forward from the review cycle. All three earned
-their place again:
+Three standards come from the review cycle. All three showed their value again:
 
-1. **Demonstrate the bug before fixing it.** The regression test was written
-   first, run against the parent commit, and the observed failure recorded in
-   the commit body. Every A- and C-item body above carries one. Where this was
-   _impossible_ — C6, because an assertion about a 429 does not compile against
-   a taxonomy with no 429 — the commit says so and supplies the next-best
-   concrete observation instead of pretending.
-2. **Treat golden-test failures as findings, not chores.** A4 and `bec6806` both
-   broke `internal/sessionstore/record_golden_test.go` legitimately and both
-   said so in the commit message. A4 additionally added
-   `goldenSparseUsageRecordJSON`, because the fully-populated golden was
-   structurally incapable of catching the sparse case.
-3. **Verify external facts.** This paid for itself three times over. The
-   `len([]rune(...))` premise (B2), the WebSocket close ordering (C2) and the
-   429 envelope shape (C6) were each asserted incorrectly in the plan and each
-   corrected only because they were checked against a benchmark, a ten-run
-   measurement, and the upstream issue trail respectively. The 404/405 bodies in
-   C4 and the `defer_loading` semantics in E3 were likewise taken from primary
-   sources rather than invented.
+1. **Show the defect before you correct it.** Write the regression test first.
+   Run it against the parent commit. Record the failure that you see in the body
+   of the commit. Every A item and C item above has one. For C6 this was _not
+   possible_, because an assertion about a 429 does not compile against a
+   taxonomy with no 429. The commit says this, and it gives the best other
+   concrete observation.
+2. **Treat a failure of a golden test as a finding, and not as a small task.**
+   A4 and `bec6806` both broke `internal/sessionstore/record_golden_test.go` for
+   a correct reason, and both say this in the commit message. A4 also added
+   `goldenSparseUsageRecordJSON`, because the fully-populated golden cannot find
+   the sparse case.
+3. **Check the external facts.** This gave value three times. The plan stated
+   the premise about `len([]rune(...))` (B2), the order of the WebSocket close
+   (C2) and the shape of the 429 envelope (C6) incorrectly. The team corrected
+   each one, because it checked each one: with a benchmark, with a measurement
+   of ten runs, and with the issue reports of the upstream projects. The 404 and
+   405 bodies in C4 and the meaning of `defer_loading` in E3 also come from
+   primary sources, and nobody invented them.
 
-[^usage]: OpenAI Responses API — `usage.input_tokens`, `output_tokens`, and
-    `total_tokens` are required integers on the usage object, with
-    `input_tokens_details` and `output_tokens_details` always present.
+[^usage]: OpenAI Responses API — `usage.input_tokens`, `output_tokens` and
+    `total_tokens` are necessary integers on the usage object.
+    `input_tokens_details` and `output_tokens_details` are always present.
     <https://developers.openai.com/api/reference/resources/responses>
 
-[^proxy]: AWS Application Load Balancer defaults to a 60-second idle timeout and
-    Cloudflare to 100 seconds; both terminate connections with no bytes in
-    flight regardless of the origin's own timeouts.
+[^proxy]: The AWS Application Load Balancer has a default idle timeout of 60
+    seconds, and Cloudflare has 100 seconds. The two services stop a connection
+    with no bytes in transfer. The timeouts of the origin server have no effect
+    on this.
     <https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html#connection-idle-timeout>
 
 [^wsclose]: `coder/websocket` v1.8.15 installs a `context.AfterFunc` on the read
-    context in `setupReadTimeout` which calls `Conn.close`, so cancelling the
-    context the read loop reads with severs the connection rather than merely
-    interrupting the read. <https://github.com/coder/websocket>
+    context in `setupReadTimeout`, and that function calls `Conn.close`. Thus a
+    cancel of the context that the read loop uses cuts the connection. It does
+    not only stop the read. <https://github.com/coder/websocket>
 
-[^ratelimit]: OpenAI's 429 envelope uses `code: "rate_limit_exceeded"` with
-    `type` naming the exhausted dimension (`"requests"` or `"tokens"`), per the
-    openai-node maintainer in <https://github.com/openai/openai-node/issues/168>
-    and reproduced in <https://github.com/openai/openai-python/issues/2703>.
-    `"rate_limit_error"` is Anthropic's vocabulary.
+[^ratelimit]: The 429 envelope of OpenAI uses `code: "rate_limit_exceeded"`. The
+    `type` field names the dimension that the client used fully (`"requests"` or
+    `"tokens"`). A maintainer of openai-node gives this in
+    <https://github.com/openai/openai-node/issues/168>, and
+    <https://github.com/openai/openai-python/issues/2703> shows it again.
+    `"rate_limit_error"` is the vocabulary of Anthropic.
 
-[^errshape]: The 404 wording (`Invalid URL (POST /v1/embeddings)`) is reported
-    identically across <https://github.com/openai/openai-node/issues/132> and
-    <https://github.com/openai/openai-python/issues/250>; the 405 wording
-    (`Only POST requests are accepted.`) and code `method_not_supported` are
-    from <https://github.com/openai/openai-python/issues/2703>.
+[^errshape]: The text of the 404 (`Invalid URL (POST /v1/embeddings)`) is the
+    same in <https://github.com/openai/openai-node/issues/132> and
+    <https://github.com/openai/openai-python/issues/250>. The text of the 405
+    (`Only POST requests are accepted.`) and the code `method_not_supported`
+    come from <https://github.com/openai/openai-python/issues/2703>.
 
-[^strict]: OpenAI's structured-outputs subset requires
-    `additionalProperties: false` on every object and every property listed in
-    `required`; a strict function schema that violates it is rejected with a 400
-    at request time.
+[^strict]: The subset for structured outputs of OpenAI needs
+    `additionalProperties: false` on every object, and every property in
+    `required`. OpenAI rejects a strict function schema that does not obey this,
+    with a 400 at the time of the request.
     <https://platform.openai.com/docs/guides/function-calling#strict-mode>
 
-[^errorevent]: OpenAI's `ResponseErrorEvent` carries `code`, `message`, `param`
-    and `sequence_number` at the top level.
+[^errorevent]: The `ResponseErrorEvent` of OpenAI carries `code`, `message`,
+    `param` and `sequence_number` at the top level.
     <https://developers.openai.com/api/reference/resources/responses/streaming-events/>
 
-[^dotnet881]: An OpenAI maintainer confirming the service returns the nested
-    `{"error": {...}}` shape rather than the documented flat one, and calling it
-    a service-side contract violation.
+[^dotnet881]: An OpenAI maintainer confirms that the service returns the nested
+    `{"error": {...}}` shape, and not the flat shape in the documentation. The
+    maintainer calls this a violation of the contract by the service.
     <https://github.com/openai/openai-dotnet/issues/881>
 
-[^python2487]: `openai-python`'s streaming reads `data["error"]["message"]`, so
-    it only recognises the nested shape.
+[^python2487]: The streaming code of `openai-python` reads
+    `data["error"]["message"]`. Thus it knows only the nested shape.
     <https://github.com/openai/openai-python/issues/2487>

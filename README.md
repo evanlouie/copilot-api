@@ -1,18 +1,18 @@
 # copilot-api
 
-`copilot-api` exposes a small OpenAI-compatible HTTP API backed by the GitHub
-Copilot SDK. It is intended as a **single-user local proxy**: point
-OpenAI-compatible clients at the local base URL and choose a model available in
-your GitHub Copilot subscription.
+`copilot-api` gives a small OpenAI-compatible HTTP API. The GitHub Copilot SDK
+supplies the models. The program is a **single-user local proxy**. Point an
+OpenAI-compatible client at the local base URL. Then select a model that your
+GitHub Copilot subscription contains.
 
-The implementation follows the decisions in
-[`docs/implementation-plan.html`](docs/implementation-plan.html):
-replacement-mode prompts, Copilot SDK tools disabled by default, OpenAI-shaped
-errors, synthetic Chat history hydration, Responses continuity, client-owned
-function tool execution, SSE streaming, bounded XDG retention, pruning, and safe
-manual purge.
+The implementation obeys the decisions in
+[`docs/implementation-plan.html`](docs/implementation-plan.html). The decisions
+are: replacement-mode prompts, Copilot SDK tools disabled by default,
+OpenAI-shaped errors, synthetic Chat history hydration, Responses continuity,
+client-owned function tool execution, SSE streaming, bounded XDG retention,
+pruning, and safe manual purge.
 
-Current SDK target: `github.com/github/copilot-sdk/go v1.0.6`.
+The current SDK target is `github.com/github/copilot-sdk/go v1.0.6`.
 
 ## Quick start
 
@@ -28,236 +28,250 @@ go build ./cmd/copilot-api
 COPILOT_API_KEY=local-secret ./copilot-api serve
 ```
 
-If `COPILOT_API_KEY` is set, `/v1/*` endpoints require:
+If you set `COPILOT_API_KEY`, the `/v1/*` endpoints need this header:
 
 ```http
 Authorization: Bearer local-secret
 ```
 
-If it is unset, `/v1/*` endpoints are unauthenticated and the server logs a
-warning. The server refuses to bind to non-loopback addresses without
-`COPILOT_API_KEY`; keep the default `127.0.0.1:8080` bind unless you enable
-auth.
+If you do not set it, the `/v1/*` endpoints have no authentication. The server
+then writes a warning. The server does not bind to a non-loopback address
+without `COPILOT_API_KEY`. Keep the default `127.0.0.1:8080` bind if you do not
+enable authentication.
 
 ## Endpoints
 
 | Endpoint                             | Status      | Notes                                                                                                    |
 | ------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------- |
-| `GET /healthz`                       | Implemented | Operational liveness JSON.                                                                               |
-| `GET /readyz`                        | Implemented | Checks SDK client state and model listing.                                                               |
-| `GET /v1/models`                     | Implemented | Maps Copilot model metadata to OpenAI model objects.                                                     |
-| `POST /v1/chat/completions`          | Implemented | Non-streaming and SSE streaming; synthetic session hydration for history.                                |
+| `GET /healthz`                       | Implemented | JSON that shows that the server operates.                                                                |
+| `GET /readyz`                        | Implemented | Checks the state of the SDK client and the model list.                                                   |
+| `GET /v1/models`                     | Implemented | Changes Copilot model metadata into OpenAI model objects.                                                |
+| `POST /v1/chat/completions`          | Implemented | Non-streaming and SSE streaming. Synthetic session hydration for the history.                            |
 | `POST /v1/responses`                 | Implemented | Text/image input, message-array input, function-call outputs, streaming.                                 |
-| `GET /v1/responses`                  | Implemented | Responses WebSocket mode for streaming `response.create` events.                                         |
-| `GET /v1/responses/{response_id}`    | Implemented | Only for API-visible stored responses. Debug state is retained regardless.                               |
-| `DELETE /v1/responses/{response_id}` | Implemented | Writes a minimal anti-resurrection tombstone and removes the SDK session after its final live reference. |
+| `GET /v1/responses`                  | Implemented | Responses WebSocket mode that streams `response.create` events.                                          |
+| `GET /v1/responses/{response_id}`    | Implemented | Only for API-visible stored responses. The server keeps the debug state always.                          |
+| `DELETE /v1/responses/{response_id}` | Implemented | Writes a small tombstone that stops resurrection. Removes the SDK session after its last live reference. |
 
 ## Compatibility matrix
 
-| Feature                         | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Models                          | `model` is required for every generation request. A final `:<reasoning-effort>` suffix is accepted as OpenAI-facing selector syntax; model lookup, SDK sessions, persistence, logs, and response `model` fields use only the canonical base ID. Unknown canonical models are rejected as `model_not_found` after a forced model-cache refresh. `GET /v1/models` lists each canonical ID plus virtual `model:effort` aliases for every advertised supported reasoning effort that names a known effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), and an advertised default when it is not already listed. An advertised effort outside that set is not published, because the selector parser would not split it back off and the alias would resolve to `model_not_found`. Aliases retain canonical capability metadata except `supported_reasoning_efforts` and `default_reasoning_effort`, which remain canonical-model choice metadata. Model metadata may include token limits such as `max_context_window_tokens`, `max_prompt_tokens`, and `max_output_tokens`, plus `supports_vision` and `vision` limits.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Reasoning effort                | Send top-level `reasoning_effort` on Chat Completions or Responses requests, append it to the model as `model:effort`, or use Responses `reasoning.effort` for Codex CLI compatibility. These are peer spellings: surrounding whitespace and case are normalized, matching values are accepted, and contradictory values are rejected. Explicit values are forwarded to Copilot without configured-default rounding. A naked model with no request effort can use `COPILOT_DEFAULT_REASONING_EFFORT`, adjusted to the closest model-supported effort when metadata is available; models without reasoning-effort support omit the default. `GET /v1/models` metadata may include `supported_reasoning_efforts` and `default_reasoning_effort`. Other Responses `reasoning` controls are ignored or rejected as unsafe.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| Reasoning output                | Model reasoning is surfaced on both surfaces. Chat Completions streams incremental `delta.reasoning` (+ `delta.reasoning_content`) chunks ahead of content/tool-call deltas and attaches `reasoning`, `reasoning_content`, and structured `reasoning_details` (Anthropic signed text plus any OpenAI-style encrypted blob) to the final assistant message; the streamed terminal carries a `reasoning_details` chunk for continuity. Responses emit ordered `reasoning` output items with `summary` text, bracketed by the full OpenAI summary lifecycle (`response.reasoning_summary_part.added`/`.done` around `response.reasoning_summary_text.delta`/`.done`) before the message item, plus `encrypted_content` when present (encrypted-only reasoning is reconciled into an announced item). Interleaved thinking is preserved automatically across the multi-request tool loop — each turn produces a fresh reasoning block. Inbound assistant `reasoning`/`reasoning_content`/`reasoning_details` are tolerated and replayed when rebuilding a cold session; opaque/encrypted reasoning is session-bound and stripped by the SDK on resume, so portable stateless `store:false` encrypted-reasoning round-trips are unsupported. The `COPILOT_REASONING_EMISSION` knob narrows or disables emission.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Chat history                    | Leading `system`/`developer` messages become replacement system instructions. Prior non-final messages are converted to Copilot SDK `events.jsonl`; only the final user turn is sent. A request may instead end with an assistant prefill (the trailing assistant content becomes prior context plus a `Continue.` continuation prompt) or a tool continuation. Mid-conversation `system`/`developer` messages are spliced into the transcript in place as `System:`/`Developer:` blocks rather than rejected, preserving their position relative to the turn they annotate. SDK infinite-session auto-compaction is disabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Prompt isolation                | The SDK is always called with `SystemMessageConfig{Mode: "replace"}`. Empty caller instructions use a single-space replacement, then fall back to `You are a chat completion model.` if needed. This avoids SDK resume failures caused by persisted empty `system.message` events.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| SDK tools                       | The SDK client runs in `ModeEmpty`. Built-in file/shell/MCP/memory/skill/repository tools are not exposed. `AvailableTools` is either request-scoped custom-tool filters or an impossible sentinel. Permissions reject everything except exact request-scoped custom tools.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Client-owned tools              | Chat Completions remains function-tool only. Responses accepts client-owned `function`, freeform `custom`, `namespace` child tools, and top-level `tool_search` specs. The proxy flattens them into request-scoped Copilot SDK custom tools, aliases SDK-unsafe names such as dotted function names, and rehydrates output items back to Responses shapes (`function_call`, `custom_tool_call`, and `tool_search_call`). Tool calls are returned to clients; the proxy never executes business logic. `strict: true` is honoured on a best-effort basis: the model's emitted arguments are validated against the declared JSON Schema before the call is handed to the client, and Draft-04's boolean exclusive bounds are rewritten into the Draft 2020-12 form so they enforce too, but a strict tool whose schema still cannot be compiled (freeform `custom` tools, and external `$ref`, which is deliberately never fetched) is accepted and left unenforced with a warn-level log rather than rejected. `COPILOT_STRICT_ENFORCEMENT=fail-closed` turns that acceptance into a `400` for operators who would rather fail than serve an unenforced contract. `defer_loading` is forwarded to the Copilot SDK's tool-defer control (see below). Hosted/proxy-executed tools such as provider MCP declarations, hosted `web_search`, and image generation are dropped with a debug log so mixed Codex catalogs can proceed; any other unrecognized tool `type` is rejected so client typos surface.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Tool continuations              | Chat clients append `role: "tool"` messages. Responses clients send `function_call_output`, `custom_tool_call_output`, or `tool_search_output` items with `previous_response_id`; mixed tool-output plus new message arrays are accepted for Responses compatibility. The proxy validates batch ownership, endpoint kind, requested model, pending call kind, and exactly one output per pending call before unblocking parked SDK handlers. `tool_search_output.tools` accepts only loadable client-owned `function` and `namespace` specs. Successful live `tool_search_output` items form an explicit turn boundary: returned tools are merged into the request-scoped catalog, persisted, the stale SDK runner is cut over, and the next Responses turn is configured with the merged catalog. If the live pending batch is no longer available (after a restart or TTL expiry), continuations fall back to replaying the supplied Chat transcript or the persisted previous Responses record and installed catalog so a model turn is still produced. Responses `input` may be omitted when `previous_response_id` is supplied.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `tool_choice`                   | Omitted/`auto` and `none` are enforced (`none` withholds the tool catalog). `allowed_tools` is enforced: the request-scoped catalog handed to the SDK is narrowed to the listed tools, which is exactly what the field means, so nothing about it is approximated. A forced function/custom choice narrows the catalog to that one tool, which gets as far as "the model can call nothing else" but not as far as OpenAI's "the model must call it" — the model may still answer in prose — and naming a tool the request's catalog does not contain is rejected. `required`, and an `allowed_tools` `mode` of `required`, are accepted and ignored with a debug log: catalog filtering cannot make a model call something. Values outside OpenAI's grammar are rejected, as is an `allowed_tools` entry with no tool name, since dropping it would withhold a tool the client permitted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `parallel_tool_calls`           | Chat and Responses accept both `true` and `false`; `false` is ignored with a debug log because the backend cannot enforce serial tool planning. Internal pending batches capture and replay multiple tool calls per turn.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Streaming                       | SSE streams are OpenAI-shaped. Chat streams emit reasoning deltas first (when present), forward SDK text deltas, and forward tool-call argument fragments as `delta.tool_calls[].function.arguments` chunks with a stable per-call `index` (the `id`, `type`, and `name` are sent once, on that call's first fragment). The terminal tool-call chunk carries only what the fragments did not already deliver, so a turn whose calls all streamed in full omits it entirely where one was previously always written; `finish_reason: "tool_calls"` still arrives, so a client accumulating `function.arguments` per `index` is unaffected. Strict tools stay buffered — their arguments are validated before they reach the client, so a fragment of one could be a call the proxy is about to refuse. Streams terminate with `[DONE]`. Responses SSE streams emit lifecycle events (each carrying a monotonically increasing `sequence_number`) such as `response.created`, `response.in_progress`, reasoning summary events (`response.reasoning_summary_part.added`/`.done` and `response.reasoning_summary_text.delta`/`.done`), `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, incremental `response.function_call_arguments.delta` followed by `.done`, and `response.completed` or `response.failed`, then `[DONE]`. Extended Responses tool items (`custom_tool_call`, namespaced `function_call`, and `tool_search_call`) are announced with `response.output_item.added` before `response.output_item.done`; only `function_call` arguments stream incrementally. Accumulated fragments are reconciled against the finished call before the terminal events are written — as JSON values, not bytes, since the finished arguments are re-encoded and so differ in key order, whitespace, HTML escaping, and number formatting — and a real divergence fails the stream rather than delivering arguments that contradict what the client already accumulated. Responses WebSocket mode emits the same JSON events, uses `response.failed` for failures after lifecycle start, and reserves top-level `error` for envelope or preflight failures. |
-| Usage                           | SDK input/output/reasoning token events are mapped when available. The `usage` object is all-or-nothing: it is absent when the SDK reported no token counts, and otherwise carries every required counter (Responses also always carries `input_tokens_details` and `output_tokens_details`), with unreported counts as `0`. When Chat `stream_options.include_usage` is set, every streamed chunk carries `usage` (null until the terminal chunk) and a final empty-choices usage chunk is always emitted, using `usage: null` when upstream usage is unavailable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Multimodal                      | User image inputs are supported for Chat `image_url` parts and Responses `input_image` parts. `http`, `https`, and base64 `data:` URLs are converted to Copilot blob attachments; remote image fetches reject loopback, private, link-local, multicast, reserved, documentation, benchmarking, shared-address, and otherwise non-public hosts to avoid SSRF; selected models must advertise vision support. Image count and size constraints are enforced only when advertised by the selected model; the proxy does not add its own image quotas. `function_call_output` content arrays are parsed: text parts become plain text, while image and file output parts are summarized as redacted text markers. Image `file_id` inputs and binary/image/file tool-output artifacts are deferred. JSON object/array tool outputs are serialized to JSON text.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Responses WebSocket differences | The OpenAI beta header is accepted but not required; instead of OpenAI's fixed 60-minute socket lifetime, connection limits are configurable via `COPILOT_WEBSOCKET_*` (an idle timeout, default 2m, that never closes a connection while a response is still generating; an optional hard max lifetime; and server ping keepalive); `response.create.response` nested payloads are accepted as an extension with nested fields taking precedence. `generate:false` creates a warmed Copilot SDK session and returns an empty completed response; tool-output continuations with `generate:false` fail clearly until warm post-search planning is supported. Warm sessions store and compare the normalized Responses tool catalog, including custom, namespace, unsafe-name aliases, and `tool_search`. Responses `store:false` is not API-visible but is still persisted locally for debugging and continuation, including dynamic tool catalogs, subject to configured retention quotas.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Unsupported fields              | Validation follows one rule: reject unknown, accept-and-ignore known-but-unsupported _when ignoring degrades gracefully_, never silently drop something the client could have meant. There is a single policy and no strictness switch: harmless unsupported client knobs such as `temperature` are ignored and reported to the operator at debug level. Parameters that mainstream clients set by default — `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `parallel_tool_calls:false`, and `tool_choice: "required"` — are accepted and reported at debug level instead of failing the request, because ignoring them still yields usable prose. For Codex CLI compatibility, Responses `include` values and `text.verbosity` are accepted as no-ops. Structured output is the exception: `response_format`/`text.format` `json_schema` and `json_object` are rejected, since ignoring them would return prose to a client that is about to parse JSON; the explicit `{"type":"text"}` default is accepted. Values OpenAI does not define (an unknown `include` entry, `text.format.type`, `tool_choice`, or Responses tool `type`) are rejected, as are unsupported semantics that would mislead clients; both fail closed with OpenAI-shaped `invalid_request_error` responses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Feature                         | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Models                          | Every generation request needs `model`. The server accepts a final `:<reasoning-effort>` suffix as OpenAI-facing selector syntax. The model lookup, the SDK sessions, the storage, the logs and the response `model` fields use only the canonical base ID. The server rejects an unknown canonical model as `model_not_found`, after it refreshes the model cache. `GET /v1/models` lists each canonical ID. It also lists a virtual `model:effort` alias for each advertised supported reasoning effort that has a known name (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). It also lists an advertised default when the list does not contain it. The server does not publish an advertised effort outside that set. The selector parser cannot divide such an effort again, and the alias would give `model_not_found`. An alias keeps the canonical capability metadata, but not `supported_reasoning_efforts` and `default_reasoning_effort`. Those two stay metadata of the canonical model. The model metadata can include token limits such as `max_context_window_tokens`, `max_prompt_tokens` and `max_output_tokens`. It can also include `supports_vision` and `vision` limits.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Reasoning effort                | Send the top-level `reasoning_effort` field on a Chat Completions or Responses request. You can also add the effort to the model as `model:effort`. You can also use the Responses `reasoning.effort` field for Codex CLI compatibility. The three forms are equal spellings. The server removes the space characters, ignores the case, accepts values that agree, and rejects values that disagree. The server sends an explicit value to Copilot, and does not round it to a configured default. A model with no request effort can use `COPILOT_DEFAULT_REASONING_EFFORT`. The server moves that default to the closest effort that the model supports, when the metadata is available. A model without reasoning-effort support does not get the default. The metadata of `GET /v1/models` can include `supported_reasoning_efforts` and `default_reasoning_effort`. The server ignores or rejects the other Responses `reasoning` controls, because they are not safe.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Reasoning output                | The server gives the reasoning of the model on both surfaces. Chat Completions streams incremental `delta.reasoning` (and `delta.reasoning_content`) chunks before the content deltas and the tool-call deltas. It attaches `reasoning`, `reasoning_content` and structured `reasoning_details` to the final assistant message. `reasoning_details` contains Anthropic signed text and any OpenAI-style encrypted blob. The last streamed chunk carries a `reasoning_details` chunk for continuity. Responses send ordered `reasoning` output items with `summary` text before the message item. The full OpenAI summary lifecycle encloses them (`response.reasoning_summary_part.added`/`.done` around `response.reasoning_summary_text.delta`/`.done`). The items also carry `encrypted_content` when it is present, and the server puts reasoning that is encrypted only into an announced item. The server keeps interleaved thinking automatically through the tool loop of more than one request, because each turn makes a new reasoning block. The server accepts inbound assistant `reasoning`/`reasoning_content`/`reasoning_details`, and replays them when it builds a cold session again. Opaque or encrypted reasoning belongs to one session, and the SDK removes it on resume. Therefore a portable stateless `store:false` round-trip with encrypted reasoning is not supported. The `COPILOT_REASONING_EMISSION` control makes the output narrow or stops it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Chat history                    | A `system` or `developer` message at the start becomes a replacement system instruction. The server changes the earlier non-final messages into Copilot SDK `events.jsonl`, and sends only the final user turn. A request can end with an assistant prefill instead. The trailing assistant content then becomes prior context, and the server adds a `Continue.` continuation prompt. A request can also end with a tool continuation. The server puts a `system` or `developer` message from the middle of a conversation into the transcript in position, as a `System:` or `Developer:` block, and does not reject it. This keeps the position of the message relative to the turn that it annotates. The auto-compaction of the SDK infinite session is disabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Prompt isolation                | The server always calls the SDK with `SystemMessageConfig{Mode: "replace"}`. If the caller instructions are empty, the server uses a single space as the replacement. If that is not sufficient, the server uses `You are a chat completion model.` This prevents the SDK resume failures that stored empty `system.message` events cause.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| SDK tools                       | The SDK client operates in `ModeEmpty`. The built-in file, shell, MCP, memory, skill and repository tools are not available. `AvailableTools` is either a request-scoped custom-tool filter or an impossible sentinel value. The permissions reject all tools except the exact request-scoped custom tools.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Client-owned tools              | Chat Completions accepts function tools only. Responses accepts client-owned `function` tools, freeform `custom` tools, `namespace` child tools and top-level `tool_search` specifications. The proxy makes them flat as request-scoped Copilot SDK custom tools. It gives an alias to a name that the SDK cannot use, such as a function name with a dot in it. It then changes the output items back to the Responses shapes (`function_call`, `custom_tool_call` and `tool_search_call`). The proxy returns the tool calls to the client, and never does the work of a tool itself. The proxy obeys `strict: true` as well as it can. It checks the arguments of the model against the declared JSON Schema before it gives the call to the client. It also rewrites the boolean exclusive bounds of Draft-04 into the Draft 2020-12 form, so that they operate too. The proxy accepts a strict tool with a schema that it cannot compile, writes a warn-level log, and does not enforce the schema. This applies to a freeform `custom` tool, and to an external `$ref`, which the proxy never fetches. `COPILOT_STRICT_ENFORCEMENT=fail-closed` changes that acceptance into a `400`, for an operator who prefers a failure to a contract with no enforcement. The proxy sends `defer_loading` to the tool-defer control of the Copilot SDK (see below). The proxy drops a hosted or proxy-executed tool, and writes a debug log. Examples are a provider MCP declaration, a hosted `web_search` and image generation. Thus a mixed Codex catalog can continue. The proxy rejects each other unknown tool `type`, to make a typing error of the client visible.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Tool continuations              | A Chat client adds a `role: "tool"` message. A Responses client sends a `function_call_output`, `custom_tool_call_output` or `tool_search_output` item with `previous_response_id`. For Responses compatibility, the server also accepts an array that mixes tool outputs with new messages. The proxy checks the owner of the batch, the kind of endpoint, the requested model, the kind of pending call, and that there is exactly one output for each pending call. The proxy then releases the parked SDK handlers. `tool_search_output.tools` accepts only client-owned `function` and `namespace` specifications that the server can load. A successful live `tool_search_output` item makes an explicit turn boundary. The server puts the returned tools into the request-scoped catalog, stores the catalog, replaces the old SDK runner, and configures the next Responses turn with the merged catalog. The live pending batch can be unavailable after a restart or after the TTL stops. The continuation then replays the supplied Chat transcript, or the stored previous Responses record and the installed catalog, so that a model turn is still made. You can omit the Responses `input` when you supply `previous_response_id`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `tool_choice`                   | The server enforces an absent value, `auto` and `none`. `none` withholds the tool catalog. The server enforces `allowed_tools`. It makes the request-scoped catalog that goes to the SDK narrow, so that the catalog contains only the listed tools. This is the exact meaning of the field, thus nothing about it is approximate. A forced function or custom choice makes the catalog narrow to that one tool. The model can then call no other tool. This is less than the OpenAI rule that the model must call the tool, because the model can still answer with prose. The server rejects a name that the catalog of the request does not contain. The server accepts and ignores `required`, and an `allowed_tools` `mode` of `required`, and writes a debug log. A narrow catalog cannot make a model call a tool. The server rejects a value outside the grammar of OpenAI. The server also rejects an `allowed_tools` entry with no tool name, because to drop the entry would withhold a tool that the client permitted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `parallel_tool_calls`           | Chat and Responses accept `true` and `false`. The server ignores `false` and writes a debug log, because the backend cannot enforce serial tool planning. The internal pending batches keep and replay more than one tool call for each turn.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Streaming                       | The SSE streams have the OpenAI shape. A Chat stream sends the reasoning deltas first, when they are present. It then sends the SDK text deltas. It sends the fragments of the tool-call arguments as `delta.tool_calls[].function.arguments` chunks, with a stable `index` for each call. The `id`, the `type` and the `name` go one time only, on the first fragment of that call. The last tool-call chunk carries only the data that the fragments did not deliver. Therefore a turn whose calls streamed completely has no such chunk, although the server always wrote one before. `finish_reason: "tool_calls"` still arrives, so a client that collects `function.arguments` for each `index` is not affected. The server keeps a strict tool in a buffer, because it checks the arguments before they go to the client. A fragment could be part of a call that the proxy refuses. A stream stops with `[DONE]`. A Responses SSE stream sends lifecycle events, and each event carries a `sequence_number` that only increases. The events are `response.created`, `response.in_progress`, the reasoning summary events (`response.reasoning_summary_part.added`/`.done` and `response.reasoning_summary_text.delta`/`.done`), `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, incremental `response.function_call_arguments.delta` with `.done` after it, and `response.completed` or `response.failed`. Then `[DONE]` follows. The server announces an extended Responses tool item (`custom_tool_call`, a namespaced `function_call` and `tool_search_call`) with `response.output_item.added` before `response.output_item.done`. Only the arguments of `function_call` stream incrementally. The server compares the collected fragments with the completed call before it writes the terminal events. It compares JSON values and not bytes, because it encodes the completed arguments again. Thus they differ in key order, spaces, HTML escaping and number format. A true difference makes the stream fail. The server does not deliver arguments that disagree with the data that the client already collected. The Responses WebSocket mode sends the same JSON events. It uses `response.failed` for a failure after the lifecycle starts, and it keeps the top-level `error` for an envelope failure or a preflight failure. |
+| Usage                           | The server maps the SDK input, output and reasoning token events when they are available. The `usage` object is complete or absent. It is absent when the SDK reported no token counts. If it is present, it carries every necessary counter, and Responses also always carries `input_tokens_details` and `output_tokens_details`. A count that the SDK did not report is `0`. When Chat `stream_options.include_usage` is set, every streamed chunk carries `usage`, which is null before the last chunk. The server always sends a final usage chunk with empty choices. It uses `usage: null` when the upstream usage is not available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Multimodal                      | The server supports user image input in Chat `image_url` parts and in Responses `input_image` parts. It changes `http`, `https` and base64 `data:` URLs into Copilot blob attachments. A remote image fetch rejects a loopback, private, link-local, multicast, reserved, documentation, benchmarking, shared-address or other non-public host, to prevent SSRF. The selected model must advertise vision support. The server enforces the limits of the image count and the image size only when the selected model advertises them. The proxy does not add its own image quotas. The server parses `function_call_output` content arrays. A text part becomes plain text. An image or file output part becomes a redacted text marker. Image `file_id` input is not supported now. Binary, image and file tool-output artifacts are not supported now. The server changes a JSON object or array tool output into JSON text.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Responses WebSocket differences | The server accepts the OpenAI beta header, but does not need it. OpenAI uses a fixed socket lifetime of 60 minutes. This server lets you configure the connection limits with `COPILOT_WEBSOCKET_*`. The limits are an idle timeout with a default of 2m, an optional hard maximum lifetime, and a server ping keepalive. The idle timeout never closes a connection while the server still generates a response. As an extension, the server accepts a nested `response.create.response` payload, and the nested fields have priority. `generate:false` makes a warm Copilot SDK session and returns an empty completed response. A tool-output continuation with `generate:false` fails with a clear message, until warm post-search planning is available. A warm session stores the normalized Responses tool catalog and compares it. The catalog includes custom tools, namespaces, aliases for unsafe names, and `tool_search`. Responses `store:false` is not visible through the API. The server still stores it locally for debugging and for continuation, together with the dynamic tool catalogs, within the configured retention quotas.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Unsupported fields              | The validation obeys one rule. Reject an unknown field. Accept and ignore a known field that the server does not support, but only _when the result is still usable_. Never drop in silence a field that the client could have meant. There is one policy and no strictness switch. The server ignores a harmless unsupported client control such as `temperature`, and reports it to the operator at debug level. Usual clients set these parameters by default: `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `parallel_tool_calls:false` and `tool_choice: "required"`. The server accepts them and reports them at debug level, and does not fail the request, because the result is still usable prose. For Codex CLI compatibility, the server accepts the Responses `include` values and `text.verbosity`, and does nothing with them. Structured output is the exception. The server rejects `response_format`/`text.format` with `json_schema` or `json_object`, because to ignore them would return prose to a client that is about to parse JSON. The server accepts the explicit `{"type":"text"}` default. The server rejects a value that OpenAI does not define: an unknown `include` entry, `text.format.type`, `tool_choice`, or Responses tool `type`. The server also rejects semantics that it does not support and that would mislead a client. Both failures give an OpenAI-shaped `invalid_request_error` response.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ## Known Responses API limitations
 
-`copilot-api` aims for practical OpenAI Responses compatibility on top of the
-Copilot SDK; it is not a full OpenAI-hosted Responses runtime. Current known
-limitations and intentional differences are:
+`copilot-api` gives practical OpenAI Responses compatibility on top of the
+Copilot SDK. It is not a full OpenAI-hosted Responses runtime. These are the
+known limitations and the intentional differences:
 
-- **Hosted/provider tools are unavailable.** The proxy does not implement hosted
-  `web_search`, `file_search`, `image_generation`, `code_interpreter`,
-  `computer_use`, or provider-hosted MCP execution. Hosted tool declarations are
-  ignored, which is safe for mixed client catalogs. Dynamically loaded
-  `tool_search_output.tools` may install only client-owned `function` and
-  `namespace` specs.
-- **Client-owned tools are not executed by the proxy.** Function, custom,
-  namespace, and dynamically loaded tools are exposed to the model as
-  request-scoped synthetic SDK custom tools, then returned to the client as
-  Responses tool-call items. The client must execute them and continue with the
-  matching output item.
-- **`strict: true` is enforced by the proxy, not by the model, and is
-  best-effort.** OpenAI implements strict tools with constrained decoding, so a
-  strict call cannot be malformed. The Copilot SDK exposes no equivalent
-  control, so this proxy provides the guarantee at the other end: a strict
-  tool's declared `parameters` are compiled at request time, and the arguments
-  the model emits are validated against that schema before the tool call is
-  handed to the client. When the model emits non-conforming arguments the turn
-  fails with an explicit `strict_tool_arguments_invalid` error naming the tool,
-  instead of delivering the call anyway: this proxy does not own the model's
-  decoding loop, so it cannot retry on the client's behalf.
+- **Hosted and provider tools are not available.** The proxy does not implement
+  hosted `web_search`, `file_search`, `image_generation`, `code_interpreter`,
+  `computer_use`, or provider-hosted MCP execution. The proxy ignores a hosted
+  tool declaration, which is safe for a mixed client catalog. Dynamically loaded
+  `tool_search_output.tools` can install only client-owned `function` and
+  `namespace` specifications.
+- **The proxy does not execute a client-owned tool.** The proxy gives function,
+  custom, namespace and dynamically loaded tools to the model as request-scoped
+  synthetic SDK custom tools. It then returns them to the client as Responses
+  tool-call items. The client must execute them and continue with the correct
+  output item.
+- **The proxy enforces `strict: true`, the model does not, and the enforcement
+  is best-effort.** OpenAI implements a strict tool with constrained decoding,
+  thus a strict call cannot be malformed. The Copilot SDK gives no equal
+  control. Therefore this proxy gives the guarantee at the other end. The proxy
+  compiles the declared `parameters` of a strict tool at request time. It then
+  checks the arguments of the model against that schema, before it gives the
+  tool call to the client. If the arguments do not agree with the schema, the
+  turn fails with an explicit `strict_tool_arguments_invalid` error that names
+  the tool. The proxy does not deliver the call. This proxy does not control the
+  decoding loop of the model, thus it cannot try again for the client.
 
-  Enforcement is not guaranteed, and the gap is the important part. A strict
-  tool this proxy cannot compile a schema for is **accepted and left
-  unenforced** by default, not rejected: the tool is still offered to the model
-  and its arguments pass through unvalidated. This happens for a freeform
-  `custom` tool (it declares its input with a grammar in `format` rather than a
-  JSON Schema, so there is nothing client-declared to constrain) and for any
-  external `$ref` (schemas are resolved with no loader, on purpose: fetching a
-  schema that a request names would let any caller aim an outbound request from
-  this process, and no best-effort guarantee is worth an SSRF primitive).
-  Draft-04's boolean `exclusiveMinimum`/`exclusiveMaximum` beside
-  `minimum`/`maximum` used to land here too; it is now rewritten into the
-  equivalent numeric Draft 2020-12 form and enforced for real. Rejecting these
-  outright was tried and reverted: they are schemas real OpenAI accepts, sent by
-  default by the very clients that set `strict: true` (Vercel AI SDK,
-  LangChain/LangGraph, OpenAI Agents SDK, Cline), so a `400` broke working
-  integrations over a guarantee that is best-effort here regardless.
+  The enforcement is not a guarantee, and this difference is important. By
+  default the proxy **accepts a strict tool whose schema it cannot compile, and
+  does not enforce that schema**. The proxy does not reject the tool. It still
+  offers the tool to the model, and the arguments pass with no check. This
+  happens for a freeform `custom` tool. Such a tool declares its input with a
+  grammar in `format` and not with a JSON Schema, thus the client declares
+  nothing to constrain. It also happens for an external `$ref`. The proxy
+  resolves a schema with no loader, on purpose. To fetch a schema that a request
+  names would let any caller aim an outbound request from this process, and no
+  best-effort guarantee is worth an SSRF primitive. The boolean
+  `exclusiveMinimum`/`exclusiveMaximum` of Draft-04 beside `minimum`/`maximum`
+  also came here before. The proxy now rewrites it into the equal numeric Draft
+  2020-12 form and enforces it. The proxy rejected these schemas before, and
+  that change was reverted. The true OpenAI API accepts these schemas, and the
+  clients that set `strict: true` send them by default (Vercel AI SDK,
+  LangChain/LangGraph, OpenAI Agents SDK, Cline). A `400` thus broke
+  integrations that operated, for a guarantee that is best-effort here in all
+  conditions.
 
-  Every unenforceable tool is reported to the operator with its reason at
-  **warn** level (`accepted strict: true but cannot enforce it`), and under the
-  default the client still sees a normal `200`. OpenAI's response shape has no
-  field for "this tool's strict contract was not enforced", so the only way to
-  tell the caller at all is to refuse the call:
-  `COPILOT_STRICT_ENFORCEMENT=fail-closed` returns a `400` naming every affected
-  tool and reason instead of serving the turn. A client that sets `strict: true`
-  against a `best-effort` deployment should keep validating arguments itself.
+  The proxy reports each tool that it cannot enforce to the operator, with the
+  reason, at **warn** level (`accepted strict: true but cannot enforce it`).
+  With the default setting the client still gets a usual `200`. The response
+  shape of OpenAI has no field that says "the strict contract of this tool was
+  not enforced". Therefore the only way to tell the caller is to refuse the
+  call. `COPILOT_STRICT_ENFORCEMENT=fail-closed` returns a `400` that names each
+  affected tool and reason, and does not serve the turn. A client that sets
+  `strict: true` against a `best-effort` deployment must continue to check the
+  arguments itself.
 
-  Enforcement also costs a strict tool its incremental arguments. Ordinary tool
-  calls stream `response.function_call_arguments.delta` (and Chat
-  `delta.tool_calls[].function.arguments`) as the model produces them, but a
-  strict call cannot: its arguments are only validated once they are complete,
-  so a fragment would be a promise this proxy may still refuse to keep. Strict
-  calls therefore arrive in one piece, at the end of the turn, exactly as every
-  tool call did before incremental arguments existed.
-- **`defer_loading` is forwarded.** It is a Copilot-side concept rather than an
-  OpenAI one, and the SDK honours it: `true` maps to the SDK's `auto` tool-defer
-  mode (the tool may be loaded lazily through tool search), `false` maps to
-  `never` (always pre-loaded), and an absent flag leaves the runtime's own
-  choice alone. A `namespace` does not survive flattening, so its
-  `defer_loading` travels with the children that replace it unless a child
-  states its own.
-- **`tool_choice` is enforced only as far as the tool catalog reaches.**
-  Omitted/`auto` and `none` are enforced. The Copilot SDK has no `tool_choice`
-  concept at all, so the single lever available is which tools the session is
-  opened with — the same one `none` already uses. `allowed_tools` is precisely a
-  catalog restriction, so narrowing satisfies it exactly. A forced
-  function/custom choice narrows the catalog to that one tool, leaving the model
-  able to call nothing else; that is substantially but not perfectly enforced,
-  because nothing here can stop the model answering in prose instead of calling
-  it. A forced choice naming a tool outside the request's catalog is rejected,
-  since narrowing to nothing would leave no way to comply. `required` and an
-  `allowed_tools` `mode` of `required` remain accepted and ignored (with a debug
-  log): they demand that the model call something, which no amount of narrowing
-  achieves. Rejecting them is not an option — OpenAI's own Structured Outputs
-  guidance and several major SDKs send them by default.
-- **Serial tool planning cannot be enforced.** Chat Completions and Responses
-  accept `parallel_tool_calls:false` and ignore it; the SDK exposes no public
-  control to force serial tool planning.
-- **Only `function_call` arguments stream incrementally.** A `function_call`
-  item's arguments arrive as `response.function_call_arguments.delta` events as
-  the model produces them. A freeform `custom_tool_call` does not: the proxy
-  declares custom tools to the Copilot SDK behind a synthetic
-  `{"input": {"type": "string"}}` wrapper, so the model streams that envelope
-  with the input JSON-escaped inside it while the `custom_tool_call` item
-  carries the unwrapped raw input. Forwarding envelope fragments as
-  `response.custom_tool_call_input.delta` would emit bytes that never add up to
-  the item, so custom input is delivered whole on `response.output_item.done`
-  until incremental unwrapping is implemented. A `tool_search_call` has no
-  incremental event on either surface at all.
-- **Background Responses are unsupported.** Requests with `background` are
-  rejected; WebSocket `background` fields are treated as transport-only no-ops
-  when decoding `response.create` payloads.
-- **Some generation controls are not forwarded.** `truncation` is rejected.
-  `max_output_tokens` (and Chat `max_tokens`/`max_completion_tokens`) is
-  accepted, validated as a positive integer, and logged at debug: the Copilot
-  SDK only exposes an output cap through `ProviderConfig` for BYOK providers,
-  which this proxy does not configure. `temperature`, `top_p`, `metadata`,
-  `service_tier`, and `user` are not forwarded by this single-user proxy and are
-  tolerated as no-ops.
-- **Structured output is unsupported and rejected.** The Copilot SDK exposes no
-  response-format control (`ProviderConfig`, `SessionConfig`, and
-  `MessageOptions` have no equivalent), so a schema could not be enforced.
-  Accepting the request would return free-form text to a client that is about to
-  `JSON.parse` it, so Chat `response_format` and Responses `text.format` reject
-  `json_schema` and `json_object` with an `invalid_request_error` naming
-  `response_format` / `text.format`. The explicit `{"type":"text"}` default is a
-  no-op and is accepted on both surfaces; an unknown `type` is rejected as a
-  typo. `text.verbosity` is still accepted as a no-op for Codex compatibility.
-- **`include` is narrow.** OpenAI's documented `include` values are accepted,
-  but only `reasoning.encrypted_content` has any effect; undocumented values are
-  rejected.
-- **Reasoning object controls are partial.** A `model:effort` selector,
-  top-level `reasoning_effort`, and Responses `reasoning.effort` are supported.
-  `reasoning.summary` is accepted for compatibility, but the proxy does not
-  implement the full set of OpenAI reasoning controls or provider-specific
-  summary behaviors.
-- **Warm `generate:false` cannot include tool-output continuations.**
-  `generate:false` can pre-warm a Responses session and return an empty
-  completed response, but requests that combine `generate:false` with
-  `function_call_output`, `custom_tool_call_output`, or `tool_search_output`
-  fail clearly.
-- **Image and file handling is partial.** User image inputs are supported only
-  as `http`, `https`, or base64 `data:` URLs and only for models that advertise
-  vision support. Image `file_id` inputs are unsupported. Tool-output image/file
-  content parts are converted to redacted text summaries; binary artifacts are
-  not retained or exposed as OpenAI files.
-- **Cold fallback is synthetic, not exact provider-state replay.** When a live
-  Copilot SDK session or pending tool batch is unavailable after restart or TTL
-  expiry, the proxy rebuilds the conversation from stored response records, tool
-  outputs, and installed tool catalogs and replays it into a fresh SDK session
-  as real session events — the same mechanism Chat Completions uses — so the
-  model resumes onto genuine prior turns. Responses vocabulary that has no
-  session event (custom/tool-search calls and their outputs, loaded tool
-  catalogs, and function calls the client never answered) degrades to text on
-  the neighbouring message, and a chain that cannot be expressed as events at
-  all falls back to a prose transcript. Either way this preserves practical
-  continuity but is not byte-for-byte equivalent to resuming an opaque OpenAI
-  provider session.
-- **Usage objects are all-or-nothing.** SDK usage events are mapped when
-  available; a turn the SDK reported no token counts for carries no `usage`
-  object at all (or `null` in streaming usage chunks where the OpenAI wire shape
-  requires it). A `usage` object that is present always carries every required
-  counter, with counts the SDK did not report reported as `0`.
-- **Local debug retention differs from OpenAI.** `store:false` responses are not
-  API-visible, but local continuation/debug records are retained subject to the
-  configured age, response-count, and byte quotas. `copilot-api prune --dry-run`
-  previews quota cleanup; `copilot-api purge` removes all marked storage roots.
+  The enforcement also removes the incremental arguments of a strict tool. A
+  usual tool call streams `response.function_call_arguments.delta` (and Chat
+  `delta.tool_calls[].function.arguments`) while the model makes the arguments.
+  A strict call cannot do this. The proxy checks its arguments only when they
+  are complete, thus a fragment would be a promise that this proxy can still
+  refuse. A strict call therefore arrives in one piece, at the end of the turn.
+  This is the same behavior as each tool call before incremental arguments were
+  available.
+- **The proxy sends `defer_loading` to the SDK.** It is a Copilot concept and
+  not an OpenAI concept, and the SDK obeys it. `true` becomes the `auto`
+  tool-defer mode of the SDK, and the tool search can then load the tool when it
+  is necessary. `false` becomes `never`, and the SDK always loads the tool
+  first. An absent flag keeps the choice of the runtime. A `namespace` does not
+  continue through the flattening operation. Therefore its `defer_loading` goes
+  to the children that replace it, if a child does not state its own value.
+- **The server enforces `tool_choice` only as far as the tool catalog reaches.**
+  The server enforces an absent value, `auto` and `none`. The Copilot SDK has no
+  `tool_choice` concept, thus the only available control is the set of tools
+  that the session opens with. `none` uses the same control. `allowed_tools` is
+  exactly a restriction of the catalog, thus a narrow catalog obeys it exactly.
+  A forced function or custom choice makes the catalog narrow to that one tool,
+  and the model can then call no other tool. That is almost complete
+  enforcement, but not complete, because nothing here can prevent an answer in
+  prose in place of the call. The server rejects a forced choice that names a
+  tool outside the catalog of the request, because a catalog with no tool would
+  give no way to obey. The server continues to accept and ignore `required`, and
+  an `allowed_tools` `mode` of `required`, and writes a debug log. They demand
+  that the model calls something, and no narrow catalog can do this. To reject
+  them is not possible, because the Structured Outputs guidance of OpenAI and
+  several large SDKs send them by default.
+- **The server cannot enforce serial tool planning.** Chat Completions and
+  Responses accept `parallel_tool_calls:false` and ignore it. The SDK gives no
+  public control that forces serial tool planning.
+- **Only the arguments of `function_call` stream incrementally.** The arguments
+  of a `function_call` item arrive as `response.function_call_arguments.delta`
+  events while the model makes them. A freeform `custom_tool_call` does not do
+  this. The proxy declares a custom tool to the Copilot SDK behind a synthetic
+  `{"input": {"type": "string"}}` wrapper. The model thus streams that envelope
+  with the input escaped as JSON inside it, while the `custom_tool_call` item
+  carries the raw input without the wrapper. To send the fragments of the
+  envelope as `response.custom_tool_call_input.delta` would write bytes that
+  never make the item. Therefore the server delivers the custom input complete
+  on `response.output_item.done`, until incremental unwrapping is available. A
+  `tool_search_call` has no incremental event on either surface.
+- **Background Responses are not supported.** The server rejects a request with
+  `background`. When the server decodes a `response.create` payload, it treats a
+  WebSocket `background` field as a transport-only field and does nothing with
+  it.
+- **The server does not send some generation controls to the SDK.** The server
+  rejects `truncation`. The server accepts `max_output_tokens` (and Chat
+  `max_tokens`/`max_completion_tokens`), checks that it is a positive integer,
+  and logs it at debug level. The Copilot SDK gives an output limit only through
+  `ProviderConfig` for BYOK providers, which this proxy does not configure. This
+  single-user proxy does not send `temperature`, `top_p`, `metadata`,
+  `service_tier` and `user` to the SDK. It accepts them and does nothing with
+  them.
+- **Structured output is not supported, and the server rejects it.** The Copilot
+  SDK gives no response-format control, because `ProviderConfig`,
+  `SessionConfig` and `MessageOptions` have no equal field. The server could
+  thus not enforce a schema. To accept the request would return free-form text
+  to a client that is about to call `JSON.parse` on it. Therefore Chat
+  `response_format` and Responses `text.format` reject `json_schema` and
+  `json_object` with an `invalid_request_error` that names `response_format` /
+  `text.format`. The explicit `{"type":"text"}` default does nothing, and both
+  surfaces accept it. The server rejects an unknown `type` as a typing error.
+  The server still accepts `text.verbosity` and does nothing with it, for Codex
+  compatibility.
+- **`include` is narrow.** The server accepts the `include` values that OpenAI
+  documents, but only `reasoning.encrypted_content` has an effect. The server
+  rejects a value that OpenAI does not document.
+- **The reasoning object controls are partial.** The server supports a
+  `model:effort` selector, the top-level `reasoning_effort` field, and the
+  Responses `reasoning.effort` field. The server accepts `reasoning.summary` for
+  compatibility. The proxy does not implement the full set of OpenAI reasoning
+  controls, or the summary behavior of a specific provider.
+- **A warm `generate:false` request cannot include a tool-output continuation.**
+  `generate:false` can make a warm Responses session and return an empty
+  completed response. But a request that combines `generate:false` with
+  `function_call_output`, `custom_tool_call_output` or `tool_search_output`
+  fails with a clear message.
+- **The image and file support is partial.** The server supports user image
+  input only as an `http`, `https` or base64 `data:` URL, and only for a model
+  that advertises vision support. Image `file_id` input is not supported. The
+  server changes a tool-output image or file content part into a redacted text
+  summary. The server does not keep a binary artifact, and does not give it as
+  an OpenAI file.
+- **The cold fallback is synthetic, and not an exact replay of the provider
+  state.** A live Copilot SDK session or a pending tool batch can be unavailable
+  after a restart or after the TTL stops. The proxy then builds the conversation
+  again from the stored response records, the tool outputs and the installed
+  tool catalogs. It replays the conversation into a new SDK session as true
+  session events. Chat Completions uses the same mechanism. The model thus
+  continues from true prior turns. Some Responses vocabulary has no session
+  event: custom calls, tool-search calls and their outputs, loaded tool
+  catalogs, and function calls that the client never answered. This vocabulary
+  becomes text on the message beside it. A chain that the server cannot express
+  as events becomes a prose transcript. Both methods keep practical continuity.
+  They are not equal, byte for byte, to a resume of an opaque OpenAI provider
+  session.
+- **A usage object is complete or absent.** The server maps the SDK usage events
+  when they are available. A turn for which the SDK reported no token counts
+  carries no `usage` object. In a streaming usage chunk, where the OpenAI wire
+  shape needs the field, the value is `null`. A `usage` object that is present
+  always carries every necessary counter. A count that the SDK did not report is
+  `0`.
+- **The local debug retention differs from OpenAI.** A `store:false` response is
+  not visible through the API. The server keeps local records for continuation
+  and for debugging, within the configured quotas for the age, the response
+  count and the bytes. `copilot-api prune --dry-run` shows what the quota
+  cleanup would remove. `copilot-api purge` removes all marked storage roots.
 
 ## Configuration
 
-| Variable                           | Default                                              | Purpose                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `COPILOT_API_ADDR`                 | `127.0.0.1:8080`                                     | HTTP listen address.                                                                                                                                                                                                                                                                                                                                                                            |
-| `COPILOT_API_KEY`                  | unset                                                | Optional proxy bearer token. Required when binding to a non-loopback address.                                                                                                                                                                                                                                                                                                                   |
-| `GITHUB_TOKEN`                     | unset                                                | Optional process-wide GitHub token for Copilot SDK auth.                                                                                                                                                                                                                                                                                                                                        |
-| `COPILOT_CLI_PATH`                 | embedded matched CLI when bundled, else SDK fallback | Advanced override for the Copilot CLI binary.                                                                                                                                                                                                                                                                                                                                                   |
-| `COPILOT_CLI_LOG_LEVEL`            | unset (CLI default)                                  | Advanced override forwarded to the Copilot CLI as `--log-level`. Left unset by default: Copilot CLI `1.0.76-1` through `1.0.76-4` exit 1 silently at startup when given a canonical level (`none`/`error`/`warning`/`info`/`debug`), which kills the gateway ([github/copilot-cli#4285](https://github.com/github/copilot-cli/issues/4285)). `all` and `default` still work.                    |
-| `COPILOT_DEFAULT_REASONING_EFFORT` | unset                                                | Optional reasoning effort to use when a Chat Completions or Responses request omits `reasoning_effort`. When model metadata advertises supported efforts, unsupported defaults are rounded to the closest supported level; models without reasoning-effort support omit it.                                                                                                                     |
-| `COPILOT_MODELS_CACHE_TTL`         | `10m`                                                | Successful model-list cache TTL.                                                                                                                                                                                                                                                                                                                                                                |
-| `COPILOT_TOOL_CALL_TTL`            | `5m`                                                 | Liveness guard for parked tool-call continuations.                                                                                                                                                                                                                                                                                                                                              |
-| `COPILOT_REQUEST_TIMEOUT`          | `0`                                                  | Optional generation timeout; `0` disables proxy-imposed generation timeouts. Client disconnects and configured timeouts abort/disconnect the upstream SDK session.                                                                                                                                                                                                                              |
-| `COPILOT_MAX_REQUEST_BODY_BYTES`   | `33554432`                                           | Maximum size of a single inbound request, applied uniformly to HTTP bodies and Responses WebSocket frames (32 MiB). Oversized HTTP bodies return HTTP 413; oversized WebSocket frames close the connection with status `1009` (message too big). `0` disables the cap on both transports.                                                                                                       |
-| `COPILOT_MAX_TURN_OUTPUT_BYTES`    | `33554432`                                           | Aggregate content and reasoning bytes retained for one model turn.                                                                                                                                                                                                                                                                                                                              |
-| `COPILOT_RETENTION_MAX_AGE`        | `720h`                                               | Maximum age for retained response/session entries; `0` disables the age quota.                                                                                                                                                                                                                                                                                                                  |
-| `COPILOT_RETENTION_MAX_RESPONSES`  | `10000`                                              | Maximum retained response records; `0` disables the count quota.                                                                                                                                                                                                                                                                                                                                |
-| `COPILOT_RETENTION_MAX_BYTES`      | `2147483648`                                         | Maximum retained bytes across managed response/session entries; `0` disables the byte quota.                                                                                                                                                                                                                                                                                                    |
-| `COPILOT_WEBSOCKET_IDLE_TIMEOUT`   | `2m`                                                 | Idle timeout for Responses WebSocket connections. A connection closes only after the client has been silent this long while no response is generating; `0` disables it.                                                                                                                                                                                                                         |
-| `COPILOT_WEBSOCKET_MAX_LIFETIME`   | `0`                                                  | Optional hard cap on total Responses WebSocket connection lifetime; `0` (default) disables it.                                                                                                                                                                                                                                                                                                  |
-| `COPILOT_WEBSOCKET_PING_INTERVAL`  | `30s`                                                | Server-side ping keepalive interval for Responses WebSocket connections; `0` disables pings.                                                                                                                                                                                                                                                                                                    |
-| `COPILOT_SSE_KEEP_ALIVE_INTERVAL`  | `15s`                                                | Longest an SSE stream may go without a byte on the wire before a `: keep-alive` comment frame is emitted. Keeps a silently-reasoning turn alive through intermediaries that time out idle connections (AWS ALB defaults to 60s, Cloudflare to 100s); `0` disables it.                                                                                                                           |
-| `COPILOT_API_DATA_DIR`             | `$XDG_DATA_HOME/copilot-api`                         | Retained SDK session files and synthetic Chat histories.                                                                                                                                                                                                                                                                                                                                        |
-| `COPILOT_API_STATE_DIR`            | `$XDG_STATE_HOME/copilot-api`                        | Lock file, response records, and pending metadata.                                                                                                                                                                                                                                                                                                                                              |
-| `COPILOT_API_CONFIG_DIR`           | `$XDG_CONFIG_HOME/copilot-api`                       | Isolated Copilot SDK config dir.                                                                                                                                                                                                                                                                                                                                                                |
-| `COPILOT_REASONING_EMISSION`       | `both`                                               | Which reasoning fields the OpenAI-compatible surfaces emit: `both` (default; `reasoning` + `reasoning_content`), `reasoning`, `reasoning_content`, or `off`. `reasoning_details` and Responses reasoning items are emitted whenever the policy is not `off`. Narrow this for clients that render reasoning twice.                                                                               |
-| `COPILOT_STRICT_ENFORCEMENT`       | `best-effort`                                        | What happens when a tool declares `strict: true` and this proxy cannot compile the schema that would enforce it (a freeform `custom` tool, or an external `$ref`, which is never fetched). `best-effort` (default) offers the tool anyway, leaves its arguments unvalidated, and logs the tool and reason at warn. `fail-closed` returns a `400` naming every affected tool and reason instead. |
-| `COPILOT_LOG_CONTENT`              | `false`                                              | Opt-in request/response body logging. When `true`, completed request logs include up to 64 KiB each of `request_body` and `response_body`, plus truncation flags when capped, and debug logs include redacted Responses tool catalog counts/names. This can include prompts, responses, tool arguments, tool outputs, and image data; auth headers are not logged.                              |
-| `COPILOT_LOG_LEVEL`                | `info`                                               | `debug`, `info`, `warn`, or `error`. Generation start metadata is logged at info; completed requests log at info/warn/error based on status and include accumulated generation fields. Generic request-received logs are debug-only.                                                                                                                                                            |
+| Variable                           | Default                                              | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COPILOT_API_ADDR`                 | `127.0.0.1:8080`                                     | The HTTP listen address.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `COPILOT_API_KEY`                  | unset                                                | An optional bearer token for the proxy. It is necessary when you bind to a non-loopback address.                                                                                                                                                                                                                                                                                                                                 |
+| `GITHUB_TOKEN`                     | unset                                                | An optional GitHub token for the full process, for the Copilot SDK authentication.                                                                                                                                                                                                                                                                                                                                               |
+| `COPILOT_CLI_PATH`                 | embedded matched CLI when bundled, else SDK fallback | An advanced override for the Copilot CLI binary.                                                                                                                                                                                                                                                                                                                                                                                 |
+| `COPILOT_CLI_LOG_LEVEL`            | unset (CLI default)                                  | An advanced override that goes to the Copilot CLI as `--log-level`. It has no default value. Copilot CLI `1.0.76-1` to `1.0.76-4` exit 1 in silence at the start when they get a canonical level (`none`/`error`/`warning`/`info`/`debug`), and this stops the gateway ([github/copilot-cli#4285](https://github.com/github/copilot-cli/issues/4285)). `all` and `default` still operate.                                        |
+| `COPILOT_DEFAULT_REASONING_EFFORT` | unset                                                | An optional reasoning effort for a Chat Completions or Responses request that has no `reasoning_effort` field. When the model metadata advertises the supported efforts, the server moves an unsupported default to the closest supported level. A model without reasoning-effort support does not get it.                                                                                                                       |
+| `COPILOT_MODELS_CACHE_TTL`         | `10m`                                                | The TTL of the cache of a successful model list.                                                                                                                                                                                                                                                                                                                                                                                 |
+| `COPILOT_TOOL_CALL_TTL`            | `5m`                                                 | The liveness limit for a parked tool-call continuation.                                                                                                                                                                                                                                                                                                                                                                          |
+| `COPILOT_REQUEST_TIMEOUT`          | `0`                                                  | An optional generation timeout. `0` disables the generation timeouts of the proxy. A client disconnect and a configured timeout stop the upstream SDK session.                                                                                                                                                                                                                                                                   |
+| `COPILOT_MAX_REQUEST_BODY_BYTES`   | `33554432`                                           | The maximum size of one inbound request (32 MiB). The server applies it to HTTP bodies and to Responses WebSocket frames in the same way. An HTTP body that is too large gets HTTP 413. A WebSocket frame that is too large closes the connection with status `1009` (message too big). `0` disables the limit on both transports.                                                                                               |
+| `COPILOT_MAX_TURN_OUTPUT_BYTES`    | `33554432`                                           | The total content bytes and reasoning bytes that the server keeps for one model turn.                                                                                                                                                                                                                                                                                                                                            |
+| `COPILOT_RETENTION_MAX_AGE`        | `720h`                                               | The maximum age of a retained response entry or session entry. `0` disables the age quota.                                                                                                                                                                                                                                                                                                                                       |
+| `COPILOT_RETENTION_MAX_RESPONSES`  | `10000`                                              | The maximum number of retained response records. `0` disables the count quota.                                                                                                                                                                                                                                                                                                                                                   |
+| `COPILOT_RETENTION_MAX_BYTES`      | `2147483648`                                         | The maximum number of retained bytes across the managed response entries and session entries. `0` disables the byte quota.                                                                                                                                                                                                                                                                                                       |
+| `COPILOT_WEBSOCKET_IDLE_TIMEOUT`   | `2m`                                                 | The idle timeout for a Responses WebSocket connection. The connection closes only after the client is silent for this time while the server generates no response. `0` disables it.                                                                                                                                                                                                                                              |
+| `COPILOT_WEBSOCKET_MAX_LIFETIME`   | `0`                                                  | An optional hard limit on the total lifetime of a Responses WebSocket connection. `0` (the default) disables it.                                                                                                                                                                                                                                                                                                                 |
+| `COPILOT_WEBSOCKET_PING_INTERVAL`  | `30s`                                                | The interval of the server ping keepalive for a Responses WebSocket connection. `0` disables the pings.                                                                                                                                                                                                                                                                                                                          |
+| `COPILOT_SSE_KEEP_ALIVE_INTERVAL`  | `15s`                                                | The longest time that an SSE stream can send no byte before the server writes a `: keep-alive` comment frame. This keeps a turn that reasons in silence alive through an intermediary that stops an idle connection (AWS ALB uses 60s by default, Cloudflare 100s). `0` disables it.                                                                                                                                             |
+| `COPILOT_API_DATA_DIR`             | `$XDG_DATA_HOME/copilot-api`                         | The retained SDK session files and the synthetic Chat histories.                                                                                                                                                                                                                                                                                                                                                                 |
+| `COPILOT_API_STATE_DIR`            | `$XDG_STATE_HOME/copilot-api`                        | The lock file, the response records and the pending metadata.                                                                                                                                                                                                                                                                                                                                                                    |
+| `COPILOT_API_CONFIG_DIR`           | `$XDG_CONFIG_HOME/copilot-api`                       | The isolated config directory of the Copilot SDK.                                                                                                                                                                                                                                                                                                                                                                                |
+| `COPILOT_REASONING_EMISSION`       | `both`                                               | The reasoning fields that the OpenAI-compatible surfaces send: `both` (the default; `reasoning` and `reasoning_content`), `reasoning`, `reasoning_content`, or `off`. The server sends `reasoning_details` and the Responses reasoning items when the policy is not `off`. Make this narrow for a client that shows the reasoning two times.                                                                                     |
+| `COPILOT_STRICT_ENFORCEMENT`       | `best-effort`                                        | The behavior when a tool declares `strict: true` and this proxy cannot compile the schema that would enforce it. This applies to a freeform `custom` tool, and to an external `$ref`, which the proxy never fetches. `best-effort` (the default) offers the tool, does not check its arguments, and logs the tool and the reason at warn level. `fail-closed` returns a `400` that names each affected tool and reason.         |
+| `COPILOT_LOG_CONTENT`              | `false`                                              | Optional logging of the request body and the response body. With `true`, a completed request log includes a maximum of 64 KiB each of `request_body` and `response_body`, and flags when the server cut the text. The debug logs then include redacted counts and names of the Responses tool catalog. This can include prompts, responses, tool arguments, tool outputs and image data. The server does not log an auth header. |
+| `COPILOT_LOG_LEVEL`                | `info`                                               | `debug`, `info`, `warn` or `error`. The server logs the metadata of the start of a generation at info level. It logs a completed request at info, warn or error level, from the status, and includes the collected generation fields. A generic request-received log is at debug level only.                                                                                                                                     |
 
-Durations accept Go duration strings like `5m`, or seconds as a number.
+A duration accepts a Go duration string such as `5m`. It also accepts a number
+of seconds.
 
 ## Examples
 
@@ -296,30 +310,33 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 
 ### Reasoning effort
 
-Reasoning effort can be supplied as a top-level `reasoning_effort` field or as a
-final suffix on the model selector, such as `gpt-5.5:high`. Responses
-`reasoning.effort` is also accepted. These forms are peer spellings of one
-explicit value: effort values are trimmed and lowercased, matching forms are
-accepted, and contradictory forms return an `invalid_request_error`. Nonempty
-values are model-dependent and are not restricted to a proxy-level enum.
+You can supply the reasoning effort as a top-level `reasoning_effort` field. You
+can also supply it as a final suffix on the model selector, such as
+`gpt-5.5:high`. The server also accepts the Responses `reasoning.effort` field.
+These forms are equal spellings of one explicit value. The server removes the
+space characters from an effort value and makes it lowercase. It accepts forms
+that agree. It returns an `invalid_request_error` for forms that disagree. A
+value that is not empty depends on the model. The proxy does not limit it to a
+list of its own.
 
-The suffix is stripped before model lookup and SDK use. Responses, streams,
-stored records, and logs therefore expose the canonical model (`gpt-5.5`), not
-the requested selector (`gpt-5.5:high`). `GET /v1/models` lists canonical IDs
-and discoverable `model:effort` aliases for each advertised
-`supported_reasoning_efforts` value (plus an advertised
-`default_reasoning_effort` when needed). Alias entries retain other canonical
-capability metadata but omit `supported_reasoning_efforts` and
-`default_reasoning_effort`, making each alias a terminal fixed-effort choice.
-The final colon is reserved for this selector syntax and earlier colons remain
-part of the base ID.
+The server removes the suffix before the model lookup and before it uses the
+SDK. The responses, the streams, the stored records and the logs therefore show
+the canonical model (`gpt-5.5`), and not the requested selector
+(`gpt-5.5:high`). `GET /v1/models` lists the canonical IDs. It also lists a
+discoverable `model:effort` alias for each advertised
+`supported_reasoning_efforts` value. It adds an advertised
+`default_reasoning_effort` when that is necessary. An alias entry keeps the
+other canonical capability metadata. It omits `supported_reasoning_efforts` and
+`default_reasoning_effort`. Each alias is thus a terminal choice with a fixed
+effort. The final colon is reserved for this selector syntax. An earlier colon
+stays part of the base ID.
 
-A naked model with no request effort remains unchanged. Set
-`COPILOT_DEFAULT_REASONING_EFFORT` for such requests; configured defaults retain
-the existing closest-supported-effort behavior, while explicit suffix or field
-values are forwarded without that rounding. Keep the selector stable throughout
-a live tool-call loop because an already-running Copilot session is not
-reconfigured during a continuation.
+A model with no suffix and no request effort does not change. Set
+`COPILOT_DEFAULT_REASONING_EFFORT` for such a request. A configured default
+keeps the existing behavior and moves to the closest supported effort. An
+explicit suffix value or field value goes to the SDK without that operation.
+Keep the selector the same through a live tool-call loop. The server does not
+configure a Copilot session again during a continuation.
 
 Chat Completions:
 
@@ -333,8 +350,8 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-Responses API using the model selector (useful for clients without an effort
-field):
+The Responses API with the model selector (this helps a client that has no
+effort field):
 
 ```sh
 curl -s http://127.0.0.1:8080/v1/responses \
@@ -345,29 +362,30 @@ curl -s http://127.0.0.1:8080/v1/responses \
   }'
 ```
 
-Equivalent forms may be combined when they agree, for example
-`"model":"gpt-5.5:HIGH"` with `"reasoning_effort":"high"`. A conflicting
-combination such as `"model":"gpt-5.5:high"` with `"reasoning_effort":"low"` is
-rejected instead of choosing one value.
+You can combine equal forms when they agree, for example
+`"model":"gpt-5.5:HIGH"` with `"reasoning_effort":"high"`. The server rejects a
+combination that disagrees, such as `"model":"gpt-5.5:high"` with
+`"reasoning_effort":"low"`. It does not select one of the two values.
 
 ### Reasoning output
 
-When a model emits extended thinking, the proxy surfaces it instead of dropping
-it. Chat Completions streams `delta.reasoning` (and `delta.reasoning_content`)
-chunks ahead of content and tool-call deltas, then attaches `reasoning`,
-`reasoning_content`, and a structured `reasoning_details` array (Anthropic
-signed text plus any OpenAI-style encrypted blob) to the final assistant
-message. The Responses API emits ordered `reasoning` output items with `summary`
-text and `response.reasoning_summary_text.*` stream events ahead of the message
-item. Interleaved thinking is preserved automatically across the standard
-tool-call loop because each follow-up request produces a fresh reasoning block.
+When a model sends extended thinking, the proxy gives it to the client, and does
+not drop it. Chat Completions streams `delta.reasoning` (and
+`delta.reasoning_content`) chunks before the content deltas and the tool-call
+deltas. It then attaches `reasoning`, `reasoning_content` and a structured
+`reasoning_details` array to the final assistant message. The array contains
+Anthropic signed text and any OpenAI-style encrypted blob. The Responses API
+sends ordered `reasoning` output items with `summary` text, and
+`response.reasoning_summary_text.*` stream events, before the message item. The
+server keeps interleaved thinking automatically through the usual tool-call
+loop, because each new request makes a new reasoning block.
 
-Use `COPILOT_REASONING_EMISSION` to narrow what is emitted (`both` by default,
-or `reasoning`, `reasoning_content`, or `off`) for clients that render reasoning
-twice. Opaque/encrypted reasoning is session-bound and stripped by the Copilot
-SDK on resume, so portable stateless `store:false` encrypted-reasoning
-round-trips are not supported; rely on the live server-side session for
-continuity.
+Use `COPILOT_REASONING_EMISSION` to make the output narrow (`both` is the
+default, and you can also use `reasoning`, `reasoning_content` or `off`). This
+helps a client that shows the reasoning two times. Opaque or encrypted reasoning
+belongs to one session, and the Copilot SDK removes it on resume. A portable
+stateless `store:false` round-trip with encrypted reasoning is therefore not
+supported. Use the live server-side session for continuity.
 
 ### OpenAI Python SDK
 
@@ -425,8 +443,8 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 If the model calls the tool, the response contains `message.tool_calls`. Execute
-the tool in your client and submit the output before `COPILOT_TOOL_CALL_TTL`
-expires:
+the tool in your client. Then send the output before `COPILOT_TOOL_CALL_TTL`
+stops:
 
 ```json
 {
@@ -457,8 +475,8 @@ expires:
 
 ### Responses extended client-owned tools
 
-Responses requests can supply the client-owned tool shapes used by Codex-style
-agents:
+A Responses request can supply the client-owned tool shapes that a Codex-style
+agent uses:
 
 ```json
 {
@@ -504,62 +522,67 @@ agents:
 }
 ```
 
-The SDK-facing names are implementation details. Responses output is rehydrated
-back to public client shapes, for example a namespaced call becomes
-`{"type":"function_call","namespace":"mcp__grep_app","name":"searchGitHub",...}`
-and `apply_patch` becomes `custom_tool_call` with raw `input`. Execute tools in
-the client and continue with the matching output item type. `tool_search_output`
-may include loadable `function`/`namespace` specs. When a live successful
-`tool_search_output` includes returned tools, the proxy installs them at the
-next SDK turn boundary by merging them into the persisted request-scoped catalog
-and starting a fresh/synthetic continuation configured with that merged catalog;
-the proxy still never executes those client-owned tools itself.
+The SDK-facing names are internal details. The server changes the Responses
+output back to the public client shapes. For example, a namespaced call becomes
+`{"type":"function_call","namespace":"mcp__grep_app","name":"searchGitHub",...}`,
+and `apply_patch` becomes a `custom_tool_call` with raw `input`. Execute the
+tools in the client. Then continue with the correct output item type.
+`tool_search_output` can include `function` and `namespace` specifications that
+the server can load. When a live successful `tool_search_output` includes
+returned tools, the proxy installs them at the next SDK turn boundary. It puts
+them into the stored request-scoped catalog. It then starts a new or synthetic
+continuation that uses that merged catalog. The proxy still never executes those
+client-owned tools itself.
 
 ## State, locking, pruning, and purge
 
-The proxy stores Copilot SDK session state and `metadata.json` under the
-configured XDG directories. Automatic retention quotas bound age, response
-count, and aggregate managed bytes, including records created for Responses
-`store:false`. Preview or run quota cleanup explicitly with:
+The proxy stores the Copilot SDK session state and `metadata.json` in the
+configured XDG directories. Automatic retention quotas limit the age, the
+response count and the total managed bytes. The quotas include the records that
+the server makes for Responses `store:false`. Use these commands to show or to
+do the quota cleanup:
 
 ```sh
 copilot-api prune --dry-run
 copilot-api prune
 ```
 
-A state lock prevents two servers from sharing the same store, while a second
-lifecycle lock outside purgeable roots prevents restart races during destructive
-cleanup. Complete cleanup remains explicit:
+A state lock prevents two servers that use the same store. A second lifecycle
+lock is outside the purgeable roots. It prevents a restart race during a
+destructive cleanup. The full cleanup is always explicit:
 
 ```sh
 copilot-api purge --dry-run
 copilot-api purge --yes
 ```
 
-`prune` and `purge` refuse destructive work while the server lock is active.
-Storage roots are canonicalized, checked against protected/overlapping paths,
-and must contain a valid application ownership marker; existing non-empty
-unmarked directories are never claimed automatically.
+`prune` and `purge` refuse to do destructive work while the server lock is
+active. The server makes the storage roots canonical. It checks them against
+protected paths and overlapping paths. Each root must contain a valid ownership
+marker of the application. The server never claims an existing directory that is
+not empty and has no marker.
 
 ## Embedded Copilot CLI
 
-This repository is configured with the Copilot SDK bundler tool, but generated
-`cmd/copilot-api/zcopilot_*` bundle artifacts are intentionally ignored and not
-committed. Run the bundler during release/package builds when you want the
-binary to include the SDK-matched Copilot CLI:
+This repository is configured with the bundler tool of the Copilot SDK. But the
+generated `cmd/copilot-api/zcopilot_*` bundle artifacts are ignored on purpose,
+and are not committed. Run the bundler during a release build or a package build
+when the binary must include the Copilot CLI that matches the SDK:
 
 ```sh
 go tool bundler --output cmd/copilot-api
 go build ./cmd/copilot-api
 ```
 
-Docker builds run the bundler inside the build stage with an explicitly pinned
-`--cli-version`, so the embedded CLI does not depend on when the image was
-built. Local development can skip bundling and use `COPILOT_CLI_PATH` or
-`copilot` on `PATH`, but that weakens SDK/CLI version matching.
+A Docker build runs the bundler in the build stage with an explicit
+`--cli-version` value. The embedded CLI thus does not depend on the date of the
+image build. Local development can omit the bundle operation and use
+`COPILOT_CLI_PATH` or `copilot` on `PATH`. But then the SDK version and the CLI
+version agree less well.
 
-Do not upgrade the SDK/CLI unless the hydration, prompt-isolation, tool
-disablement, tool-choice, and provider-shape tests/spikes have been re-run.
+Do not upgrade the SDK or the CLI before you run the tests and the spikes for
+the hydration, the prompt isolation, the tool disablement, the tool choice and
+the provider shape again.
 
 ## Container deployment
 
@@ -570,17 +593,18 @@ COPILOT_API_KEY=... docker compose -f docker-compose.example.yml up -d
 
 ### Runtime image
 
-The runtime stage is `gcr.io/distroless/cc-debian12:nonroot`, not `static`. The
-Go binary is built `CGO_ENABLED=0` and would run on `static`, but the embedded
-Copilot CLI that the SDK unpacks and executes is a **dynamically linked** Node
-single-executable: it requests `/lib/ld-linux-*.so` and links `libc`, `libm`,
-`libdl`, `libpthread`, `libstdc++.so.6`, and `libgcc_s.so.1`. On `static` it
-fails with a misleading `exec: no such file or directory` (no ELF interpreter),
-and on `base` with `error while loading shared libraries: libstdc++.so.6`. `cc`
-is the smallest distroless variant that satisfies it.
+The runtime stage is `gcr.io/distroless/cc-debian12:nonroot`, and not `static`.
+The Go binary is built with `CGO_ENABLED=0` and would operate on `static`. But
+the embedded Copilot CLI that the SDK extracts and executes is a **dynamically
+linked** Node single-executable. It asks for `/lib/ld-linux-*.so`. It links
+`libc`, `libm`, `libdl`, `libpthread`, `libstdc++.so.6` and `libgcc_s.so.1`. On
+`static` it fails with the incorrect message `exec: no such file or directory`,
+because there is no ELF interpreter. On `base` it fails with
+`error while loading shared libraries: libstdc++.so.6`. `cc` is the smallest
+distroless variant that is sufficient.
 
-Both the builder and the runtime base are pinned by digest, and the embedded CLI
-version is recorded as the `com.github.copilot.cli.version` image label:
+The builder base and the runtime base are both pinned by digest. The version of
+the embedded CLI is written in the `com.github.copilot.cli.version` image label:
 
 ```sh
 docker image inspect copilot-api --format '{{index .Config.Labels "com.github.copilot.cli.version"}}'
@@ -588,68 +612,69 @@ docker image inspect copilot-api --format '{{index .Config.Labels "com.github.co
 
 ### Environment baked into the image
 
-| Variable           | Image value            | Why                                                                                                                                                                                                                                                                         |
-| ------------------ | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `COPILOT_API_ADDR` | `0.0.0.0:8080`         | The process default is `127.0.0.1:8080`, which makes a published port silently unreachable. **`COPILOT_API_KEY` is therefore mandatory**: the non-loopback guard refuses to start without it. Override to `127.0.0.1:8080` to restore the unauthenticated loopback posture. |
-| `HOME`             | `/home/nonroot`        | Distroless sets no `HOME`. Without it the XDG lookups fall back to `/tmp/xdg-*` and every mounted volume is ignored.                                                                                                                                                        |
-| `XDG_CACHE_HOME`   | `/home/nonroot/.cache` | Pins both CLI cache consumers (see below) under one mountable directory.                                                                                                                                                                                                    |
+| Variable           | Image value            | Why                                                                                                                                                                                                                                                                                                                                     |
+| ------------------ | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COPILOT_API_ADDR` | `0.0.0.0:8080`         | The process default is `127.0.0.1:8080`. With that value a published port is unreachable, and the server gives no message. **`COPILOT_API_KEY` is therefore necessary**: the non-loopback guard does not let the server start without it. Set the value to `127.0.0.1:8080` to get the loopback condition with no authentication again. |
+| `HOME`             | `/home/nonroot`        | Distroless sets no `HOME`. Without it the XDG lookups use `/tmp/xdg-*`, and the server ignores each mounted volume.                                                                                                                                                                                                                     |
+| `XDG_CACHE_HOME`   | `/home/nonroot/.cache` | Puts the two CLI cache consumers (see below) in one directory that you can mount.                                                                                                                                                                                                                                                       |
 
 ### Volumes
 
-The image scaffolds every mountpoint as `65532:65532` in the build stage. This
-is load-bearing: when a mountpoint is **absent** from the image, Docker creates
-it and initializes the fresh named volume as `root:root 0755`, and the uid-65532
-process then fails startup with
-`secure storage root ...: operation not permitted`.
+The image makes each mountpoint as `65532:65532` in the build stage. This is
+necessary. If a mountpoint is **absent** from the image, Docker makes it and
+initializes the new named volume as `root:root 0755`. The process with uid 65532
+then fails at the start with `secure storage root ...: operation not permitted`.
 
 | Mount                                    | Contents                               |
 | ---------------------------------------- | -------------------------------------- |
-| `/home/nonroot/.local/share/copilot-api` | Managed data root                      |
-| `/home/nonroot/.local/state/copilot-api` | Managed state root                     |
-| `/home/nonroot/.config/copilot-api`      | Isolated Copilot SDK config dir        |
+| `/home/nonroot/.local/share/copilot-api` | The managed data root                  |
+| `/home/nonroot/.local/state/copilot-api` | The managed state root                 |
+| `/home/nonroot/.config/copilot-api`      | The isolated Copilot SDK config dir    |
 | `/home/nonroot/.cache`                   | The CLI caches below (no managed root) |
 
 ### Upgrading: `COPILOT_API_CACHE_DIR` was removed
 
-The variable and its managed root are gone. Nothing ever read the directory —
-the model cache is in-memory and the embedded CLI installs under
-`XDG_CACHE_HOME` — but a deployment that ran an earlier build still has an
+The variable and its managed root are removed. Nothing read the directory. The
+model cache is in memory, and the embedded CLI installs itself in
+`XDG_CACHE_HOME`. But a deployment that ran an earlier build still has an
 ownership marker at `$XDG_CACHE_HOME/copilot-api/.copilot-api-owned`.
 
-That directory is no longer claimed, scanned or purged, so `purge` will not
-remove it. Delete it by hand once:
+The server no longer claims, scans or purges that directory. `purge` therefore
+does not remove it. Delete it one time by hand:
 
 ```sh
 rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/copilot-api"
 ```
 
-Setting `COPILOT_API_CACHE_DIR` is now a no-op rather than an error, so an
-unchanged environment file keeps working.
+`COPILOT_API_CACHE_DIR` now does nothing, and is not an error. An environment
+file that you do not change therefore continues to operate.
 
 ### CLI cache caveat
 
-The whole `.cache` directory is mounted because two separate consumers write
-under it and `read_only: true` leaves neither a fallback:
+The full `.cache` directory is mounted, because two different consumers write in
+it. With `read_only: true` neither consumer has an alternative location:
 
-- `.cache/copilot-sdk` — where the Go SDK installs the extracted CLI
-  (`os.UserCacheDir()/copilot-sdk`; roughly 150 MB). The mount must be writable
-  **and exec-capable**, or the SDK silently returns an empty path and falls back
-  to `copilot` on `PATH`, which does not exist in the image.
-- `.cache/copilot` — where that CLI's own loader then extracts its bundled
-  package and native addons.
+- `.cache/copilot-sdk` — the Go SDK installs the extracted CLI here
+  (`os.UserCacheDir()/copilot-sdk`; about 150 MB). The mount must permit write
+  operations **and execution**. If it does not, the SDK returns an empty path
+  with no message. It then uses `copilot` on `PATH`, which the image does not
+  contain.
+- `.cache/copilot` — the loader of that CLI extracts its bundled package and its
+  native addons here.
 
-Neither is a managed root, so **`prune` and `purge` never touch `.cache`**.
-Delete the `copilot-cache` volume to reclaim its disk use; both directories are
-repopulated on the next start.
+Neither directory is a managed root, thus **`prune` and `purge` never change
+`.cache`**. Delete the `copilot-cache` volume to get its disk space again. The
+server fills both directories again at the next start.
 
-The CLI extracts into `XDG_CACHE_HOME` rather than `TMPDIR`, so the compose
-file's default 64 MiB `noexec` `/tmp` tmpfs is sufficient and does not need to
-be enlarged or made executable.
+The CLI extracts the files into `XDG_CACHE_HOME` and not into `TMPDIR`. The
+default 64 MiB `noexec` `/tmp` tmpfs of the compose file is therefore
+sufficient. You do not have to make it larger, and you do not have to permit
+execution on it.
 
 ## Development
 
-Every check that CI runs is available as a `make` target, so you can reproduce a
-pipeline failure locally with the exact same command:
+Each check that CI runs is available as a `make` target. You can thus repeat a
+pipeline failure locally with the same command:
 
 ```sh
 make            # everything below (same as `make ci`)
@@ -657,12 +682,12 @@ make go-ci      # fmt-check, build, vet, test, lint
 make deno-ci    # deno-fmt-check, deno-check, deno-test
 ```
 
-Individual gates:
+The individual checks are:
 
 | Target                | Command                                                  |
 | --------------------- | -------------------------------------------------------- |
-| `make fmt`            | `gofmt -w .` (rewrites; not a CI gate)                   |
-| `make fmt-check`      | fails if `gofmt -l .` lists any file                     |
+| `make fmt`            | `gofmt -w .` (writes the files; not a CI check)           |
+| `make fmt-check`      | fails if `gofmt -l .` lists a file                       |
 | `make build`          | `go build ./...`                                         |
 | `make vet`            | `go vet ./...`                                           |
 | `make test`           | `go test ./... -race -count=1`                           |
@@ -671,19 +696,21 @@ Individual gates:
 | `make deno-check`     | `deno check tests/ai-sdk-deno`                           |
 | `make deno-test`      | `deno task test:ai-sdk`                                  |
 
-The staticcheck version is pinned in both the `Makefile` and
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml); bump them together. A
-locally installed `staticcheck` may be built against an older Go toolchain and
-fail to analyze this module, which is why the pinned `go run` form is used.
+The staticcheck version is pinned in the `Makefile` and in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Change the two versions
+together. A locally installed `staticcheck` can be built against an older Go
+toolchain. It can then fail to analyze this module. The pinned `go run` form
+prevents this problem.
 
-Tests run under `-race` only. The suite is fast enough that a second non-race
-pass would double the runtime without adding signal.
+The tests run with `-race` only. The suite is quick. A second pass without
+`-race` would make the runtime two times longer and would give no more
+information.
 
-Live Copilot integration checks should be gated by `COPILOT_API_LIVE_TESTS=1`
-and are not part of the default test suite.
+Enable the live Copilot integration checks with `COPILOT_API_LIVE_TESTS=1`. They
+are not part of the default test suite.
 
-The Deno + AI SDK integration suite is also gated by default. Start a local
-server, then enable it explicitly:
+The integration suite for Deno and the AI SDK is also off by default. Start a
+local server. Then enable the suite:
 
 ```sh
 COPILOT_API_AI_SDK_DENO_TESTS=1 \
@@ -692,10 +719,12 @@ COPILOT_API_KEY=local-secret \
 deno task test:ai-sdk
 ```
 
-With the gate unset (as in CI), all 22 credentialed cases are skipped; the run
-still verifies that the suite type-checks and that `deno.lock` resolves.
+If you do not set the variable, as in CI, the suite skips all 22 cases that need
+credentials. The run still checks that the types of the suite are correct, and
+that `deno.lock` resolves.
 
-The suite covers Chat Completions, Responses over HTTP and WebSocket transports,
-reasoning effort, multi-turn history, MCP-backed client tools, and image inputs.
-See [`tests/ai-sdk-deno/README.md`](tests/ai-sdk-deno/README.md) for
+The suite tests Chat Completions, Responses over the HTTP and WebSocket
+transports, the reasoning effort, a history with more than one turn, MCP-backed
+client tools, and image input. See
+[`tests/ai-sdk-deno/README.md`](tests/ai-sdk-deno/README.md) for the
 configuration options.

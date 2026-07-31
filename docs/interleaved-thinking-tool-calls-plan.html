@@ -427,13 +427,13 @@
       <p class="eyebrow">Implementation plan · Chat Completions + Responses</p>
       <h1>Interleaved thinking &amp; interleaved tool calls</h1>
       <p class="subtitle">
-        A phased plan to surface streamed reasoning, preserve interleaved thinking across tool calls, and emit de-facto-standard <code>reasoning</code> / <code>reasoning_content</code> / <code>reasoning_details</code> fields on the OpenAI-compatible surfaces — grounded in a live probe of the GitHub Copilot SDK event stream.
+        A plan in phases. It shows the streamed reasoning, it keeps the interleaved thinking through the tool calls, and it writes the usual <code>reasoning</code> / <code>reasoning_content</code> / <code>reasoning_details</code> fields on the OpenAI-compatible interfaces. A live probe of the event stream of the GitHub Copilot SDK gives the data for the plan.
       </p>
       <div class="meta-grid" aria-label="Plan metadata">
         <div class="meta-card"><b>Primary surface</b><code>POST /v1/chat/completions</code></div>
         <div class="meta-card"><b>Secondary surface</b><code>POST /v1/responses</code></div>
-        <div class="meta-card"><b>Current state</b>Reasoning captured, never emitted</div>
-        <div class="meta-card"><b>Spike</b>Passed — SDK streams reasoning</div>
+        <div class="meta-card"><b>Current state</b>The code captures the reasoning, but never writes it</div>
+        <div class="meta-card"><b>Spike</b>Passed — the SDK streams the reasoning</div>
         <div class="meta-card"><b>Date</b>2026-06-08</div>
       </div>
     </header>
@@ -448,7 +448,7 @@
         <a href="#wire">Wire contract</a>
         <a href="#phases">Implementation phases</a>
         <a href="#tests">Testing plan</a>
-        <a href="#risks">Risks &amp; gotchas</a>
+        <a href="#risks">Risks and problems</a>
         <a href="#acceptance">Acceptance criteria</a>
         <a href="#refs">References</a>
       </nav>
@@ -457,23 +457,23 @@
         <section id="summary">
           <h2>Summary</h2>
           <p>
-            The Copilot SDK already streams model reasoning as incremental deltas and exposes encrypted "opaque" thinking on every turn, but <code>copilot-api</code> collapses it into a single hidden <code>TurnResult.Reasoning</code> string that is never emitted, streamed, or replayed. This plan threads that reasoning through to the wire using the fields real clients already understand (Open WebUI, Jan, OpenCode, Pi), preserves interleaved thinking across the standard multi-request tool loop, and lifts the artificial <code>parallel_tool_calls=true</code> rejection.
+            The Copilot SDK already streams the model reasoning as incremental deltas. It also gives encrypted "opaque" thinking on every turn. But <code>copilot-api</code> puts all of this into one hidden <code>TurnResult.Reasoning</code> string. The code never writes, streams or replays that string. This plan sends the reasoning to the wire. It uses the fields that true clients already know (Open WebUI, Jan, OpenCode, Pi). It keeps the interleaved thinking through the usual tool loop that uses more than one request. It also removes the artificial refusal of <code>parallel_tool_calls=true</code>.
           </p>
           <div class="callout success">
-            <strong>Recommended strategy:</strong> change the internal event model in <code>internal/copilotgw/turn_runner.go</code> first (it is the choke point that flattens SDK events), then extend <code>internal/openai</code> wire types and the two HTTP encoders. Chat Completions is the primary target; Responses gets the higher-fidelity ordered-items mapping. Reasoning ordering is preserved by SSE chunk order — exactly how OpenRouter, Ollama, vLLM, and DeepSeek do it.
+            <strong>Recommended strategy:</strong> change the internal event model in <code>internal/copilotgw/turn_runner.go</code> first. That file is the one point where the code makes the SDK events flat. Then make the wire types of <code>internal/openai</code> and the two HTTP encoders larger. Chat Completions is the primary target. Responses gets the ordered-items mapping, which has more fidelity. The order of the SSE chunks keeps the order of the reasoning. OpenRouter, Ollama, vLLM and DeepSeek use the same method.
           </div>
           <div class="grid-3">
             <div class="card">
               <h3>Reuse</h3>
-              <p>The ordered SDK event callback, <code>toolproxy</code> batch/continuation model (already multi-call), session hardening, reasoning-effort resolution, and SSE writers.</p>
+              <p>The ordered event callback of the SDK, the batch model and the continuation model of <code>toolproxy</code> (they already accept more than one call), the session hardening, the resolution of the reasoning effort, and the SSE writers.</p>
             </div>
             <div class="card">
               <h3>Add</h3>
-              <p><code>reasoning_delta</code> stream events, <code>reasoning</code> / <code>reasoning_content</code> / <code>reasoning_details</code> wire fields, opaque-thinking capture, and an emission-policy knob.</p>
+              <p>The <code>reasoning_delta</code> stream events, the <code>reasoning</code> / <code>reasoning_content</code> / <code>reasoning_details</code> wire fields, the capture of the opaque thinking, and a control for the emission policy.</p>
             </div>
             <div class="card">
               <h3>Defer</h3>
-              <p>Portable stateless <code>store:false</code> encrypted-reasoning round-trip (SDK strips opaque reasoning on resume); document as a known limitation.</p>
+              <p>The portable stateless round-trip of the encrypted reasoning with <code>store:false</code>. The SDK removes the opaque reasoning when it resumes a session. Write this as a known limitation.</p>
             </div>
           </div>
         </section>
@@ -481,11 +481,11 @@
         <section id="evidence">
           <h2>Spike evidence</h2>
           <p>
-            A live probe instrumented the real <code>turn_runner</code> event loop (<code>COPILOT_SPIKE_TRACE=1</code>) and drove two turns through the gateway against <code>claude-sonnet-4.6</code> with <code>reasoning_effort=high</code> and a <code>get_weather</code> tool. The raw <code>copilot.SessionEvent</code> ordering was captured and the instrumentation reverted afterward.
+            A live probe added instruments to the true event loop of <code>turn_runner</code> (<code>COPILOT_SPIKE_TRACE=1</code>). The probe sent two turns through the gateway to <code>claude-sonnet-4.6</code>, with <code>reasoning_effort=high</code> and a <code>get_weather</code> tool. The probe captured the raw order of the <code>copilot.SessionEvent</code> values. After that, the work removed the instruments again.
           </p>
           <div class="grid-2">
             <div class="card">
-              <h3>Turn 1 — reasoning → text → tool</h3>
+              <h3>Turn 1 — the reasoning, then the text, then the tool</h3>
               <pre><code>AssistantTurnStart
 AssistantReasoningDeltaData ×36   ← streams, stable ReasoningID   [DROPPED today]
 AssistantMessageStart
@@ -497,7 +497,7 @@ AssistantReasoningData (FINAL)    ← consolidated reasoning, same ID
 ToolExecutionStart → … → idle</code></pre>
             </div>
             <div class="card">
-              <h3>Turn 2 — tool result → NEW reasoning → text</h3>
+              <h3>Turn 2 — the tool result, then NEW reasoning, then the text</h3>
               <pre><code>AssistantReasoningDeltaData ×38   ← FRESH block, new ReasoningID,
                                      AFTER the tool result
 AssistantMessageDeltaData ×N      ← then the visible answer
@@ -512,29 +512,29 @@ AssistantMessageData (FINAL)
             </thead>
             <tbody>
               <tr>
-                <td>Reasoning streams incrementally</td>
-                <td><code>AssistantReasoningDeltaData{DeltaContent, ReasoningID}</code> — 36 then 38 deltas across two turns.</td>
-                <td>Live <code>delta.reasoning</code> is achievable; the loop just has no <code>case</code> for it today.</td>
+                <td>The reasoning streams in increments</td>
+                <td><code>AssistantReasoningDeltaData{DeltaContent, ReasoningID}</code> — 36 deltas, then 38 deltas, in two turns.</td>
+                <td>A live <code>delta.reasoning</code> is possible. The loop only has no <code>case</code> for it today.</td>
               </tr>
               <tr>
-                <td>Interleaved thinking across tools is real</td>
-                <td>Turn 2 emits a new reasoning block (distinct <code>ReasoningID</code>) before its message, after the tool result.</td>
-                <td>Preserved automatically by the standard Chat multi-request loop — no special transport needed.</td>
+                <td>The interleaved thinking through the tools is true</td>
+                <td>Turn 2 writes a new reasoning block, with a different <code>ReasoningID</code>, before its message and after the tool result.</td>
+                <td>The usual Chat loop with more than one request keeps this automatically. A special transport is not necessary.</td>
               </tr>
               <tr>
-                <td>Opaque/encrypted thinking is exposed</td>
-                <td><code>AssistantMessageData.ReasoningOpaque != nil</code> on every turn (Anthropic signature blob).</td>
-                <td><code>reasoning_details</code> with signed/encrypted continuity is feasible, not just plaintext.</td>
+                <td>The opaque or encrypted thinking is available</td>
+                <td><code>AssistantMessageData.ReasoningOpaque != nil</code> on every turn. It is an Anthropic signature blob.</td>
+                <td><code>reasoning_details</code> with signed or encrypted continuity is possible, and not only plain text.</td>
               </tr>
               <tr>
-                <td>Within a turn: reasoning, then text, then tool</td>
-                <td>Reasoning deltas complete before <code>AssistantMessageStart</code>; tool request is in the final message.</td>
-                <td>Emit reasoning chunks before content/tool chunks (Ollama's split pattern).</td>
+                <td>In a turn: the reasoning, then the text, then the tool</td>
+                <td>The reasoning deltas stop before <code>AssistantMessageStart</code>. The tool request is in the final message.</td>
+                <td>Write the reasoning chunks before the content chunks and the tool chunks. This is the split pattern of Ollama.</td>
               </tr>
               <tr>
-                <td><code>AssistantStreamingDeltaData</code> is noise</td>
-                <td>Carries only <code>TotalResponseSizeBytes</code> (a byte-count heartbeat).</td>
-                <td>Ignore it explicitly; do not treat as content.</td>
+                <td><code>AssistantStreamingDeltaData</code> has no data value</td>
+                <td>It carries only <code>TotalResponseSizeBytes</code>. It is a heartbeat with a count of the bytes.</td>
+                <td>Ignore it in the code. Do not use it as content.</td>
               </tr>
             </tbody>
           </table>
@@ -545,12 +545,12 @@ AssistantMessageData (FINAL)
           <table>
             <thead><tr><th>Dimension</th><th>Decision</th></tr></thead>
             <tbody>
-              <tr><td>Motivation</td><td>Visibility + continuity + fidelity (all three).</td></tr>
-              <tr><td>Surfaces</td><td>Chat Completions <strong>primary</strong>; Responses secondary (ordered items).</td></tr>
-              <tr><td>Emission</td><td>Max compatibility: emit <code>reasoning</code> + <code>reasoning_content</code> (+ <code>reasoning_details</code> when available), <strong>always-on</strong>, with a config knob to narrow.</td></tr>
-              <tr><td><code>reasoning_details</code></td><td>Ship in v1 — spike confirmed <code>ReasoningOpaque</code>/<code>EncryptedContent</code> are present.</td></tr>
-              <tr><td>Continuity</td><td>Server-side session; tolerate inbound reasoning, replay only when rebuilding cold history.</td></tr>
-              <tr><td><code>parallel_tool_calls=true</code></td><td>Accept it — the rejection is an artificial default; <code>toolproxy</code> already handles multi-call batches.</td></tr>
+              <tr><td>Motivation</td><td>The visibility, the continuity and the fidelity. All three.</td></tr>
+              <tr><td>Interfaces</td><td>Chat Completions is <strong>primary</strong>. Responses is secondary, with ordered items.</td></tr>
+              <tr><td>Emission</td><td>Maximum compatibility. Write <code>reasoning</code> and <code>reasoning_content</code>, and <code>reasoning_details</code> when it is available. This is <strong>always on</strong>, with a configuration control to make the output smaller.</td></tr>
+              <tr><td><code>reasoning_details</code></td><td>Release it in v1. The spike showed that <code>ReasoningOpaque</code> and <code>EncryptedContent</code> are present.</td></tr>
+              <tr><td>Continuity</td><td>Use the session on the server. Accept the reasoning that comes in. Replay it only when the code builds a cold history again.</td></tr>
+              <tr><td><code>parallel_tool_calls=true</code></td><td>Accept it. The refusal is an artificial default. <code>toolproxy</code> already controls batches with more than one call.</td></tr>
             </tbody>
           </table>
         </section>
@@ -564,33 +564,33 @@ AssistantMessageData (FINAL)
             <tbody>
               <tr>
                 <td>Event reduction</td>
-                <td><code>turn_runner.loop</code> handles message deltas, overwrites reasoning into one string, finalizes tool requests.</td>
-                <td>Add reasoning-delta handling and opaque-thinking capture; this is the load-bearing change.</td>
+                <td><code>turn_runner.loop</code> controls the message deltas, writes the reasoning over one string, and completes the tool requests.</td>
+                <td>Add the control of the reasoning deltas and the capture of the opaque thinking. This change carries the load.</td>
               </tr>
               <tr>
                 <td>Stream model</td>
-                <td><code>StreamEvent{Kind:"delta"|"result"}</code> carries text only.</td>
-                <td>Add <code>Kind:"reasoning_delta"</code> with <code>Delta</code> + <code>ReasoningID</code>.</td>
+                <td><code>StreamEvent{Kind:"delta"|"result"}</code> carries only text.</td>
+                <td>Add <code>Kind:"reasoning_delta"</code> with <code>Delta</code> and <code>ReasoningID</code>.</td>
               </tr>
               <tr>
                 <td>Wire types</td>
-                <td><code>internal/openai/types.go</code> has no reasoning output fields.</td>
-                <td>Add reasoning fields to chat message, chunk delta, and a <code>ReasoningDetail</code> struct.</td>
+                <td><code>internal/openai/types.go</code> has no output fields for the reasoning.</td>
+                <td>Add the reasoning fields to the chat message and to the chunk delta. Add a <code>ReasoningDetail</code> struct.</td>
               </tr>
               <tr>
                 <td>Chat encoder</td>
-                <td><code>chat.go</code> emits role → content deltas → terminal tool_calls.</td>
-                <td>Interleave reasoning deltas; attach aggregate reasoning to the final message.</td>
+                <td><code>chat.go</code> writes the role, then the content deltas, then the tool_calls at the end.</td>
+                <td>Put the reasoning deltas between them. Attach the full reasoning to the final message.</td>
               </tr>
               <tr>
                 <td>Validation</td>
-                <td><code>validation.go</code> rejects <code>parallel_tool_calls=true</code> (no rationale in git history).</td>
-                <td>Remove the rejection; keep schema validation.</td>
+                <td><code>validation.go</code> refuses <code>parallel_tool_calls=true</code>. The git history gives no reason.</td>
+                <td>Remove the refusal. Keep the schema validation.</td>
               </tr>
               <tr>
                 <td>Responses encoder</td>
-                <td><code>responses_stream.go</code> emits text then function_call items at completion.</td>
-                <td>Add ordered <code>reasoning</code> output items + reasoning stream events.</td>
+                <td><code>responses_stream.go</code> writes the text, then the function_call items when the turn is complete.</td>
+                <td>Add ordered <code>reasoning</code> output items and reasoning stream events.</td>
               </tr>
             </tbody>
           </table>
@@ -599,11 +599,11 @@ AssistantMessageData (FINAL)
         <section id="wire">
           <h2>Wire contract</h2>
           <p>
-            Ordering between reasoning, content, and tool-call deltas is conveyed entirely by SSE chunk order. Reasoning continuity round-trips by replaying the assistant message (including reasoning fields) before tool results — the same mechanism documented by OpenRouter, DeepSeek, and Ollama.
+            The order of the SSE chunks gives all the order between the reasoning deltas, the content deltas and the tool-call deltas. The reasoning continuity makes a round-trip: the client replays the assistant message, with its reasoning fields, before the tool results. OpenRouter, DeepSeek and Ollama give the same mechanism in their documents.
           </p>
           <div class="grid-2">
             <div class="card">
-              <h3>Streaming chunk delta</h3>
+              <h3>The delta of a stream chunk</h3>
               <pre><code>{
   "choices": [{
     "index": 0,
@@ -623,7 +623,7 @@ AssistantMessageData (FINAL)
 }</code></pre>
             </div>
             <div class="card">
-              <h3>Final assistant message</h3>
+              <h3>The final assistant message</h3>
               <pre><code>{
   "role": "assistant",
   "content": "visible answer or null",
@@ -643,10 +643,10 @@ AssistantMessageData (FINAL)
           <table>
             <thead><tr><th>Field</th><th>Maps from SDK</th><th>Notes</th></tr></thead>
             <tbody>
-              <tr><td><code>reasoning</code> / <code>reasoning_content</code></td><td><code>AssistantReasoningDeltaData.DeltaContent</code> → final <code>AssistantReasoningData.Content</code> / <code>ReasoningText</code></td><td>Identical text; both emitted for max compatibility (knob to narrow).</td></tr>
-              <tr><td><code>reasoning_details[].text</code> + <code>signature</code></td><td><code>ReasoningText</code> + <code>ReasoningOpaque</code></td><td>Anthropic signed thinking; preserve byte-for-byte, never reorder.</td></tr>
-              <tr><td><code>reasoning_details[].data</code> (encrypted)</td><td><code>EncryptedContent</code></td><td>OpenAI-style encrypted reasoning when present.</td></tr>
-              <tr><td><code>tool_calls[]</code></td><td><code>AssistantMessageData.ToolRequests</code> via <code>toolproxy.CaptureRequests</code></td><td>Already ordered; supports multiple/parallel calls in one batch.</td></tr>
+              <tr><td><code>reasoning</code> / <code>reasoning_content</code></td><td><code>AssistantReasoningDeltaData.DeltaContent</code>, then the final <code>AssistantReasoningData.Content</code> / <code>ReasoningText</code></td><td>The text is the same. The code writes both for the maximum compatibility. A control makes the output smaller.</td></tr>
+              <tr><td><code>reasoning_details[].text</code> + <code>signature</code></td><td><code>ReasoningText</code> + <code>ReasoningOpaque</code></td><td>This is the signed thinking of Anthropic. Keep each byte, and never change the order.</td></tr>
+              <tr><td><code>reasoning_details[].data</code> (encrypted)</td><td><code>EncryptedContent</code></td><td>The encrypted reasoning in the OpenAI form, when it is present.</td></tr>
+              <tr><td><code>tool_calls[]</code></td><td><code>AssistantMessageData.ToolRequests</code>, through <code>toolproxy.CaptureRequests</code></td><td>The list is already in order. It supports more than one call, and parallel calls, in one batch.</td></tr>
             </tbody>
           </table>
         </section>
@@ -655,74 +655,74 @@ AssistantMessageData (FINAL)
           <h2>Implementation phases</h2>
           <div style="counter-reset: phase;">
             <article class="phase">
-              <h3>Internal event model — capture &amp; stream reasoning</h3>
+              <h3>The internal event model — capture and stream the reasoning</h3>
               <p>
-                Change the choke point so reasoning is no longer dropped. This is the prerequisite for every wire change.
+                Change the one point where the code drops the reasoning. This is the prerequisite for every change to the wire.
               </p>
               <ul>
-                <li>In <code>internal/copilotgw/turn_runner.go</code>, add <code>case *copilot.AssistantReasoningDeltaData</code> → emit a new internal reasoning-delta event.</li>
-                <li>On <code>AssistantMessageData</code>, capture <code>ReasoningText</code>, <code>ReasoningOpaque</code>, and <code>EncryptedContent</code> into <code>TurnResult</code> (new fields).</li>
-                <li>Explicitly ignore <code>AssistantStreamingDeltaData</code> (heartbeat).</li>
-                <li>In <code>internal/copilotgw/types.go</code>, add <code>StreamEvent{Kind:"reasoning_delta", Delta, ReasoningID}</code> and reasoning/opaque fields on <code>TurnResult</code>.</li>
+                <li>In <code>internal/copilotgw/turn_runner.go</code>, add <code>case *copilot.AssistantReasoningDeltaData</code>. It writes a new internal event for a reasoning delta.</li>
+                <li>On <code>AssistantMessageData</code>, capture <code>ReasoningText</code>, <code>ReasoningOpaque</code> and <code>EncryptedContent</code> into new fields of <code>TurnResult</code>.</li>
+                <li>Ignore <code>AssistantStreamingDeltaData</code> in the code. It is a heartbeat.</li>
+                <li>In <code>internal/copilotgw/types.go</code>, add <code>StreamEvent{Kind:"reasoning_delta", Delta, ReasoningID}</code>. Add the reasoning fields and the opaque fields to <code>TurnResult</code>.</li>
               </ul>
             </article>
 
             <article class="phase">
-              <h3>OpenAI wire types — reasoning fields</h3>
-              <p>Add the de-facto-standard fields and a structured detail type; accept them inbound tolerantly.</p>
+              <h3>The OpenAI wire types — the reasoning fields</h3>
+              <p>Add the usual fields and a structured detail type. Accept these fields when they come in, and do not give an error.</p>
               <ul>
-                <li>In <code>internal/openai/types.go</code>, add <code>reasoning</code>, <code>reasoning_content</code>, and <code>reasoning_details []ReasoningDetail</code> to the assistant message and the chunk delta.</li>
-                <li>Define <code>ReasoningDetail{Type, Text, Signature, Data, Summary, ID, Format, Index}</code> with <code>omitempty</code> semantics per type.</li>
-                <li>Parse inbound assistant-message reasoning without erroring (tolerate <code>reasoning</code>/<code>reasoning_content</code>/<code>reasoning_details</code>).</li>
+                <li>In <code>internal/openai/types.go</code>, add <code>reasoning</code>, <code>reasoning_content</code> and <code>reasoning_details []ReasoningDetail</code> to the assistant message and to the chunk delta.</li>
+                <li>Make <code>ReasoningDetail{Type, Text, Signature, Data, Summary, ID, Format, Index}</code>. Use <code>omitempty</code> semantics for each type.</li>
+                <li>Parse the reasoning of an assistant message that comes in, and do not give an error. Accept <code>reasoning</code>, <code>reasoning_content</code> and <code>reasoning_details</code>.</li>
               </ul>
             </article>
 
             <article class="phase">
-              <h3>Chat Completions encoder — interleave &amp; aggregate</h3>
-              <p>Primary surface. Stream reasoning before content/tool deltas; attach aggregate reasoning to the final message.</p>
+              <h3>The Chat Completions encoder — interleave and collect</h3>
+              <p>This is the primary interface. Stream the reasoning before the content deltas and the tool deltas. Attach the full reasoning to the final message.</p>
               <ul>
-                <li>In <code>internal/httpapi/chat.go</code>, handle <code>reasoning_delta</code> → emit <code>delta.reasoning</code> (+ <code>delta.reasoning_content</code>) chunks, ordered ahead of content/tool deltas (Ollama split pattern).</li>
-                <li>On the terminal message, populate <code>reasoning</code>, <code>reasoning_content</code>, and <code>reasoning_details</code> alongside <code>content</code> and <code>tool_calls</code>.</li>
-                <li>Wire the emission-policy knob: <code>both</code> (default) | <code>reasoning</code> | <code>reasoning_content</code> | <code>off</code>.</li>
+                <li>In <code>internal/httpapi/chat.go</code>, control <code>reasoning_delta</code>. Write <code>delta.reasoning</code> chunks, and <code>delta.reasoning_content</code> chunks, before the content deltas and the tool deltas. This is the split pattern of Ollama.</li>
+                <li>On the last message, fill <code>reasoning</code>, <code>reasoning_content</code> and <code>reasoning_details</code>, with <code>content</code> and <code>tool_calls</code>.</li>
+                <li>Connect the control for the emission policy: <code>both</code> (the default), <code>reasoning</code>, <code>reasoning_content</code> or <code>off</code>.</li>
               </ul>
             </article>
 
             <article class="phase">
-              <h3>Validation — accept parallel tool calls</h3>
-              <p>Remove the artificial rejection; keep structural validation intact.</p>
+              <h3>Validation — accept the parallel tool calls</h3>
+              <p>Remove the artificial refusal. Keep the validation of the structure.</p>
               <ul>
-                <li>In <code>internal/openai/validation.go</code>, drop the <code>parallel_tool_calls=true</code> Chat rejection.</li>
-                <li>Confirm <code>toolproxy</code> multi-call batch + <code>Broker.FindByCallIDs</code> behavior is unchanged; add a regression test.</li>
+                <li>In <code>internal/openai/validation.go</code>, remove the Chat refusal of <code>parallel_tool_calls=true</code>.</li>
+                <li>Check that the behavior of the <code>toolproxy</code> batch with more than one call, and of <code>Broker.FindByCallIDs</code>, is unchanged. Add a regression test.</li>
               </ul>
             </article>
 
             <article class="phase">
-              <h3>Responses surface — ordered reasoning items</h3>
-              <p>Higher-fidelity mapping for <code>/v1/responses</code>.</p>
+              <h3>The Responses interface — ordered reasoning items</h3>
+              <p>A mapping with more fidelity for <code>/v1/responses</code>.</p>
               <ul>
-                <li>In <code>internal/httpapi/responses_stream.go</code>, emit ordered <code>reasoning</code> output items and reasoning stream events alongside <code>function_call</code> items.</li>
-                <li>Carry <code>reasoning_details</code>-equivalent content into the reasoning item (<code>content</code> + <code>encrypted_content</code> when present).</li>
-                <li>Preserve item order and stable IDs from the SDK <code>ReasoningID</code>.</li>
+                <li>In <code>internal/httpapi/responses_stream.go</code>, write ordered <code>reasoning</code> output items and reasoning stream events, with the <code>function_call</code> items.</li>
+                <li>Put the content that is equivalent to <code>reasoning_details</code> into the reasoning item. Use <code>content</code>, and <code>encrypted_content</code> when it is present.</li>
+                <li>Keep the order of the items, and keep the stable IDs from the <code>ReasoningID</code> of the SDK.</li>
               </ul>
             </article>
 
             <article class="phase">
-              <h3>History hydration &amp; continuation</h3>
-              <p>Make the round-trip lossless without depending on the client.</p>
+              <h3>The hydration of the history and the continuation</h3>
+              <p>Make the round-trip keep all the data, and do not depend on the client.</p>
               <ul>
-                <li>In <code>internal/hydration/hydration.go</code>, tolerate inbound assistant reasoning; replay it only when reconstructing a cold/stateless session.</li>
-                <li>Prefer the live Copilot session for continuity; never 400 on client-supplied reasoning.</li>
-                <li>Document that portable <code>store:false</code> encrypted-reasoning round-trip is unsupported (SDK strips opaque reasoning on resume).</li>
+                <li>In <code>internal/hydration/hydration.go</code>, accept the assistant reasoning that comes in. Replay it only when the code builds a cold session or a stateless session again.</li>
+                <li>Use the live Copilot session for the continuity. Never give a 400 for the reasoning that a client sends.</li>
+                <li>Write that the portable round-trip of the encrypted reasoning with <code>store:false</code> is not supported. The SDK removes the opaque reasoning when it resumes a session.</li>
               </ul>
             </article>
 
             <article class="phase">
-              <h3>Tests, docs &amp; config</h3>
-              <p>Lock behavior and surface the new knobs.</p>
+              <h3>The tests, the documents and the configuration</h3>
+              <p>Make the behavior stable, and show the new controls.</p>
               <ul>
-                <li>Unit tests: reasoning-delta mapping, final-message aggregation, <code>reasoning_details</code> shape, parallel tool_calls acceptance, emission-policy knob.</li>
-                <li>Formalize the throwaway probe as a gated live test (<code>COPILOT_API_LIVE_TESTS=1</code>) asserting reasoning deltas precede content.</li>
-                <li>README compatibility matrix + new env var for the emission policy.</li>
+                <li>Unit tests: the mapping of a reasoning delta, the collection into the final message, the shape of <code>reasoning_details</code>, the acceptance of the parallel tool_calls, and the control for the emission policy.</li>
+                <li>Make the temporary probe a live test with a condition (<code>COPILOT_API_LIVE_TESTS=1</code>). The test must show that the reasoning deltas come before the content.</li>
+                <li>The compatibility matrix of the README, and a new environment variable for the emission policy.</li>
               </ul>
             </article>
           </div>
@@ -734,36 +734,36 @@ AssistantMessageData (FINAL)
             <div class="card">
               <h3>Deterministic (unit)</h3>
               <ul>
-                <li>Fake SDK event sequence → assert ordered <code>reasoning_delta</code> then content then tool_calls.</li>
-                <li>Final message carries <code>reasoning</code>/<code>reasoning_content</code>/<code>reasoning_details</code>.</li>
-                <li>Inbound reasoning tolerated; cold-history replay path.</li>
-                <li><code>parallel_tool_calls=true</code> accepted; multi-call batch preserved.</li>
+                <li>Give a false sequence of SDK events. Check that the code writes the <code>reasoning_delta</code> events, then the content, then the tool_calls.</li>
+                <li>The final message carries <code>reasoning</code>, <code>reasoning_content</code> and <code>reasoning_details</code>.</li>
+                <li>The code accepts the reasoning that comes in. Test the replay path for a cold history.</li>
+                <li>The code accepts <code>parallel_tool_calls=true</code>. The batch with more than one call stays complete.</li>
               </ul>
             </div>
             <div class="card">
-              <h3>Live (gated)</h3>
+              <h3>Live (with a condition)</h3>
               <ul>
-                <li>Reasoning streams as deltas before content (claude-sonnet-4.x, reasoning_effort high).</li>
-                <li>Second turn produces a fresh reasoning block after a tool result.</li>
-                <li><code>ReasoningOpaque</code> present and surfaced into <code>reasoning_details</code>.</li>
+                <li>The reasoning streams as deltas before the content. Use claude-sonnet-4.x with reasoning_effort high.</li>
+                <li>The second turn makes a new reasoning block after a tool result.</li>
+                <li><code>ReasoningOpaque</code> is present, and the code puts it into <code>reasoning_details</code>.</li>
               </ul>
             </div>
           </div>
         </section>
 
         <section id="risks">
-          <h2>Risks &amp; gotchas</h2>
+          <h2>Risks and problems</h2>
           <div class="callout warning">
-            <strong>Duplicate reasoning display.</strong> Some clients render both <code>reasoning</code> and <code>reasoning_content</code>. Default to emitting both, but ship the narrowing knob and validate against Open WebUI / Jan / OpenCode / Pi.
+            <strong>The client shows the reasoning two times.</strong> Some clients draw <code>reasoning</code> and <code>reasoning_content</code>. Write both by default. But release the control that makes the output smaller, and test with Open WebUI, Jan, OpenCode and Pi.
           </div>
           <div class="callout warning">
-            <strong>Opaque reasoning is session-bound.</strong> The SDK strips <code>ReasoningOpaque</code>/<code>EncryptedContent</code> on resume. Portable stateless continuity would require our own encryption envelope — out of scope for v1; document the limitation.
+            <strong>The opaque reasoning is bound to the session.</strong> The SDK removes <code>ReasoningOpaque</code> and <code>EncryptedContent</code> when it resumes a session. A portable stateless continuity needs an encryption envelope of our own. That is not in the scope of v1. Write the limitation in the documents.
           </div>
           <div class="callout">
-            <strong>Provider drift.</strong> vLLM moved <code>reasoning_content</code> → <code>reasoning</code>; keep an adapter seam rather than hard-coding one field.
+            <strong>The providers change.</strong> vLLM changed <code>reasoning_content</code> to <code>reasoning</code>. Keep an adapter layer. Do not put one field name in the code.
           </div>
           <div class="callout">
-            <strong>Client-proxied tool execution.</strong> The SDK's own tool handler reports <code>success=false</code> for parked client tools (expected). Interleaving across tools happens across HTTP requests, not inside one stream.
+            <strong>The client does the tool execution.</strong> The tool handler of the SDK gives <code>success=false</code> for the client tools that wait. This is correct behavior. The thinking between the tools occurs between the HTTP requests, and not in one stream.
           </div>
         </section>
 
@@ -771,47 +771,47 @@ AssistantMessageData (FINAL)
           <h2>Acceptance criteria</h2>
           <div class="grid-2">
             <div class="card">
-              <h3><span class="status ok">Must ship</span></h3>
+              <h3><span class="status ok">Must be in the release</span></h3>
               <ul>
-                <li>Streaming Chat emits ordered reasoning deltas before content/tool deltas.</li>
-                <li>Non-streaming Chat attaches <code>reasoning</code>/<code>reasoning_content</code>/<code>reasoning_details</code>.</li>
-                <li>Interleaved thinking preserved across the tool-call loop.</li>
-                <li><code>parallel_tool_calls=true</code> accepted on Chat.</li>
-                <li>Emission-policy knob with a sane max-compat default.</li>
-                <li>Deterministic tests + gated live test green; README updated.</li>
+                <li>The Chat stream writes ordered reasoning deltas before the content deltas and the tool deltas.</li>
+                <li>Chat with no streaming attaches <code>reasoning</code>, <code>reasoning_content</code> and <code>reasoning_details</code>.</li>
+                <li>The interleaved thinking stays through the loop of the tool calls.</li>
+                <li>Chat accepts <code>parallel_tool_calls=true</code>.</li>
+                <li>The control for the emission policy has a good default with the maximum compatibility.</li>
+                <li>The deterministic tests and the live test with a condition pass. The README is up to date.</li>
               </ul>
             </div>
             <div class="card">
-              <h3><span class="status wait">May defer</span></h3>
+              <h3><span class="status wait">Can come later</span></h3>
               <ul>
-                <li>Responses ordered reasoning items (Phase 5) if scheduled separately.</li>
-                <li>Portable <code>store:false</code> encrypted-reasoning round-trip.</li>
-                <li>Per-format <code>reasoning_details</code> normalization beyond Anthropic.</li>
+                <li>The ordered reasoning items of Responses (Phase 5), if it is planned separately.</li>
+                <li>The portable round-trip of the encrypted reasoning with <code>store:false</code>.</li>
+                <li>The normalization of <code>reasoning_details</code> for formats other than Anthropic.</li>
               </ul>
             </div>
           </div>
           <div class="callout success">
-            <strong>Definition of done:</strong> a Chat-Completions client receives streamed, ordered reasoning interleaved with tool calls, can replay it for continuity, and sees coherent interleaved thinking across a multi-step tool loop — documented in the README compatibility matrix and covered by deterministic and gated live tests.
+            <strong>Definition of done:</strong> a Chat Completions client gets streamed, ordered reasoning between the tool calls. The client can replay it for the continuity. The client sees coherent interleaved thinking through a tool loop with more than one step. The compatibility matrix of the README gives this behavior, and the deterministic tests and the live tests with a condition cover it.
           </div>
         </section>
 
         <section id="refs">
           <h2>References</h2>
           <ul>
-            <li>Copilot Go SDK session events — <code>AssistantReasoningDeltaData</code>, <code>AssistantMessageData</code> (<code>ReasoningText</code>/<code>ReasoningOpaque</code>/<code>EncryptedContent</code>): <a href="https://github.com/github/copilot-sdk/blob/main/go/rpc/zsession_events.go">zsession_events.go</a></li>
-            <li>Copilot Go SDK README — reasoning effort, streaming reasoning events: <a href="https://github.com/github/copilot-sdk/blob/main/go/README.md">go/README.md</a></li>
-            <li>OpenRouter reasoning tokens — <code>reasoning</code>, <code>reasoning_content</code> alias, <code>reasoning_details</code> round-trip: <a href="https://openrouter.ai/docs/guides/best-practices/reasoning-tokens">reasoning-tokens</a></li>
-            <li>DeepSeek thinking mode — tool-call reasoning round-trip requirement: <a href="https://api-docs.deepseek.com/guides/thinking_mode">thinking_mode</a></li>
-            <li>Ollama OpenAI adapter — <code>reasoning</code> mapping + mixed-chunk split: <a href="https://github.com/ollama/ollama/blob/main/openai/openai.go">openai/openai.go</a></li>
-            <li>vLLM reasoning outputs — <code>reasoning</code> (formerly <code>reasoning_content</code>): <a href="https://docs.vllm.ai/en/latest/features/reasoning_outputs/">reasoning_outputs</a></li>
-            <li>Anthropic extended thinking — interleaved thinking, signatures, redacted thinking: <a href="https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking">extended-thinking</a></li>
+            <li>The session events of the Copilot Go SDK — <code>AssistantReasoningDeltaData</code>, <code>AssistantMessageData</code> (<code>ReasoningText</code>, <code>ReasoningOpaque</code>, <code>EncryptedContent</code>): <a href="https://github.com/github/copilot-sdk/blob/main/go/rpc/zsession_events.go">zsession_events.go</a></li>
+            <li>The README of the Copilot Go SDK — the reasoning effort, and the stream events of the reasoning: <a href="https://github.com/github/copilot-sdk/blob/main/go/README.md">go/README.md</a></li>
+            <li>The reasoning tokens of OpenRouter — <code>reasoning</code>, the <code>reasoning_content</code> alias, and the round-trip of <code>reasoning_details</code>: <a href="https://openrouter.ai/docs/guides/best-practices/reasoning-tokens">reasoning-tokens</a></li>
+            <li>The thinking mode of DeepSeek — the round-trip of the reasoning that a tool call needs: <a href="https://api-docs.deepseek.com/guides/thinking_mode">thinking_mode</a></li>
+            <li>The OpenAI adapter of Ollama — the <code>reasoning</code> mapping and the split of a mixed chunk: <a href="https://github.com/ollama/ollama/blob/main/openai/openai.go">openai/openai.go</a></li>
+            <li>The reasoning outputs of vLLM — <code>reasoning</code>, which had the name <code>reasoning_content</code> before: <a href="https://docs.vllm.ai/en/latest/features/reasoning_outputs/">reasoning_outputs</a></li>
+            <li>The extended thinking of Anthropic — the interleaved thinking, the signatures and the redacted thinking: <a href="https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking">extended-thinking</a></li>
           </ul>
         </section>
       </main>
     </div>
 
     <footer>
-      <p>Prepared for <code>copilot-api</code>. This document is an implementation plan, not an implementation. Spike findings captured 2026-06-08 against <code>claude-sonnet-4.6</code> via an instrumented, since-reverted probe.</p>
+      <p>Prepared for <code>copilot-api</code>. This document is an implementation plan, and not an implementation. The spike captured its data on 2026-06-08 against <code>claude-sonnet-4.6</code>, with a probe that had instruments. The work removed the instruments after that.</p>
     </footer>
   </div>
 </body>

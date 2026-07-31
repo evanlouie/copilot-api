@@ -1,9 +1,10 @@
 # Project Goal
 
-The goal is to build an OpenAI Chat Completions API and Responses API compatible
-API on top of the GitHub Copilot SDK, enabling users to access any/all models
-offered in their GitHub Copilot subscription in any client that supports the
-OpenAI Chat Completions and/or Responses API.
+The goal is to build an API on the GitHub Copilot SDK. The API is compatible
+with the OpenAI Chat Completions API and the OpenAI Responses API. It lets the
+user get access to any model or all models of the GitHub Copilot subscription.
+The user can do this from any client that supports the OpenAI Chat Completions
+API or the OpenAI Responses API.
 
 # References
 

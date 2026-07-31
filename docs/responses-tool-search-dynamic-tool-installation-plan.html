@@ -336,17 +336,17 @@
   <div class="shell">
     <header class="hero">
       <div class="eyebrow">Implementation plan · Responses API · Dynamic tool search</div>
-      <h1>Install <code>tool_search</code> results through an explicit SDK turn boundary</h1>
+      <h1>Install <code>tool_search</code> results at a clear SDK turn boundary</h1>
       <p class="subtitle">
-        A plan for Option B: when Codex returns loadable tool specs from <code>tool_search_output.tools</code>, merge them into
-        the request-scoped Responses tool catalog and continue in a newly configured Copilot SDK turn, so deferred tools such as
-        <code>multi_agent_v1.spawn_agent</code> become actually callable without making <code>copilot-api</code> a proxy-hosted tool runtime.
+        This is a plan for Option B. When Codex returns loadable tool specifications in <code>tool_search_output.tools</code>, the proxy
+        merges them into the tool catalog of the Responses request. The proxy then continues in a new Copilot SDK turn. Deferred tools
+        such as <code>multi_agent_v1.spawn_agent</code> then become callable, and <code>copilot-api</code> does not become a tool runtime.
       </p>
       <div class="meta-grid">
         <div class="meta-card"><b>Status</b>Plan only</div>
-        <div class="meta-card"><b>Primary surface</b><code>Responses HTTP + WebSocket</code></div>
-        <div class="meta-card"><b>Core invariant</b>Client executes tools</div>
-        <div class="meta-card"><b>Target outcome</b>Deferred namespace tools become callable after search</div>
+        <div class="meta-card"><b>Primary interface</b><code>Responses HTTP + WebSocket</code></div>
+        <div class="meta-card"><b>Core rule</b>The client runs the tools</div>
+        <div class="meta-card"><b>Target result</b>Deferred namespace tools become callable after the search</div>
       </div>
     </header>
 
@@ -354,13 +354,13 @@
       <nav aria-label="Plan navigation">
         <b>Contents</b>
         <a href="#summary">Summary</a>
-        <a href="#current-gap">Current gap</a>
+        <a href="#current-gap">The problem now</a>
         <a href="#goals">Goals and non-goals</a>
         <a href="#architecture">Architecture</a>
         <a href="#phases">Implementation phases</a>
         <a href="#data-model">Data model</a>
-        <a href="#flows">HTTP and WebSocket flows</a>
-        <a href="#validation">Validation matrix</a>
+        <a href="#flows">HTTP flows and WebSocket flows</a>
+        <a href="#validation">Table of the checks</a>
         <a href="#tests">Test plan</a>
         <a href="#risks">Risks</a>
         <a href="#acceptance">Acceptance criteria</a>
@@ -370,38 +370,38 @@
         <section id="summary">
           <h2>Summary</h2>
           <p>
-            Codex can currently call <code>tool_search</code> and return loadable tool specs, but those returned specs are only
-            validated and recorded as output text. They are not installed into the Copilot SDK session's active tool catalog.
-            The result is the exact failure mode observed with sub-agents: Codex discovers <code>multi_agent_v1.spawn_agent</code>,
-            <code>wait_agent</code>, <code>send_input</code>, <code>resume_agent</code>, and <code>close_agent</code>, but the model cannot call them
-            in the subsequent step because the SDK turn still has the old tool set.
+            Codex can call <code>tool_search</code> now, and it can return loadable tool specifications. But the proxy only checks these
+            specifications and records them as output text. The proxy does not install them into the active tool catalog of the Copilot SDK
+            session. This causes the failure that we see with the sub-agents. Codex finds <code>multi_agent_v1.spawn_agent</code>,
+            <code>wait_agent</code>, <code>send_input</code>, <code>resume_agent</code> and <code>close_agent</code>. The model cannot call them
+            in the next step, because the SDK turn still has the old tool set.
           </p>
           <div class="callout blue">
-            <strong>Strategy:</strong> make <code>tool_search_output</code> a catalog boundary. When live search output contains valid
-            loadable tools, validate ownership and mergeability first, persist the client-supplied search output as continuation
-            transcript state, cut over from the old parked SDK turn without exposing stale-catalog results, and start exactly one
-            next model turn with a new <code>RequestTools</code> instance built from the merged catalog.
+            <strong>Method:</strong> make <code>tool_search_output</code> a catalog boundary. Do these steps when a live search output contains
+            valid loadable tools. First, check the ownership and check that a merge is possible. Then store the search output from the client
+            as continuation transcript state. Then stop the old parked SDK turn, and do not show results that come from the old catalog. Last,
+            start one model turn only, with a new <code>RequestTools</code> instance that you build from the merged catalog.
           </div>
           <p>
-            The proxy should expose these loaded tools to the model and return their calls to Codex CLI. Codex CLI remains the
-            executor. <code>copilot-api</code> must not run sub-agents, MCP actions, shell commands, or any other client-owned tool logic.
+            The proxy gives these loaded tools to the model, and returns their calls to the Codex CLI. The Codex CLI continues to run the
+            tools. <code>copilot-api</code> must not run sub-agents, MCP actions, shell commands, or other tool logic that the client owns.
           </p>
         </section>
 
         <section id="current-gap">
-          <h2>Current gap</h2>
-          <p>The current implementation has the necessary parsing and safety foundation, but not the dynamic catalog step:</p>
+          <h2>The problem now</h2>
+          <p>The implementation has the necessary parser and the necessary safety controls. It does not have the dynamic catalog step:</p>
           <ul>
-            <li><code>tool_search_call</code> is exposed as a client-owned tool.</li>
-            <li><code>tool_search_output</code> is parsed and its <code>tools</code> array is validated as loadable <code>function</code> or <code>namespace</code> specs.</li>
-            <li>The returned specs are not merged into <code>ResponseRequest.Tools</code> for the next SDK turn.</li>
-            <li>The live parked SDK handler receives only a string output; the session's <code>Tools</code> and <code>AvailableTools</code> remain unchanged.</li>
-            <li>Completing that parked handler would let the old runner continue planning with the stale catalog unless the implementation explicitly cuts it over.</li>
-            <li>Warm sessions and stored response records do not yet carry an installed-catalog delta produced by tool search.</li>
+            <li>The proxy gives <code>tool_search_call</code> to the model as a tool that the client owns.</li>
+            <li>The proxy parses <code>tool_search_output</code>. It checks the <code>tools</code> array as loadable <code>function</code> specifications or <code>namespace</code> specifications.</li>
+            <li>The proxy does not merge the returned specifications into <code>ResponseRequest.Tools</code> for the next SDK turn.</li>
+            <li>The live parked SDK handler gets a string output only. The <code>Tools</code> field and the <code>AvailableTools</code> field of the session do not change.</li>
+            <li>If you complete that parked handler, the old runner continues to plan with the old catalog. This occurs if the implementation does not replace the old runner.</li>
+            <li>The warm sessions and the stored response records do not contain the catalog change that the tool search makes.</li>
           </ul>
           <div class="callout red">
-            <strong>Observed effect:</strong> the model can talk about discovered tools from the search result, but when it tries to call
-            <code>multi_agent_v1.spawn_agent</code> the tool is absent from the SDK-configured callable set.
+            <strong>The effect that we see:</strong> the model can speak about the tools that the search result gives. But when the model tries to call
+            <code>multi_agent_v1.spawn_agent</code>, that tool is not in the callable set that the SDK has.
           </div>
         </section>
 
@@ -411,20 +411,20 @@
             <div class="card">
               <h3>Goals</h3>
               <ul>
-                <li>Install valid <code>tool_search_output.tools</code> for the model's next tool-planning step.</li>
-                <li>Support deferred namespace tools such as <code>multi_agent_v1.spawn_agent</code>.</li>
-                <li>Preserve canonical Responses names and namespaces in output items.</li>
-                <li>Persist enough catalog state for subsequent continuations, warm sessions, and restart fallback.</li>
-                <li>Keep the SDK in <code>ModeEmpty</code> with only request-scoped synthetic custom tools exposed.</li>
+                <li>Install valid tools from <code>tool_search_output.tools</code> for the next planning step of the model.</li>
+                <li>Support deferred namespace tools, for example <code>multi_agent_v1.spawn_agent</code>.</li>
+                <li>Keep the canonical Responses names and the namespaces in the output items.</li>
+                <li>Store sufficient catalog state for the later continuations, for the warm sessions and for the fallback after a restart.</li>
+                <li>Keep the SDK in <code>ModeEmpty</code>. Give it only the synthetic custom tools of the current request.</li>
               </ul>
             </div>
             <div class="card">
               <h3>Non-goals</h3>
               <ul>
-                <li>Do not execute sub-agent tools inside <code>copilot-api</code>.</li>
-                <li>Do not enable Copilot SDK built-in MCP, shell, file, memory, skills, repository, or host-git tools.</li>
-                <li>Do not implement hosted OpenAI tools such as provider web search, file search, image generation, or code interpreter.</li>
-                <li>Do not mutate the active SDK tool list mid-turn unless the SDK gains a supported API for it.</li>
+                <li>Do not run sub-agent tools in <code>copilot-api</code>.</li>
+                <li>Do not enable the built-in Copilot SDK tools for MCP, shell, files, memory, skills, repositories or host git.</li>
+                <li>Do not implement the hosted OpenAI tools: the web search of the provider, the file search, the image generation and the code interpreter.</li>
+                <li>Do not change the active SDK tool list during a turn. Do this only if the SDK gets a supported API for it.</li>
               </ul>
             </div>
           </div>
@@ -432,7 +432,7 @@
 
         <section id="architecture">
           <h2>Architecture</h2>
-          <p>The dynamic path becomes <strong>search → validate active outputs → merge catalog → persist transcript/catalog → cut over old runner → reconfigure SDK → continue</strong>.</p>
+          <p>The dynamic sequence becomes this: <strong>search → check the active outputs → merge the catalog → store the transcript and the catalog → stop the old runner → configure the SDK again → continue</strong>.</p>
           <pre><code>Turn N SDK catalog
   └─ tool_search
        ↓ model calls tool_search
@@ -452,8 +452,8 @@ Turn N+1 model can call multi_agent_v1__spawn_agent
 Responses output
   └─ function_call(namespace: "multi_agent_v1", name: "spawn_agent")</code></pre>
           <div class="callout green">
-            <strong>Important boundary:</strong> the new tools become callable only after a new SDK turn is configured with the merged catalog.
-            The implementation must never claim that returned tools were callable before <code>Tools</code> and <code>AvailableTools</code> actually include them.
+            <strong>Important boundary:</strong> the new tools become callable only after you configure a new SDK turn with the merged catalog.
+            The implementation must never say that the returned tools were callable before <code>Tools</code> and <code>AvailableTools</code> contain them.
           </div>
         </section>
 
@@ -463,15 +463,15 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 1</div>
             <div>
-              <h3>Extract one canonical tool-catalog module</h3>
-              <p>Create a single source of truth for normalization, merge, aliasing, collision checks, semantic keys, and persistence DTO conversion.</p>
+              <h3>Make one canonical module for the tool catalog</h3>
+              <p>Make one module that controls the normalization, the merge, the aliases, the collision checks, the semantic keys and the conversion to the storage DTO.</p>
               <ul>
-                <li>Add a <code>ToolCatalog</code> type around canonical Responses tool specs, not raw SDK aliases.</li>
-                <li>Expose operations: <code>FromRequest</code>, <code>FromStored</code>, <code>MergeLoaded</code>, <code>Flatten</code>, <code>Key</code>, <code>StoredDTO</code>, and <code>WithoutRaw</code>.</li>
-                <li>Move duplicate SDK-safe alias and collision logic out of both <code>openai</code> and <code>toolproxy</code> into this module or a shared helper.</li>
-                <li>Keep provenance such as source search <code>call_id</code> outside the semantic catalog key unless intentionally comparing audit history.</li>
-                <li>Ensure catalog keys ignore raw JSON byte ordering/whitespace but preserve schema, format, strictness, defer-loading, namespace, execution, and descriptions.</li>
-                <li>Represent “catalog missing from migrated record” distinctly from “known empty catalog.”</li>
+                <li>Add a <code>ToolCatalog</code> type around the canonical Responses tool specifications. Do not use the raw SDK aliases.</li>
+                <li>Give these operations: <code>FromRequest</code>, <code>FromStored</code>, <code>MergeLoaded</code>, <code>Flatten</code>, <code>Key</code>, <code>StoredDTO</code> and <code>WithoutRaw</code>.</li>
+                <li>Move the double logic for the SDK-safe aliases and for the collisions out of <code>openai</code> and out of <code>toolproxy</code>. Put it in this module or in a shared helper.</li>
+                <li>Keep the history data, for example the <code>call_id</code> of the source search, out of the semantic key of the catalog. Include it only when you compare the audit history on purpose.</li>
+                <li>Make sure that the catalog keys ignore the byte order and the spaces of the raw JSON. The keys must keep the schema, the format, the strictness, the deferred loading, the namespace, the execution and the descriptions.</li>
+                <li>Show “the catalog is absent from a migrated record” and “the catalog is known and empty” as two different conditions.</li>
               </ul>
               <p><span class="tag">catalog</span><span class="tag">canonicalization</span><span class="tag">alias safety</span></p>
             </div>
@@ -480,16 +480,16 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 2</div>
             <div>
-              <h3>Define safe persisted DTOs and data limits</h3>
-              <p>Do not persist Go-internal structs with transient fields as the durable schema.</p>
+              <h3>Define safe stored DTOs and data limits</h3>
+              <p>Do not use the internal Go structures with their temporary fields as the durable schema.</p>
               <ul>
-                <li>Bump <code>sessionstore.ResponseRecordVersion</code>.</li>
-                <li>Add explicit JSON DTOs such as <code>StoredToolCatalog</code>, <code>StoredToolSpec</code>, <code>StoredLoadedToolEvent</code>, and <code>StoredToolOutput</code>.</li>
-                <li>Persist canonical Responses identities and meaningful schema/format fields; do not persist SDK aliases as source of truth.</li>
-                <li>Persist raw returned <code>tool_search_output.tools</code> only where needed for transcript fidelity; default catalog storage should be <code>WithoutRaw</code>.</li>
-                <li>Cap loaded tool count, per-tool schema bytes, total catalog bytes, nesting depth, and description length before storage or SDK exposure.</li>
-                <li>Log loaded-tool catalogs as counts and canonical names only; never log full schemas/descriptions except under existing explicit content logging and truncation policy.</li>
-                <li>Document that dynamic catalogs may contain sensitive tool descriptions/schemas and are retained locally until purge, including for <code>store:false</code> continuation/debug state.</li>
+                <li>Increase <code>sessionstore.ResponseRecordVersion</code>.</li>
+                <li>Add these JSON DTOs: <code>StoredToolCatalog</code>, <code>StoredToolSpec</code>, <code>StoredLoadedToolEvent</code> and <code>StoredToolOutput</code>.</li>
+                <li>Store the canonical Responses identities and the schema fields and format fields that have a meaning. Do not use the stored SDK aliases as the primary data.</li>
+                <li>Store the raw returned <code>tool_search_output.tools</code> only where the transcript needs them. The default catalog storage is <code>WithoutRaw</code>.</li>
+                <li>Set a limit on the number of loaded tools, on the schema bytes of each tool, on the total catalog bytes, on the depth of the structure and on the length of a description. Apply the limits before storage and before you give the tools to the SDK.</li>
+                <li>Log the catalogs of the loaded tools as counts and canonical names only. Do not log the full schemas or the full descriptions. Log them only under the current policy for content logging and truncation.</li>
+                <li>Write in the documentation that a dynamic catalog can contain sensitive tool descriptions and schemas. The proxy keeps them locally until a purge. This includes the continuation state and the debug state for <code>store:false</code>.</li>
               </ul>
             </div>
           </div>
@@ -497,15 +497,15 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 3</div>
             <div>
-              <h3>Parse returned tools into typed, allowlisted continuation outputs</h3>
-              <p>Stop treating <code>tool_search_output.tools</code> as only raw JSON after validation.</p>
+              <h3>Parse the returned tools into typed continuation outputs with an allowlist</h3>
+              <p>Do not keep <code>tool_search_output.tools</code> as raw JSON only after the check.</p>
               <ul>
-                <li>Extend the internal continuation output carrier with <code>LoadedTools []NormalizedTool</code>, <code>LoadedCatalogDelta</code>, or an equivalent typed field.</li>
-                <li>Allowlist fields for returned <code>function</code> and <code>namespace</code> specs; reject or strip unknown provider-hosted fields such as <code>server_url</code>, <code>server_label</code>, auth/provider configuration, hosted execution hints, and any hosted web/file/code/image tool shape disguised under a client-owned type.</li>
-                <li>Reject returned <code>custom</code>, nested <code>tool_search</code>, hosted tools, provider-hosted MCP declarations, nested namespaces, malformed schemas, sentinel collisions, duplicate identities, and SDK alias collisions.</li>
-                <li>Install loaded tools only when the matched pending call is a live <code>tool_search</code> call with <code>execution: "client"</code> and <code>status</code> absent, <code>success</code>, or <code>completed</code>.</li>
-                <li>If <code>status</code> is failed, incomplete, cancelled, or unknown, record the search output but do not install accompanying tools; reject if the client tries to combine a failed status with loaded tools unless a harmless no-install mode is explicitly chosen.</li>
-                <li>Track the source <code>call_id</code>, response id, raw tools payload, normalized loaded tools, and merge result for audit/replay.</li>
+                <li>Add a typed field to the internal carrier of the continuation output. Use <code>LoadedTools []NormalizedTool</code>, <code>LoadedCatalogDelta</code> or an equivalent field.</li>
+                <li>Make an allowlist of the fields for the returned <code>function</code> specifications and <code>namespace</code> specifications. Reject or remove the unknown fields of a hosted provider. Examples are <code>server_url</code>, <code>server_label</code>, the authentication configuration and the provider configuration, the hints for hosted execution, and each hosted tool for the web, for files, for code or for images that has the type of a tool that the client owns.</li>
+                <li>Reject these items: a returned <code>custom</code> tool, a nested <code>tool_search</code>, a hosted tool, an MCP declaration that the provider hosts, a nested namespace, an incorrect schema, a collision with the sentinel, a duplicate identity and a collision of the SDK aliases.</li>
+                <li>Install the loaded tools only when the matched pending call is a live <code>tool_search</code> call with <code>execution: "client"</code>. The <code>status</code> value must be absent, <code>success</code> or <code>completed</code>.</li>
+                <li>If <code>status</code> is failed, incomplete, cancelled or unknown, record the search output but do not install the tools that come with it. Reject the request if the client sends a failed status together with loaded tools. Accept it only if you select a mode that installs nothing.</li>
+                <li>Record the source <code>call_id</code>, the response id, the raw payload of the tools, the normalized loaded tools and the merge result. Use this data for the audit and for the replay.</li>
               </ul>
             </div>
           </div>
@@ -513,16 +513,16 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 4</div>
             <div>
-              <h3>Resolve the effective catalog for every continuation</h3>
-              <p>Continuations need a deterministic catalog source before any SDK turn starts.</p>
+              <h3>Find the effective catalog for each continuation</h3>
+              <p>A continuation needs one known catalog source before an SDK turn starts.</p>
               <ul>
-                <li>On initial requests, use the normalized request catalog and persist it as the installed catalog.</li>
-                <li>On <code>previous_response_id</code>, start from <code>previousRecord.InstalledToolCatalog</code> when present.</li>
-                <li>For migrated records without catalog state, use the current request tools only when explicitly supplied; otherwise mark loaded-tool replay unavailable and fail clearly if a dynamic loaded tool would be required.</li>
-                <li>Merge active <code>tool_search_output.LoadedTools</code> into the previous installed catalog before completing or cancelling the live batch.</li>
-                <li>Define repeated-search behavior: identical already-installed tools are idempotent, exact semantic duplicates are accepted as no-ops, conflicting definitions reject, and multiple search outputs in one batch merge in deterministic <code>call_id</code> order.</li>
-                <li>Handle empty <code>tools</code> arrays as successful searches with no catalog change.</li>
-                <li>Honor effective <code>tool_choice: "none"</code> on continuation by withholding all installed tools and exposing only the sentinel, even if a loaded catalog exists.</li>
+                <li>For an initial request, use the normalized catalog of the request. Store it as the installed catalog.</li>
+                <li>For a request with <code>previous_response_id</code>, start from <code>previousRecord.InstalledToolCatalog</code> if it is present.</li>
+                <li>For a migrated record with no catalog state, use the tools of the current request only if the client sends them. If not, mark the replay of the loaded tools as not available. Give a clear error if a dynamic loaded tool is necessary.</li>
+                <li>Merge the active <code>tool_search_output.LoadedTools</code> into the previous installed catalog. Do this before you complete or cancel the live batch.</li>
+                <li>Define the behavior of a repeated search. An identical tool that is installed causes no change. An exact semantic duplicate is accepted and does nothing. A definition that conflicts causes a rejection. More than one search output in one batch merges in the order of the <code>call_id</code> values.</li>
+                <li>Process an empty <code>tools</code> array as a successful search that does not change the catalog.</li>
+                <li>Obey an effective <code>tool_choice: "none"</code> on a continuation. Give no installed tool to the model, and give the sentinel only. Do this also when a loaded catalog exists.</li>
               </ul>
             </div>
           </div>
@@ -530,15 +530,15 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 5</div>
             <div>
-              <h3>Create a shared continuation planner</h3>
-              <p>A single gateway-level planner should drive non-streaming HTTP, streaming HTTP, WebSocket, and warm-session paths.</p>
+              <h3>Make one shared planner for the continuations</h3>
+              <p>One planner at the level of the gateway controls the non-streaming HTTP path, the streaming HTTP path, the WebSocket path and the warm-session path.</p>
               <ul>
-                <li>Take parsed outputs, request metadata, optional warm session, previous response record, and live batch lookup as input.</li>
-                <li>Return a decision: normal parked-handler continuation, dynamic tool-search cutover, cold synthetic fallback, warm response creation, or clear unsupported request error.</li>
-                <li>Derive <code>previous_response_id</code> from the live batch when omitted and assign the continuation response id exactly once.</li>
-                <li>Select active outputs from the current live batch while preserving stale stateless-history outputs for transcript reconstruction only.</li>
-                <li>Validate model, previous-response ownership, endpoint kind, call kind, optional custom output name, search status/execution, and exact output count before mutating any live batch.</li>
-                <li>Ensure non-streaming and streaming code paths save equivalent final response records and pending-batch ownership.</li>
+                <li>Take these inputs: the parsed outputs, the metadata of the request, the optional warm session, the previous response record and the lookup of the live batch.</li>
+                <li>Return one decision: a usual continuation with the parked handler, a change of the runner after a tool search, a cold synthetic fallback, the creation of a warm response, or a clear error for a request that the proxy does not support.</li>
+                <li>Take <code>previous_response_id</code> from the live batch if the client does not send it. Give the continuation response id one time only.</li>
+                <li>Select the active outputs from the current live batch. Keep the old outputs of the stateless history for the reconstruction of the transcript only.</li>
+                <li>Check the model, the ownership of the previous response, the kind of the endpoint, the kind of the call, the optional name of the custom output, the status and the execution of the search, and the exact number of the outputs. Do these checks before you change a live batch.</li>
+                <li>Make sure that the non-streaming code and the streaming code save the same final response records and the same ownership of the pending batch.</li>
               </ul>
             </div>
           </div>
@@ -546,18 +546,18 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 6</div>
             <div>
-              <h3>Implement explicit old-runner cutover</h3>
-              <p>The dynamic branch must not let the old stale-catalog runner produce a client-visible post-search turn.</p>
+              <h3>Replace the old runner</h3>
+              <p>The dynamic branch must not let the old runner with the old catalog make a turn after the search that the client can see.</p>
               <ul>
-                <li>Validate active outputs and merge the loaded catalog before completing, cancelling, or removing the batch.</li>
-                <li>Persist the client-supplied <code>tool_search_output</code> in a structured continuation transcript/log, not as an API-visible assistant output item.</li>
-                <li>Default implementation: cancel/abort/disconnect the old runner, remove the broker batch, forget the pending runner, and drain/discard any late old-runner results.</li>
-                <li>Do not call the normal <code>CompleteToolOutputsWithSetup</code> path for loaded-tool search outputs unless a gated integration test proves the SDK can record the tool result and then be safely resumed with replaced tools before stale-catalog planning occurs.</li>
-                <li>Assert no duplicate final response, no remembered old runner, and no live batch leak after cutover.</li>
+                <li>Check the active outputs and merge the loaded catalog. Do this before you complete, cancel or remove the batch.</li>
+                <li>Store the <code>tool_search_output</code> of the client in a structured continuation transcript or log. Do not store it as an assistant output item that the API shows.</li>
+                <li>Default implementation: cancel the old runner, disconnect it, remove the broker batch, forget the pending runner, and discard each late result of the old runner.</li>
+                <li>Do not use the usual <code>CompleteToolOutputsWithSetup</code> path for the search outputs that contain loaded tools. Use it only if a controlled integration test shows two facts. The SDK can record the tool result. The SDK can then continue safely with the replaced tools before it plans with the old catalog.</li>
+                <li>Check that there is no second final response, no old runner in memory and no live batch left after the change of the runner.</li>
               </ul>
               <div class="callout red">
-                <strong>Default to synthetic cutover:</strong> until real SDK behavior proves that resume can replace tools safely after a delivered tool result,
-                build the post-search continuation from stored transcript state in a fresh/synthetic SDK turn configured with the merged catalog.
+                <strong>Use the synthetic replacement by default:</strong> the resume operation of the SDK must first show that it can replace the tools safely after a delivered tool result.
+                Until then, build the continuation after the search from the stored transcript state. Use a new synthetic SDK turn that has the merged catalog.
               </div>
             </div>
           </div>
@@ -565,14 +565,14 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 7</div>
             <div>
-              <h3>Build replay prompts for synthetic and resumed modes</h3>
-              <p><code>Continue.</code> is only sufficient when the same SDK session already contains the full prior conversation and accepted tool result.</p>
+              <h3>Build the replay prompts for the synthetic mode and for the resumed mode</h3>
+              <p><code>Continue.</code> is sufficient only when the same SDK session contains the full previous conversation and the accepted tool result.</p>
               <ul>
-                <li>For synthetic cutover, include prior user/assistant transcript, the assistant <code>tool_search_call</code>, all submitted tool outputs in the active batch, returned tool specs or a concise availability note, and any mixed user suffix after outputs.</li>
-                <li>For proven-safe same-session resume, use a minimal continuation prompt only after the SDK has recorded the tool result and the new catalog is installed.</li>
-                <li>Keep API-visible <code>response.output</code> as assistant outputs only; store client continuation inputs/tool outputs in separate continuation transcript fields.</li>
-                <li>Include canonical names in transcript notes and avoid SDK aliases in prompts unless needed for debugging under explicit content logging.</li>
-                <li>Preserve namespaced function calls, custom inputs, tool-search arguments, tool-search status/execution, and raw returned tool summaries in cold fallback.</li>
+                <li>For the synthetic replacement, include this content: the previous user transcript and assistant transcript, the assistant <code>tool_search_call</code>, all tool outputs of the active batch, the returned tool specifications or a short note about their availability, and each user text that comes after the outputs.</li>
+                <li>For a resume in the same session that is proven safe, use a short continuation prompt. Use it only after the SDK records the tool result and after the new catalog is installed.</li>
+                <li>Keep the <code>response.output</code> that the API shows as assistant outputs only. Store the continuation inputs and the tool outputs of the client in separate transcript fields.</li>
+                <li>Put the canonical names in the notes of the transcript. Do not put the SDK aliases in a prompt, except for debug work under explicit content logging.</li>
+                <li>Keep the namespaced function calls, the custom inputs, the arguments of the tool search, the status and the execution of the tool search, and the summaries of the raw returned tools in the cold fallback.</li>
               </ul>
             </div>
           </div>
@@ -580,14 +580,14 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 8</div>
             <div>
-              <h3>Implement transport support incrementally</h3>
-              <p>Sequence transports so each path has deterministic proof before broad rollout.</p>
+              <h3>Add the support for the transports in steps</h3>
+              <p>Do the transports in an order. Each path must have a clear proof before you use it for all the traffic.</p>
               <ul>
-                <li>First: non-streaming <code>POST /v1/responses</code> with fake SDK/provider capture proving merged <code>Tools</code> and <code>AvailableTools</code>.</li>
-                <li>Second: HTTP SSE streaming with identical planner decision and stable lifecycle events.</li>
-                <li>Third: WebSocket <code>response.create</code> using the same gateway-level planner and sequence-number semantics.</li>
-                <li>Fourth: <code>generate:false</code> warm sessions. Define whether <code>generate:false</code> with tool-output continuations warms the post-search turn through the merge planner or fails clearly until supported.</li>
-                <li>If any transport is not completed in the first implementation slice, add a temporary explicit feature gate/error rather than silently falling back to stale catalogs.</li>
+                <li>First: the non-streaming <code>POST /v1/responses</code>. Use a fake SDK and a fake provider that record the merged <code>Tools</code> and <code>AvailableTools</code>.</li>
+                <li>Second: the HTTP SSE streaming. Use the same planner decision and stable lifecycle events.</li>
+                <li>Third: the WebSocket <code>response.create</code>. Use the same planner at the level of the gateway and the same rules for the sequence numbers.</li>
+                <li>Fourth: the warm sessions with <code>generate:false</code>. Define what occurs when <code>generate:false</code> comes with tool-output continuations. Either the merge planner prepares the turn after the search, or the request fails with a clear error until the proxy supports it.</li>
+                <li>If a transport is not complete in the first part of the implementation, add a temporary control that gives a clear error. Do not go back to the old catalog without a message.</li>
               </ul>
             </div>
           </div>
@@ -595,15 +595,15 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 9</div>
             <div>
-              <h3>Harden safety boundaries</h3>
-              <p>Installing dynamically discovered tools must not weaken the proxy's no-execution invariant.</p>
+              <h3>Make the safety boundaries stronger</h3>
+              <p>The installation of the tools that the search finds must not weaken the rule that the proxy runs no tool.</p>
               <ul>
                 <li>Keep <code>ModeEmpty</code>.</li>
-                <li>Keep SDK runtime defaults with MCP servers, skills, shell/file/repository/memory operations, host-git operations, sub-agent streaming, and session store disabled.</li>
-                <li>Permissions approve only exact SDK names generated from the merged request-scoped catalog.</li>
-                <li>Reject any SDK tool request not present in the current request-scoped catalog.</li>
-                <li>Do not install hosted or proxy-executed tools returned by <code>tool_search_output.tools</code>.</li>
-                <li>Tests should prove <code>copilot-api</code> never spawns sub-agent processes, shell commands, MCP servers, file tools, or SDK built-ins as a result of dynamic installation.</li>
+                <li>Keep the SDK runtime defaults. The MCP servers, the skills, the operations on the shell, the files, the repository and the memory, the host git operations, the sub-agent streaming and the session store stay disabled.</li>
+                <li>The permissions approve only the exact SDK names that come from the merged catalog of the current request.</li>
+                <li>Reject each SDK tool request that is not in the catalog of the current request.</li>
+                <li>Do not install a hosted tool or a proxy-run tool that <code>tool_search_output.tools</code> returns.</li>
+                <li>The tests must show that <code>copilot-api</code> starts no sub-agent process, no shell command, no MCP server, no file tool and no SDK built-in tool because of a dynamic installation.</li>
               </ul>
             </div>
           </div>
@@ -611,13 +611,13 @@ Responses output
           <div class="phase">
             <div class="phase-num">Phase 10</div>
             <div>
-              <h3>Codex sub-agent proof and documentation rollout</h3>
-              <p>Prove the observed failure mode is fixed without depending on nondeterministic model output.</p>
+              <h3>Proof with the Codex sub-agents, and the documentation</h3>
+              <p>Show that the failure is corrected. Do not depend on model output that changes between the runs.</p>
               <ul>
-                <li>Use a fake SDK/provider that emits a loaded-tool call only when the merged catalog actually contains <code>multi_agent_v1__spawn_agent</code>.</li>
-                <li>Assert the proxy rehydrates that call as <code>namespace: "multi_agent_v1"</code>, <code>name: "spawn_agent"</code>.</li>
-                <li>Keep Codex CLI as a manual/non-gating smoke test: discover <code>multi_agent_v1</code>, call a harmless sub-agent operation, wait, and close.</li>
-                <li>Update README once automatic post-search installation lands; remove the current limitation that returned tools require a later request with an installed catalog.</li>
+                <li>Use a fake SDK and a fake provider. They send a call to a loaded tool only when the merged catalog contains <code>multi_agent_v1__spawn_agent</code>.</li>
+                <li>Check that the proxy returns that call with <code>namespace: "multi_agent_v1"</code> and <code>name: "spawn_agent"</code>.</li>
+                <li>Keep the Codex CLI as a manual test that does not block the build. The steps are: find <code>multi_agent_v1</code>, call a sub-agent operation that makes no change, wait, and close.</li>
+                <li>Update the README when the automatic installation after the search is complete. Remove the current limitation. That limitation says that the returned tools need a later request with an installed catalog.</li>
               </ul>
             </div>
           </div>
@@ -626,7 +626,7 @@ Responses output
         <section id="data-model">
           <h2>Proposed data model</h2>
           <pre><code>type ToolCatalog struct {
-    Tools []CanonicalToolSpec // no SDK aliases as source of truth
+    Tools []CanonicalToolSpec // the SDK aliases do not control the data
 }
 
 func (c ToolCatalog) MergeLoaded(sourceCallID string, loaded []CanonicalToolSpec) (ToolCatalog, []LoadedToolEvent, error)
@@ -668,52 +668,52 @@ type ResponseRecord struct {
     ToolOutputs          []StoredToolOutput     `json:"tool_outputs,omitempty"`
 }</code></pre>
           <p>
-            The exact names can change. The durable schema should have explicit JSON fields and versioning. Store canonical Responses
-            identities and semantic catalog keys; regenerate SDK aliases when configuring a session. Keep client continuation inputs
-            and tool outputs separate from API-visible assistant <code>response.output</code> items.
+            The names can change. The durable schema needs explicit JSON fields and a version number. Store the canonical Responses
+            identities and the semantic keys of the catalog. Make the SDK aliases again when you configure a session. Keep the continuation
+            inputs of the client and the tool outputs separate from the <code>response.output</code> items that the API shows.
           </p>
         </section>
 
         <section id="flows">
-          <h2>HTTP and WebSocket flows</h2>
+          <h2>HTTP flows and WebSocket flows</h2>
           <table>
             <thead>
               <tr>
                 <th>Flow</th>
-                <th>Required behavior</th>
+                <th>Necessary behavior</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td>Initial HTTP response</td>
-                <td>Normalize request tools, store installed catalog and semantic key, expose <code>tool_search</code> and any non-deferred tools.</td>
+                <td>Normalize the tools of the request. Store the installed catalog and the semantic key. Give <code>tool_search</code> and each tool that is not deferred to the model.</td>
               </tr>
               <tr>
-                <td>Live HTTP continuation with search output</td>
-                <td>Planner validates active outputs, resolves effective catalog, merges loaded tools, persists tool-output transcript and catalog, cuts over old runner, starts one synthetic/proven-safe resumed SDK turn with merged catalog, and returns the next model response.</td>
+                <td>Live HTTP continuation with a search output</td>
+                <td>The planner checks the active outputs, finds the effective catalog and merges the loaded tools. It stores the transcript of the tool output and the catalog. It stops the old runner. It starts one SDK turn with the merged catalog, synthetic or resumed with proof. It returns the next model response.</td>
               </tr>
               <tr>
                 <td>Streaming continuation</td>
-                <td>Use the same planner decision as non-streaming; emit lifecycle events for the post-search turn only, with stable response id, sequence numbers, output indexes, and pending-batch ownership.</td>
+                <td>Use the same planner decision as the non-streaming path. Send the lifecycle events of the turn after the search only. Keep a stable response id, stable sequence numbers, stable output indexes and a stable owner of the pending batch.</td>
               </tr>
               <tr>
                 <td>WebSocket continuation</td>
-                <td>Route <code>response.create</code> through the same gateway-level planner; preserve sequence numbers, one-active-response rules, and top-level error behavior.</td>
+                <td>Send <code>response.create</code> through the same planner at the level of the gateway. Keep the sequence numbers, the rule of one active response and the behavior of the top-level errors.</td>
               </tr>
               <tr>
-                <td><code>generate:false</code> warm session</td>
-                <td>Either support tool-output continuations through the same merge planner and warm the post-search turn, or fail clearly until supported. Warm reuse compares semantic catalog keys.</td>
+                <td>Warm session with <code>generate:false</code></td>
+                <td>Either support the tool-output continuations through the same merge planner and prepare the turn after the search, or give a clear error until the proxy supports it. The reuse of a warm session compares the semantic keys of the catalog.</td>
               </tr>
               <tr>
-                <td>Cold fallback / restart / TTL</td>
-                <td>Resolve catalog from the previous response record; reconstruct a transcript with prior assistant calls, client tool outputs, search results, loaded-tool availability, and mixed user suffix before configuring the synthetic turn.</td>
+                <td>Cold fallback, restart or TTL</td>
+                <td>Find the catalog in the previous response record. Build a transcript again with the previous assistant calls, the tool outputs of the client, the search results, the availability of the loaded tools and the last user text. Do this before you configure the synthetic turn.</td>
               </tr>
             </tbody>
           </table>
         </section>
 
         <section id="validation">
-          <h2>Validation matrix</h2>
+          <h2>Table of the checks</h2>
           <table>
             <thead>
               <tr>
@@ -724,51 +724,51 @@ type ResponseRecord struct {
             <tbody>
               <tr>
                 <td><code>tool_search_output.tools</code> contains loadable functions</td>
-                <td>Accept, merge into catalog, expose next turn when pending call ownership, status, and execution are valid.</td>
+                <td>Accept them. Merge them into the catalog. Give them to the model in the next turn, if the ownership, the status and the execution of the pending call are correct.</td>
               </tr>
               <tr>
-                <td><code>tool_search_output.tools</code> contains namespace with function children</td>
-                <td>Accept, flatten children, preserve namespace on output calls.</td>
+                <td><code>tool_search_output.tools</code> contains a namespace with function children</td>
+                <td>Accept it. Make the children flat. Keep the namespace on the output calls.</td>
               </tr>
               <tr>
-                <td>Returned tool repeats an already-installed identical definition</td>
-                <td>Accept as idempotent no-op; provenance may record the repeated search event outside the semantic key.</td>
+                <td>A returned tool repeats a definition that is installed and identical</td>
+                <td>Accept it. It makes no change. The history data can record the repeated search event outside the semantic key.</td>
               </tr>
               <tr>
-                <td>Returned tool collides with existing identity or SDK alias but has different definition</td>
-                <td>Reject continuation before completing/cancelling the pending batch.</td>
+                <td>A returned tool has the same identity or the same SDK alias as an installed tool, but a different definition</td>
+                <td>Reject the continuation before you complete or cancel the pending batch.</td>
               </tr>
               <tr>
-                <td>Multiple <code>tool_search_output</code> items in one live parallel batch</td>
-                <td>Validate all active outputs, then merge loaded sets in deterministic <code>call_id</code> order; reject the whole continuation on any conflict.</td>
+                <td>More than one <code>tool_search_output</code> item in one live parallel batch</td>
+                <td>Check all the active outputs. Then merge the loaded sets in the order of the <code>call_id</code> values. Reject the full continuation if there is a conflict.</td>
               </tr>
               <tr>
-                <td>Empty <code>tool_search_output.tools</code></td>
-                <td>Record the search output; no catalog change.</td>
+                <td>An empty <code>tool_search_output.tools</code></td>
+                <td>Record the search output. Do not change the catalog.</td>
               </tr>
               <tr>
-                <td><code>tool_search_output.status</code> failed/incomplete/cancelled/unknown</td>
-                <td>Record output text; do not install tools. Reject if a failed status includes tools unless explicitly handled as no-install metadata.</td>
+                <td><code>tool_search_output.status</code> is failed, incomplete, cancelled or unknown</td>
+                <td>Record the output text. Do not install the tools. Reject the request if a failed status contains tools, except when you process them as metadata that installs nothing.</td>
               </tr>
               <tr>
-                <td>Returned hosted/proxy-executed tool or provider-hosted fields</td>
-                <td>Reject returned spec. Do not silently install.</td>
+                <td>A returned tool that is hosted or that the proxy runs, or a field of a hosted provider</td>
+                <td>Reject the returned specification. Do not install it without a message.</td>
               </tr>
               <tr>
-                <td>Returned <code>custom</code> or nested <code>tool_search</code></td>
-                <td>Reject for this iteration.</td>
+                <td>A returned <code>custom</code> tool or a nested <code>tool_search</code></td>
+                <td>Reject it in this iteration.</td>
               </tr>
               <tr>
-                <td>Returned nested namespace</td>
-                <td>Reject.</td>
+                <td>A returned nested namespace</td>
+                <td>Reject it.</td>
               </tr>
               <tr>
-                <td>Continuation has <code>tool_choice: "none"</code></td>
-                <td>Preserve merged catalog state but expose no callable tools in that turn; use sentinel only.</td>
+                <td>The continuation has <code>tool_choice: "none"</code></td>
+                <td>Keep the merged catalog state. Give no callable tool to the model in that turn. Use the sentinel only.</td>
               </tr>
               <tr>
-                <td>SDK emits unconfigured tool request</td>
-                <td>Abort/fail turn as upstream protocol violation; do not rehydrate as client-visible call.</td>
+                <td>The SDK sends a request for a tool that is not configured</td>
+                <td>Stop the turn with an error. This is a protocol error of the upstream system. Do not return it as a call that the client can see.</td>
               </tr>
             </tbody>
           </table>
@@ -780,83 +780,83 @@ type ResponseRecord struct {
             <div class="card">
               <h3>Unit tests</h3>
               <ul>
-                <li>Catalog merge with functions and namespaces, including idempotent duplicate loads.</li>
-                <li>Collision rejection against existing tools, loaded tools, aliases, and sentinel.</li>
-                <li>Canonical catalog keys ignore raw JSON order but preserve meaningful fields; provenance is excluded from semantic equality.</li>
-                <li>Returned hosted/custom/tool_search/nested namespace specs reject.</li>
-                <li>Returned spec field allowlist rejects provider-hosted or auth/server fields disguised in function/namespace specs.</li>
-                <li>Status handling: completed installs; failed/incomplete does not install.</li>
-                <li>Permission handler only approves merged request-scoped SDK aliases, and <code>tool_choice:none</code> exposes only sentinel.</li>
+                <li>The merge of the catalog with functions and with namespaces. This includes a duplicate load that makes no change.</li>
+                <li>The rejection of a collision with the current tools, with the loaded tools, with the aliases and with the sentinel.</li>
+                <li>The canonical catalog keys ignore the order of the raw JSON, but they keep the fields that have a meaning. The history data is not part of the semantic comparison.</li>
+                <li>The proxy rejects a returned specification that is hosted, custom, a tool_search or a nested namespace.</li>
+                <li>The allowlist of the fields rejects a field of a hosted provider or an authentication field or a server field inside a function specification or a namespace specification.</li>
+                <li>The status control: a completed status installs the tools; a failed status or an incomplete status does not install them.</li>
+                <li>The permission handler approves only the merged SDK aliases of the current request. With <code>tool_choice:none</code> the model gets the sentinel only.</li>
               </ul>
             </div>
             <div class="card">
               <h3>Gateway tests</h3>
               <ul>
-                <li>Live <code>tool_search_output</code> with loaded namespace starts exactly one post-search turn with merged <code>AvailableTools</code>.</li>
-                <li>The old runner is cancelled/drained, broker batch removed, and no stale-catalog result is emitted.</li>
-                <li>The next model tool request for <code>multi_agent_v1.spawn_agent</code> rehydrates as namespaced <code>function_call</code>.</li>
-                <li>Wrong output kind/name/status/execution and wrong previous response id fail before state mutation.</li>
-                <li>Cold fallback reconstructs search output, loaded-tool availability, and effective catalog from stored record state.</li>
+                <li>A live <code>tool_search_output</code> with a loaded namespace starts one turn after the search, with the merged <code>AvailableTools</code>.</li>
+                <li>The proxy cancels the old runner and discards its results. It removes the broker batch. It sends no result that comes from the old catalog.</li>
+                <li>The next tool request of the model for <code>multi_agent_v1.spawn_agent</code> becomes a <code>function_call</code> with a namespace.</li>
+                <li>An incorrect output kind, name, status or execution, and an incorrect previous response id, cause an error before a change of the state.</li>
+                <li>The cold fallback builds the search output, the availability of the loaded tools and the effective catalog again from the stored record.</li>
               </ul>
             </div>
             <div class="card">
-              <h3>Streaming, WebSocket, and warm tests</h3>
+              <h3>Tests for the streaming, the WebSocket and the warm sessions</h3>
               <ul>
-                <li>Streaming continuation emits lifecycle events for the post-search turn only, with stable response id, sequence numbers, and output indexes.</li>
-                <li>WebSocket <code>response.create</code> supports search-output merge and loaded-tool calls through the same planner.</li>
-                <li><code>generate:false</code> warm-session behavior is either supported through merge planner or rejected clearly.</li>
-                <li>Warm session reuse/mismatch covers merged catalogs and semantic catalog keys.</li>
+                <li>The streaming continuation sends the lifecycle events of the turn after the search only. The response id, the sequence numbers and the output indexes are stable.</li>
+                <li>The WebSocket <code>response.create</code> supports the merge of the search output and the calls to the loaded tools, through the same planner.</li>
+                <li>The behavior of a warm session with <code>generate:false</code> is either supported through the merge planner or rejected with a clear error.</li>
+                <li>The tests for the reuse of a warm session and for a session that does not agree include the merged catalogs and the semantic catalog keys.</li>
               </ul>
             </div>
             <div class="card">
-              <h3>Deterministic smoke and safety tests</h3>
+              <h3>Repeatable tests for the function and for the safety</h3>
               <ul>
-                <li>Fake SDK/provider records exact merged SDK tool names and filters, and emits loaded-tool calls only when present.</li>
-                <li>Aliases do not appear in SSE/WS events, <code>ResponseRecord.Output</code>, fallback transcripts, or normal log summaries.</li>
-                <li>No SDK built-ins, sub-agent processes, shell/MCP/file tools, or host-git operations are enabled after dynamic install.</li>
-                <li>Manual Codex CLI smoke: discover <code>multi_agent_v1</code>, call a harmless sub-agent operation, wait, and close.</li>
+                <li>The fake SDK and the fake provider record the exact merged SDK tool names and the filters. They send a call to a loaded tool only when that tool is present.</li>
+                <li>The aliases do not occur in the SSE events, in the WebSocket events, in <code>ResponseRecord.Output</code>, in the fallback transcripts or in the usual log summaries.</li>
+                <li>No SDK built-in tool, no sub-agent process, no shell tool, no MCP tool, no file tool and no host git operation becomes available after a dynamic installation.</li>
+                <li>Manual test with the Codex CLI: find <code>multi_agent_v1</code>, call a sub-agent operation that makes no change, wait, and close.</li>
               </ul>
             </div>
           </div>
         </section>
 
         <section id="risks">
-          <h2>Risks and mitigations</h2>
+          <h2>Risks and corrective actions</h2>
           <table>
             <thead>
               <tr>
                 <th>Risk</th>
-                <th>Mitigation</th>
+                <th>Corrective action</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td>Old SDK turn continues with stale catalog</td>
-                <td>Default to synthetic cutover: validate/merge/persist, abort or drain old runner, remove batch, then start one merged-catalog turn.</td>
+                <td>The old SDK turn continues with the old catalog</td>
+                <td>Use the synthetic replacement by default. Check, merge and store. Then stop the old runner and discard its results. Then remove the batch, and start one turn with the merged catalog.</td>
               </tr>
               <tr>
-                <td>SDK resume does not actually replace tools</td>
-                <td>Do not rely on resume replacement until live integration proves it. Use synthetic continuation by default; gate resume optimization separately.</td>
+                <td>The resume operation of the SDK does not replace the tools</td>
+                <td>Do not depend on the replacement during a resume until a live integration test shows it. Use the synthetic continuation by default. Add the resume optimization behind a separate control.</td>
               </tr>
               <tr>
-                <td>Catalog state is unrecoverable after restart</td>
-                <td>Persist versioned installed catalog, loaded-tool events, and structured tool outputs on response records.</td>
+                <td>The catalog state is lost after a restart</td>
+                <td>Store the installed catalog with a version, the events of the loaded tools, and the structured tool outputs on the response records.</td>
               </tr>
               <tr>
-                <td>Loaded tools accidentally become proxy-hosted</td>
-                <td>Keep handlers parked, permissions scoped, SDK built-ins disabled, and returned spec allowlists strict.</td>
+                <td>The loaded tools become tools that the proxy runs</td>
+                <td>Keep the handlers parked. Keep the permissions limited. Keep the SDK built-in tools disabled. Keep the allowlists for the returned specifications strict.</td>
               </tr>
               <tr>
-                <td>Dynamic catalogs leak sensitive schemas/descriptions</td>
-                <td>Persist minimized canonical specs, cap sizes, truncate logs, and document local retention/purge behavior.</td>
+                <td>A dynamic catalog shows sensitive schemas or descriptions</td>
+                <td>Store the canonical specifications with the minimum data. Set limits on the sizes. Truncate the logs. Write in the documentation how long the proxy keeps the data locally, and how a purge operates.</td>
               </tr>
               <tr>
-                <td>Catalog state drifts between HTTP, WebSocket, and warm sessions</td>
-                <td>Use one shared planner and one shared catalog module for all transports.</td>
+                <td>The catalog state becomes different between the HTTP path, the WebSocket path and the warm sessions</td>
+                <td>Use one shared planner and one shared catalog module for all the transports.</td>
               </tr>
               <tr>
-                <td>Alias behavior changes model planning or leaks outward</td>
-                <td>Preserve canonical names in descriptions and rehydrate outward names. Add tests that aliases do not appear in API-visible outputs or normal logs.</td>
+                <td>The aliases change the planning of the model, or they go to the client</td>
+                <td>Keep the canonical names in the descriptions, and return the canonical names to the client. Add tests that show that the aliases are not in the API outputs or in the usual logs.</td>
               </tr>
             </tbody>
           </table>
@@ -865,25 +865,25 @@ type ResponseRecord struct {
         <section id="acceptance">
           <h2>Acceptance criteria</h2>
           <ol>
-            <li>A live <code>tool_search_output</code> containing a <code>multi_agent_v1</code> namespace causes the next SDK turn to include synthetic custom tools for its child functions.</li>
-            <li>The old stale-catalog runner is cancelled/drained/discarded and cannot emit a duplicate or stale final response.</li>
-            <li>The model can call a loaded tool such as <code>multi_agent_v1.spawn_agent</code> after the boundary.</li>
-            <li>The proxy emits <code>function_call</code> with <code>namespace: "multi_agent_v1"</code> and <code>name: "spawn_agent"</code>, not the SDK alias.</li>
-            <li>Codex CLI executes the loaded tool and continues with <code>function_call_output</code>; the proxy never executes it.</li>
-            <li>Returned loadable tools are persisted in canonical catalog state and survive subsequent continuations and restart fallback.</li>
-            <li>HTTP non-streaming, HTTP streaming, WebSocket, and warm-session paths either use the same catalog merge planner or explicitly fail behind a documented temporary gate.</li>
-            <li>Returned hosted/proxy-executed tools, provider-hosted fields, nested namespaces, returned custom tools, and returned nested tool-search tools are rejected.</li>
-            <li><code>tool_search_output.status</code> failed/incomplete does not install tools.</li>
-            <li><code>tool_choice: "none"</code> with an installed dynamic catalog exposes no callable tools in that turn.</li>
-            <li>No Copilot SDK built-in tools, proxy-hosted MCP servers, shell/file/repository tools, host-git operations, or sub-agent processes become available after dynamic tool installation.</li>
-            <li>Tests prove tools are not callable before the boundary and are callable after the merged catalog is installed.</li>
-            <li>README is updated to remove the old limitation that returned <code>tool_search_output.tools</code> require a later request with an installed catalog.</li>
+            <li>A live <code>tool_search_output</code> that contains a <code>multi_agent_v1</code> namespace causes the next SDK turn to contain synthetic custom tools for the child functions.</li>
+            <li>The proxy cancels the old runner with the old catalog and discards its results. That runner cannot send a second final response or an old final response.</li>
+            <li>The model can call a loaded tool, for example <code>multi_agent_v1.spawn_agent</code>, after the boundary.</li>
+            <li>The proxy sends a <code>function_call</code> with <code>namespace: "multi_agent_v1"</code> and <code>name: "spawn_agent"</code>. It does not send the SDK alias.</li>
+            <li>The Codex CLI runs the loaded tool and continues with a <code>function_call_output</code>. The proxy never runs the tool.</li>
+            <li>The proxy stores the returned loadable tools in the canonical catalog state. The state stays available for the later continuations and for the fallback after a restart.</li>
+            <li>The non-streaming HTTP path, the streaming HTTP path, the WebSocket path and the warm-session path use the same merge planner for the catalog. If a path does not use it, that path gives a clear error behind a temporary control that the documentation describes.</li>
+            <li>The proxy rejects these items: a returned tool that is hosted or that the proxy runs, a field of a hosted provider, a nested namespace, a returned custom tool and a returned nested tool-search tool.</li>
+            <li>A <code>tool_search_output.status</code> that is failed or incomplete installs no tool.</li>
+            <li>A request with <code>tool_choice: "none"</code> and an installed dynamic catalog gives no callable tool to the model in that turn.</li>
+            <li>No built-in Copilot SDK tool, no MCP server in the proxy, no shell tool, no file tool, no repository tool, no host git operation and no sub-agent process becomes available after the dynamic tool installation.</li>
+            <li>The tests show that the tools are not callable before the boundary, and that they are callable after the installation of the merged catalog.</li>
+            <li>The README does not contain the old limitation. That limitation says that the returned <code>tool_search_output.tools</code> need a later request with an installed catalog.</li>
           </ol>
         </section>
       </main>
     </div>
 
-    <p class="footer-note">Prepared for <code>copilot-api</code> · Responses dynamic <code>tool_search</code> loaded-tool installation · 2026-06-17</p>
+    <p class="footer-note">Prepared for <code>copilot-api</code> · The installation of the loaded tools of the dynamic <code>tool_search</code> in the Responses API · 2026-06-17</p>
   </div>
 </body>
 </html>

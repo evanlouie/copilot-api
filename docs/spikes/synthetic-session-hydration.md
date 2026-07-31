@@ -2,48 +2,92 @@
 
 Date: 2026-05-29
 
-Current v1 readiness note: the implementation now targets `github.com/github/copilot-sdk/go v1.0.0`. The original live experiment below was run against SDK `v0.3.0`; the compatibility lessons still apply, but code and docs should use the v1 names: `InitialWorkingDirectory`, `CreateSessionFSProvider`, `ConfigDirectory`, and `SessionFS...`.
+A note about the readiness of v1: the implementation now targets
+`github.com/github/copilot-sdk/go v1.0.0`. I did the original live experiment
+below against SDK `v0.3.0`. The lessons about compatibility are still correct.
+But the code and the documentation must use the v1 names:
+`InitialWorkingDirectory`, `CreateSessionFSProvider`, `ConfigDirectory` and
+`SessionFS...`.
 
 ## Verdict
 
-**Feasible with caveats.** A synthetic `/session-state/events.jsonl` created through an isolated `SessionFSProvider` can be resumed by the GitHub Copilot SDK, and the resumed model uses the seeded events as conversation context, not merely UI/history. This was proven with live model calls for:
+**It is possible, but there are cautions.** The GitHub Copilot SDK can resume a
+synthetic `/session-state/events.jsonl` file that an isolated
+`SessionFSProvider` created. The resumed model uses the seeded events as the
+context of the conversation. The events are not only user-interface history.
+Live model calls proved this for two cases:
 
-- ordinary prior `user.message` + `assistant.message` turns; and
-- a synthetic prior assistant tool-call turn with `tool.execution_start` + `tool.execution_complete` result.
+- normal prior turns with `user.message` and `assistant.message`; and
+- a synthetic prior assistant tool-call turn with `tool.execution_start` and a
+  `tool.execution_complete` result.
 
-Recommendation: **use synthetic hydration as the preferred path for Chat Completions role-native history**, but keep **transcript serialization as a fallback/escape hatch** because this depends on an internal persisted event schema and runtime resume behavior rather than a stable public “import messages” API.
+Recommendation: **use the synthetic hydration as the primary path for the
+role-native history of Chat Completions**. But keep **the serialization of the
+transcript as an alternative path**. The reason is that the hydration depends on
+an internal schema of saved events and on the resume behavior of the runtime.
+It does not depend on a stable public “import messages” API.
 
 ## SDK source and tests inspected
 
-Current SDK path: `$(go env GOPATH)/pkg/mod/github.com/github/copilot-sdk/go@v1.0.0`
+The current path of the SDK:
+`$(go env GOPATH)/pkg/mod/github.com/github/copilot-sdk/go@v1.0.0`
 
-Key files:
+The important files:
 
 - `session_fs_provider.go`
-  - Defines `SessionFSProvider` with `ReadFile`, `WriteFile`, `AppendFile`, `Exists`, `Stat`, `MakeDirectory`, `ReadDirectory`, `ReadDirectoryWithTypes`, `Remove`, `Rename`.
-  - The adapter maps Go filesystem errors to RPC `SessionFSError`s. This is the hook that lets this project own a per-session virtual filesystem and seed `/session-state/events.jsonl` before `session.resume`.
+  - It defines `SessionFSProvider` with `ReadFile`, `WriteFile`, `AppendFile`,
+    `Exists`, `Stat`, `MakeDirectory`, `ReadDirectory`,
+    `ReadDirectoryWithTypes`, `Remove` and `Rename`.
+  - The adapter maps the file system errors of Go to the RPC `SessionFSError`
+    values. This hook lets this project own a virtual file system for each
+    session. Thus the project can seed `/session-state/events.jsonl` before
+    `session.resume`.
 - `client.go`
-  - `CreateSession` and `ResumeSessionWithOptions` both register the per-session `SessionFS` adapter before issuing `session.create` / `session.resume` RPCs.
-  - When `ClientOptions.SessionFS` is configured, `CreateSessionFSProvider` is required in both create and resume configs.
-  - `ResumeSessionWithOptions` forwards `SystemMessage`, `Tools`, `AvailableTools`, `ExcludedTools`, `WorkingDirectory`, `ConfigDirectory`, `DisableResume`, etc. into the resume RPC.
+  - `CreateSession` and `ResumeSessionWithOptions` both register the `SessionFS`
+    adapter of the session. They do this before they send the `session.create`
+    or `session.resume` RPC.
+  - If `ClientOptions.SessionFS` is configured, the create configuration and the
+    resume configuration both need `CreateSessionFSProvider`.
+  - `ResumeSessionWithOptions` sends `SystemMessage`, `Tools`, `AvailableTools`,
+    `ExcludedTools`, `WorkingDirectory`, `ConfigDirectory`, `DisableResume` and
+    more into the resume RPC.
 - `types.go`
-  - `SessionFSConfig` has `InitialWorkingDirectory`, `SessionStatePath`, and `Conventions`.
-  - `SystemMessageConfig{Mode: "replace", Content: ...}` is the SDK path for replacing, not appending to, the SDK-managed system prompt.
-  - `SessionConfig` / `ResumeSessionConfig` support `CreateSessionFSProvider`, `AvailableTools`, request-scoped `Tools`, and `OnPermissionRequest`.
+  - `SessionFSConfig` has `InitialWorkingDirectory`, `SessionStatePath` and
+    `Conventions`.
+  - `SystemMessageConfig{Mode: "replace", Content: ...}` is the path of the SDK
+    to replace the system prompt that the SDK controls. It does not add to that
+    prompt.
+  - `SessionConfig` and `ResumeSessionConfig` support `CreateSessionFSProvider`,
+    `AvailableTools`, `Tools` for one request, and `OnPermissionRequest`.
 - `rpc/zsession_events.go`
-  - Defines the persisted event envelope and typed payloads for `session.start`, `session.resume`, `system.message`, `user.message`, `assistant.message`, `assistant.turn_start`, `assistant.turn_end`, `tool.execution_start`, `tool.execution_complete`, etc.
+  - It defines the envelope of the saved event. It also defines the typed
+    payloads for `session.start`, `session.resume`, `system.message`,
+    `user.message`, `assistant.message`, `assistant.turn_start`,
+    `assistant.turn_end`, `tool.execution_start`, `tool.execution_complete` and
+    more.
 - `internal/e2e/session_fs_e2e_test.go`
-  - Confirms events are persisted at `/session-state/events.jsonl` through the provider.
-  - Test “should load session data from fs provider on resume” creates a session, asks `What is 50 + 50?`, disconnects, resumes through the provider, then asks `What is that times 3?`; expected answer contains `300`. This is strong source-level evidence that provider-backed persisted state feeds model context.
-  - Also covers workspace metadata (`workspace.yaml`, checkpoints), compaction rewriting events, and temp file routing.
+  - It confirms that the provider saves the events at
+    `/session-state/events.jsonl`.
+  - The test “should load session data from fs provider on resume” creates a
+    session. It asks `What is 50 + 50?`. It disconnects. It resumes through the
+    provider. Then it asks `What is that times 3?`. The expected answer contains
+    `300`. This is strong evidence in the source code that the saved state from
+    the provider becomes model context.
+  - It also covers the workspace metadata (`workspace.yaml`, the checkpoints),
+    the rewrite of the events by compaction, and the routing of the temporary
+    files.
 - `internal/e2e/session_test.go`
-  - Confirms same-client and new-client resume continue conversation statefully and that resumed messages include prior `user.message` and `session.resume`.
+  - It confirms that a resume with the same client and a resume with a new
+    client both continue the conversation with the state. It also confirms that
+    the resumed messages include the prior `user.message` and `session.resume`.
 
 ## Experiment performed
 
-Scratch location only: `/tmp/copilot-synth-spike` and `/tmp/copilot-synth-spike/*state`. No project implementation files were changed; only this report was written in the repo.
+I used a scratch location only: `/tmp/copilot-synth-spike` and
+`/tmp/copilot-synth-spike/*state`. I changed no implementation file of the
+project. I wrote only this report in the repository.
 
-Original historical commands run:
+The original historical commands:
 
 ```sh
 cd /tmp/copilot-synth-spike
@@ -55,30 +99,33 @@ goimports -w main.go
 go run .
 ```
 
-Historical environment note: the installed `copilot` CLI was `1.0.55` and failed against SDK `v0.3.0` with:
+A historical note about the environment: the installed `copilot` CLI was
+`1.0.55`. It failed against SDK `v0.3.0` with this error:
 
 ```text
 json: cannot unmarshal string into Go struct field PingResponse.timestamp of type int64
 ```
 
-I therefore used the SDK bundler to embed the matching CLI version auto-detected for SDK `v0.3.0`: **Copilot CLI `1.0.36-0`**.
+Thus I used the bundler of the SDK to embed the CLI version that the tool found
+automatically for SDK `v0.3.0`: **Copilot CLI `1.0.36-0`**.
 
 ### Experiment A: real provider-backed resume
 
-Program created a real session with:
+The program created a real session with these properties:
 
-- custom `SessionFSProvider` rooted at `/tmp/copilot-synth-spike/state`;
+- a real `SessionFSProvider` with the root at `/tmp/copilot-synth-spike/state`;
 - `SystemMessageConfig{Mode: "replace", Content: "You are a neutral chat completion model..."}`;
-- no custom tools and a denying permission handler;
-- `AvailableTools: []string{"__none__"}` to avoid exposing built-ins during the probe.
+- no custom tools, and a permission handler that denies all requests;
+- `AvailableTools: []string{"__none__"}`, to keep the built-in tools hidden
+  during the probe.
 
-Seed prompt:
+The seed prompt:
 
 ```text
 Remember this exact nonce for the next turn: nonce-real-1e281015. Reply with OK only.
 ```
 
-After disconnect, `events.jsonl` existed and included:
+After the disconnection, `events.jsonl` existed. It contained these events:
 
 ```text
 session.start
@@ -91,23 +138,25 @@ assistant.turn_end
 session.shutdown
 ```
 
-Then the program resumed the same session and asked:
+Then the program resumed the same session. It asked this question:
 
 ```text
 What exact nonce did I ask you to remember? Reply with the nonce only.
 ```
 
-Observed output:
+The observed output:
 
 ```text
 REAL_FOLLOW_REPLY nonce-real-1e281015
 ```
 
-This confirms normal persisted event logs are model context on resume.
+This confirms that normal saved event logs are model context after a resume.
 
 ### Experiment B: synthetic text history
 
-The program then manually wrote a new session directory containing only `/session-state/events.jsonl` with synthetic events and no `workspace.yaml` or checkpoints:
+Then the program wrote a new session directory by hand. The directory contained
+only `/session-state/events.jsonl` with synthetic events. It contained no
+`workspace.yaml` and no checkpoints:
 
 ```text
 session.start
@@ -117,21 +166,22 @@ assistant.message
 assistant.turn_end
 ```
 
-Seeded nonce:
+The seeded nonce:
 
 ```text
 nonce-synth-7251f004
 ```
 
-It then called `ResumeSession` for that synthetic session ID and asked the same follow-up question.
+Then it called `ResumeSession` for that synthetic session ID. It asked the same
+second question.
 
-Observed output:
+The observed output:
 
 ```text
 SYNTH_FOLLOW_REPLY nonce-synth-7251f004
 ```
 
-After resume, the SDK appended normal runtime events to the synthetic log:
+After the resume, the SDK added the normal runtime events to the synthetic log:
 
 ```text
 session.resume
@@ -144,24 +194,26 @@ assistant.turn_end
 session.shutdown
 ```
 
-This is the core proof: **synthetic prior events were consumed as model context after `ResumeSession`.**
+This is the main proof: **the model used the synthetic prior events as context
+after `ResumeSession`.**
 
 ### Experiment C: real tool event shapes
 
-A scratch custom tool `echo_value` was registered with `SkipPermission = true`. Prompt:
+I registered a scratch custom tool `echo_value` with `SkipPermission = true`.
+The prompt:
 
 ```text
 Call echo_value once with value alpha-123. Then answer with the exact tool output only.
 ```
 
-Observed tool invocation and final answer:
+The observed tool call and the final answer:
 
 ```text
 TOOL_INVOKED call_J1HnPWroYRFzzqa7uJvztLnQ echo_value map[string]interface {}{"value":"alpha-123"}
 REPLY tool-output:alpha-123
 ```
 
-Persisted event sequence around the tool call:
+The saved event sequence around the tool call:
 
 ```text
 user.message
@@ -177,11 +229,17 @@ assistant.message               # final text
 assistant.turn_end
 ```
 
-A request for two tool calls produced two tool calls, but the observed model/runtime executed them sequentially as separate assistant tool-request turns rather than one parallel `toolRequests` array. The schema supports multiple `toolRequests`; synthetic parallel hydration should encode multiple requests in one assistant message plus one start/complete pair per `toolCallId`, but that exact parallel synthetic shape was not separately live-proven.
+A request for two tool calls produced two tool calls. But the model and the
+runtime did them one after the other, as separate assistant tool-request turns.
+They did not use one parallel `toolRequests` array. The schema permits more than
+one item in `toolRequests`. Synthetic parallel hydration must put more than one
+request in one assistant message. It must also add one start event and one
+complete event for each `toolCallId`. But no live test proved that exact
+parallel synthetic shape.
 
 ### Experiment D: synthetic tool-result history
 
-A separate scratch program seeded a synthetic session with:
+A separate scratch program seeded a synthetic session with these events:
 
 ```text
 session.start
@@ -193,23 +251,25 @@ tool.execution_complete   # result.content = tool-output-charlie-789
 assistant.turn_end
 ```
 
-No final assistant answer was seeded. After `ResumeSession`, it asked:
+The seed contained no final assistant answer. After `ResumeSession`, the program
+asked this question:
 
 ```text
 What exact output did the previous tool execution return? Reply with that output only.
 ```
 
-Observed output:
+The observed output:
 
 ```text
 SESSION synth-tool-9d84522e-c889-49e3-b852-9b3aaa843f0c EXPECTED tool-output-charlie-789 REPLY tool-output-charlie-789
 ```
 
-This indicates synthetic tool execution result events can also be used as model context.
+This shows that the model can also use synthetic tool execution result events as
+context.
 
 ## Minimal event schema for synthetic hydration
 
-Envelope, one JSON object per line:
+The envelope. There is one JSON object on each line:
 
 ```json
 {
@@ -221,13 +281,15 @@ Envelope, one JSON object per line:
 }
 ```
 
-Observed requirements/behavior:
+The observed requirements and behavior:
 
-- `id` should be unique per event.
-- `timestamp` should be RFC3339/RFC3339Nano.
-- `parentId` forms a linked list; `null` for the first event. Synthetic parent chains worked.
-- Events are newline-delimited JSON in `/session-state/events.jsonl`.
-- The runtime appends `session.resume` with `eventCount` equal to the number of seeded events.
+- Each event must have a unique `id`.
+- The `timestamp` must use RFC3339 or RFC3339Nano.
+- `parentId` makes a linked list. It is `null` for the first event. Synthetic
+  parent chains operated correctly.
+- The events are newline-delimited JSON in `/session-state/events.jsonl`.
+- The runtime adds `session.resume` with an `eventCount` that is equal to the
+  number of seeded events.
 
 ### Required first event
 
@@ -244,7 +306,7 @@ Observed requirements/behavior:
 }
 ```
 
-Real sessions also include optional data such as:
+Real sessions also contain optional data. Here is an example:
 
 ```json
 {
@@ -257,7 +319,7 @@ Real sessions also include optional data such as:
 
 ### User message
 
-Minimal synthetic form that worked:
+The minimal synthetic form that operated correctly:
 
 ```json
 {
@@ -268,7 +330,7 @@ Minimal synthetic form that worked:
 }
 ```
 
-Real sessions include additional optional fields:
+Real sessions contain more optional fields:
 
 ```json
 {
@@ -282,7 +344,7 @@ Real sessions include additional optional fields:
 
 ### Assistant text message
 
-Minimal synthetic form that worked:
+The minimal synthetic form that operated correctly:
 
 ```json
 {
@@ -294,22 +356,23 @@ Minimal synthetic form that worked:
 }
 ```
 
-Real sessions may add `encryptedContent`, `interactionId`, `outputTokens`, `phase`, `reasoningOpaque`, `reasoningText`, `requestId`, and `toolRequests`.
+Real sessions can add `encryptedContent`, `interactionId`, `outputTokens`,
+`phase`, `reasoningOpaque`, `reasoningText`, `requestId` and `toolRequests`.
 
 ### Assistant turn delimiters
 
-Used successfully in synthetic logs:
+These events operated correctly in the synthetic logs:
 
 ```json
 { "type": "assistant.turn_start", "data": { "turnId": "0" } }
 { "type": "assistant.turn_end", "data": { "turnId": "0" } }
 ```
 
-Real sessions include `interactionId` on `assistant.turn_start`.
+Real sessions contain `interactionId` on `assistant.turn_start`.
 
 ### System/developer message
 
-Generated type supports:
+The generated type supports this event:
 
 ```json
 {
@@ -321,7 +384,13 @@ Generated type supports:
 }
 ```
 
-`role` is `"system"` or `"developer"`. In the live synthetic experiments I did not need to seed this manually because `ResumeSessionConfig.SystemMessage` with `Mode: "replace"` caused the SDK to append a fresh `system.message` on resume. For this project, the safer path is to pass current effective OpenAI system/developer instructions through `SystemMessageConfig{Mode:"replace"}` on every create/resume rather than rely only on seeded system events.
+`role` is `"system"` or `"developer"`. In the live synthetic experiments I did
+not have to seed this event by hand. The reason is that
+`ResumeSessionConfig.SystemMessage` with `Mode: "replace"` made the SDK add a
+new `system.message` at the resume. For this project, there is a safer path.
+Send the current effective OpenAI system instructions and developer instructions
+through `SystemMessageConfig{Mode:"replace"}` at each create operation and each
+resume operation. Do not depend only on seeded system events.
 
 ### Tool call request and result
 
@@ -374,79 +443,161 @@ Tool execution complete:
 }
 ```
 
-Real `tool.execution_complete` also included `interactionId` and `model`. These were not required in the synthetic tool-result proof.
+The real `tool.execution_complete` also contained `interactionId` and `model`.
+The synthetic tool-result proof did not need these fields.
 
 ## Assessment for copilot-api
 
 ### Ordinary multi-turn Chat Completions
 
-Synthetic hydration can preserve role-native user/assistant history without collapsing all prior turns into one prompt. For each stateless Chat Completions request:
+Synthetic hydration can keep the role-native history of the user and the
+assistant. It does not put all the prior turns into one prompt. Do these steps
+for each stateless Chat Completions request:
 
-1. Create a new isolated synthetic session ID and session filesystem root.
-2. Write `/session-state/events.jsonl` with `session.start` and prior OpenAI messages converted to SDK events.
-3. Resume the synthetic session with `SystemMessageConfig{Mode:"replace"}` containing only caller-supplied system/developer instructions plus any minimal neutral adapter framing.
+1. Create a new isolated synthetic session ID. Create a new root for the session
+   file system.
+2. Write `/session-state/events.jsonl` with `session.start`. Add the prior
+   OpenAI messages after you convert them to SDK events.
+3. Resume the synthetic session with `SystemMessageConfig{Mode:"replace"}`. This
+   value must contain only the system instructions and the developer
+   instructions from the caller. It can also contain a minimal neutral text for
+   the adapter.
 4. Send only the current user message as the new turn.
-5. Delete/expire the synthetic state after the response unless persistence is explicitly needed.
+5. Delete the synthetic state after the response, or let it expire. Keep it only
+   if the system needs it.
 
 ### Tool-call turns
 
-Feasible for normal OpenAI tool history:
+This is possible for a normal OpenAI tool history:
 
-- prior assistant message with `tool_calls` -> synthetic `assistant.message.toolRequests`;
-- prior `role: tool` outputs -> synthetic `tool.execution_start` + `tool.execution_complete` linked by `toolCallId`;
+- prior assistant message with `tool_calls` -> synthetic
+  `assistant.message.toolRequests`;
+- prior `role: tool` outputs -> synthetic `tool.execution_start` +
+  `tool.execution_complete` linked by `toolCallId`;
 - next user/current prompt -> sent as the new SDK turn.
 
-For Responses API parked-turn continuations, the existing plan of keeping the live SDK handler parked and unblocking with client output is still cleaner when possible. Synthetic tool hydration is most useful for stateless Chat Completions continuation where the client sends back assistant tool calls and tool results in a later request.
+For the continuation of a parked turn in the Responses API, the existing plan is
+still more simple when it is possible. That plan keeps the live SDK handler
+parked. Then it unblocks the handler with the client output. Synthetic tool
+hydration is most useful for a stateless Chat Completions continuation. In that
+case the client sends the assistant tool calls and the tool results again in a
+later request.
 
-Parallel tool calls: the event schema allows `toolRequests: []` and one execution pair per `toolCallId`. The live two-tool prompt produced sequential tool calls, not a single multi-call assistant message, so exact runtime treatment of a synthetic one-message parallel batch remains an open validation item.
+Parallel tool calls: the event schema permits `toolRequests: []` and one
+execution pair for each `toolCallId`. The live prompt for two tools produced
+tool calls one after the other. It did not produce one assistant message with
+more than one call. Thus the exact runtime behavior for a synthetic parallel
+batch in one message is still an open item for validation.
 
 ## Risks and caveats
 
-- **Schema drift:** `events.jsonl` is generated from an SDK schema but persisted resume semantics are not a public “import messages” contract. Pin SDK/CLI versions and add regression tests around hydration.
-- **SDK/CLI version coupling:** the original spike showed that a mismatched installed CLI can fail at startup with protocol-shape errors. The service should control the SDK/CLI pairing, prefer the SDK-matched embedded CLI, and fail startup if runtime status cannot be read.
-- **Parent IDs/timestamps:** synthetic unique IDs, RFC3339 timestamps, and a linear `parentId` chain worked. Do not assume malformed chains will continue to work.
-- **Checkpoints/compaction:** e2e tests show compaction rewrites `events.jsonl` with checkpoint data. Long synthetic histories may trigger compaction or summarization. Keep synthetic Chat sessions short-lived and have a transcript fallback.
-- **`transformedContent`:** real `user.message` includes SDK-generated `transformedContent`; minimal synthetic messages without it worked. Future runtimes could rely more heavily on transformed content.
-- **System prompt safety:** never rely on SDK defaults. Always pass `SystemMessageConfig{Mode:"replace"}` on create/resume. Decide how to combine OpenAI `system` and `developer` messages into one replacement prompt or validated `system.message` events.
-- **Tools:** real tool calls add hook events and optional telemetry fields; synthetic minimal tool result events worked, but error results, partial results, binary/multimodal tool outputs, and parallel batches need more tests.
-- **Built-in tools:** the spike avoided SDK built-ins with replacement system prompt, no registered SDK tools, a denying permission handler, and a sentinel `AvailableTools`. This is not a full built-in-tool-disable proof.
-- **Race/concurrency:** only write or rewrite `events.jsonl` before `ResumeSession`. Do not edit a state file while a session is active. The product invariant of single-user concurrent proxy helps, but per-session locking is still required.
-- **Interaction IDs/request IDs:** omitted in synthetic events and worked. They may matter for telemetry/accounting or future context reconstruction.
-- **Workspace files:** no `workspace.yaml` or checkpoints were needed for minimal synthetic resume, but the runtime may create them after resume.
-- **Unsupported assumptions:** this is effectively state-file surgery. Treat as an internal adapter with tests and fallback, not as a stable upstream API guarantee.
+- **A change of the schema:** an SDK schema generates `events.jsonl`. But the
+  resume behavior for saved events is not a public “import messages” contract.
+  Pin the versions of the SDK and the CLI. Add regression tests for the
+  hydration.
+- **The coupling of the SDK version and the CLI version:** the original spike
+  showed that an installed CLI with an incorrect version can fail at the start.
+  The error is about the shape of the protocol. The service must control the
+  pair of the SDK and the CLI. It must prefer the embedded CLI that agrees with
+  the SDK. It must fail at the start if it cannot read the runtime status.
+- **The parent IDs and the timestamps:** unique synthetic IDs, RFC3339
+  timestamps and a linear `parentId` chain operated correctly. Do not assume
+  that an incorrect chain continues to operate.
+- **The checkpoints and the compaction:** the e2e tests show that compaction
+  writes `events.jsonl` again with checkpoint data. A long synthetic history can
+  cause compaction or a summary. Keep the synthetic Chat sessions short in time.
+  Keep an alternative path with a transcript.
+- **`transformedContent`:** a real `user.message` contains `transformedContent`,
+  which the SDK generates. Minimal synthetic messages with no such field
+  operated correctly. A future runtime can depend more on the transformed
+  content.
+- **The safety of the system prompt:** never depend on the defaults of the SDK.
+  Always send `SystemMessageConfig{Mode:"replace"}` at each create operation and
+  each resume operation. Decide how to combine the OpenAI `system` messages and
+  the `developer` messages. Make one replacement prompt, or make checked
+  `system.message` events.
+- **The tools:** real tool calls add hook events and optional telemetry fields.
+  Minimal synthetic tool result events operated correctly. But more tests are
+  necessary for error results, partial results, binary and multimodal tool
+  outputs, and parallel batches.
+- **The built-in tools:** the spike kept the SDK built-in tools away. It used a
+  replacement system prompt, no registered SDK tools, a permission handler that
+  denies all requests, and a sentinel value in `AvailableTools`. This is not a
+  full proof that the built-in tools are off.
+- **The concurrency:** write or rewrite `events.jsonl` only before
+  `ResumeSession`. Do not change a state file while a session is active. The
+  product invariant of one user with a concurrent proxy helps. But a lock for
+  each session is still necessary.
+- **The interaction IDs and the request IDs:** the synthetic events do not
+  contain them, and the tests operated correctly. They can be important for the
+  telemetry, for the accounting or for a future reconstruction of the context.
+- **The workspace files:** a minimal synthetic resume did not need
+  `workspace.yaml` or the checkpoints. But the runtime can create them after the
+  resume.
+- **The assumptions that have no support:** this method changes the state file
+  directly. Treat it as an internal adapter with tests and an alternative path.
+  Do not treat it as a guarantee of a stable upstream API.
 
 ## Recommendation for implementation plan
 
-Update the plan from “serialize OpenAI messages into one prompt transcript” to:
+Change the plan. Do not “serialize the OpenAI messages into one prompt
+transcript”. Use this plan:
 
-1. **Primary path:** synthetic session hydration via project-owned `SessionFSProvider`, then `ResumeSession` and send only the latest user/input turn.
-2. **Safety path:** always use `SystemMessageConfig{Mode:"replace"}` and tool-denying defaults; register only request-scoped client proxy tools when the request includes OpenAI tools.
-3. **Fallback path:** transcript serialization remains available when hydration fails, schema validation rejects a history shape, SDK/CLI version changes break tests, or a history feature is not yet mapped.
+1. **The primary path:** do synthetic session hydration with a
+   `SessionFSProvider` that the project owns. Then call `ResumeSession`, and
+   send only the newest user turn or input turn.
+2. **The safety path:** always use `SystemMessageConfig{Mode:"replace"}` and
+   defaults that deny the tools. Register the client proxy tools for one request
+   only, and only when the request contains OpenAI tools.
+3. **The alternative path:** the serialization of the transcript is still
+   available. Use it when the hydration fails, when the schema validation
+   rejects a history shape, when a change of the SDK version or the CLI version
+   breaks the tests, or when a history feature has no map yet.
 
-This should improve role-native history handling while preserving the hard product invariants.
+This plan improves the control of the role-native history. It also keeps the
+strict product invariants.
 
 ## Next concrete implementation tasks
 
-1. Add an internal `SessionFSProvider` implementation backed by a per-request/session directory or in-memory filesystem with atomic write/append and per-session locking.
-2. Define an internal OpenAI-message-to-SDK-event hydrator:
-   - system/developer -> replacement `SystemMessageConfig` first; optionally `system.message` only when needed;
+1. Add an internal implementation of `SessionFSProvider`. Use a directory for
+   each request or session, or use an in-memory file system. Give it atomic
+   write and append operations, and a lock for each session.
+2. Define an internal component that converts an OpenAI message to an SDK event:
+   - system/developer -> replacement `SystemMessageConfig` first; optionally
+     `system.message` only when needed;
    - user -> `user.message`;
-   - assistant text -> `assistant.turn_start`, `assistant.message`, `assistant.turn_end`;
+   - assistant text -> `assistant.turn_start`, `assistant.message`,
+     `assistant.turn_end`;
    - assistant tool calls -> `assistant.message.toolRequests`;
    - tool results -> `tool.execution_start` + `tool.execution_complete`.
-3. Add schema validation by unmarshalling every generated line into `copilot.SessionEvent` before resume.
-4. Pin and verify SDK/CLI compatibility; prefer the SDK embedded CLI path for reproducibility and log runtime status at startup.
-5. Add integration tests behind an opt-in/live-test flag:
-   - synthetic text history nonce recall;
-   - synthetic tool-result recall;
-   - multiple tool results / parallel-shaped `toolRequests`;
-   - fallback when resume fails.
-6. Add cleanup/TTL for synthetic session state and ensure no ambient global sessions are reused.
-7. Keep transcript serialization implementation as a tested fallback until hydration has enough version coverage.
+3. Add schema validation. Unmarshal each generated line into
+   `copilot.SessionEvent` before the resume.
+4. Pin the versions of the SDK and the CLI, and check their compatibility.
+   Prefer the embedded CLI path of the SDK, because the result is reproducible.
+   Write the runtime status to the log at the start.
+5. Add integration tests behind a flag for opt-in live tests:
+   - the recall of a nonce from a synthetic text history;
+   - the recall of a synthetic tool result;
+   - more than one tool result, and `toolRequests` with a parallel shape;
+   - the alternative path when the resume fails.
+6. Add a cleanup operation and a TTL for the synthetic session state. Make sure
+   that the code does not use an ambient global session again.
+7. Keep the implementation of the transcript serialization as an alternative
+   path with tests. Keep it until the hydration has sufficient version coverage.
 
 ## Open questions requiring parent/user decision
 
-- Should synthetic hydration be the default for Chat Completions MVP, with transcript serialization only as fallback, despite relying on SDK internal event semantics?
-- How should multiple OpenAI `system` and `developer` messages be combined: one replacement system prompt, separate synthetic `system.message` events, or reject uncommon mid-conversation system/developer messages in strict mode?
-- For parallel tool calls, should MVP synthesize the natural parallel shape immediately or serialize tool results conservatively until a live parallel synthetic batch is proven?
-- What is the acceptable fallback behavior when hydration fails in strict compatibility mode: return an OpenAI-shaped error, or silently use transcript serialization?
+- Must the synthetic hydration be the default for the Chat Completions MVP? Then
+  the transcript serialization is only the alternative path. Note that the
+  hydration depends on the internal event behavior of the SDK.
+- How must the code combine more than one OpenAI `system` message and
+  `developer` message? There are three options. Make one replacement system
+  prompt. Make separate synthetic `system.message` events. Or reject the unusual
+  system messages and developer messages in the middle of a conversation, in
+  strict mode.
+- For parallel tool calls, must the MVP make the natural parallel shape
+  immediately? Or must it serialize the tool results carefully until a live test
+  proves a synthetic parallel batch?
+- What behavior is acceptable when the hydration fails in strict compatibility
+  mode? The server can return an error in the OpenAI shape. Or it can use the
+  transcript serialization with no message.

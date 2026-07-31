@@ -6,47 +6,48 @@ Issue: [#4](https://github.com/evanlouie/copilot-api/issues/4)
 
 ## Verdict
 
-**Qualified go, drastically narrower than the hypothesis.**
+**Qualified go, but much more limited than the hypothesis.**
 
 The hypothesis was "one seam fixes four limitations because the intercepted
-payload is OpenAI-shaped". That is **false**. There is no single payload shape:
-the runtime speaks a **different provider-native wire dialect per model
-family**, and the four limitations are reachable in different — sometimes zero —
-ways in each.
+payload is OpenAI-shaped". That statement is **false**. There is no single
+payload shape. The runtime speaks a **different provider-native wire dialect for
+each model family**. The four limitations are available in a different way in
+each dialect. In some dialects they are not available at all.
 
-What is actually true, and was proven end to end on a live account:
+The items that follow are true. A live account proved them from end to end:
 
-- Injecting `text.format` with a `json_schema` into the **OpenAI Responses**
-  dialect (`gpt-*`) **works**. A prompt that would normally return prose
-  returned `{"age":36,"name":"Ada Lovelace"}` through the proxy's own Chat
-  Completions path.
+- The injection of `text.format` with a `json_schema` into the **OpenAI
+  Responses** dialect (`gpt-*`) **works**. A prompt that usually returns prose
+  returned `{"age":36,"name":"Ada Lovelace"}` through the Chat Completions path
+  of the proxy.
 - The same injection into the **OpenAI Chat Completions** dialect (`gemini-*`)
-  was **accepted with HTTP 200 and silently ignored**. The model returned prose.
-  This is the worst possible failure mode: we would advertise a capability that
-  quietly does not work.
-- The **Anthropic Messages** dialect (`claude-*`, and whatever the default
-  `auto` router picks) has **no `response_format` / `json_schema` field at
-  all**. There is nothing to inject.
+  got **HTTP 200, but the service ignored it**. The model returned prose. This
+  failure mode is the worst one. We would advertise a capability that does not
+  operate.
+- The **Anthropic Messages** dialect (`claude-*`, and the dialect that the
+  default `auto` router selects) has **no `response_format` field and no
+  `json_schema` field**. There is nothing to inject.
 
-So: pursue **structured outputs**, gated per dialect, default-off, and keep
-returning the existing hard `400` for model families where it cannot be
-enforced. Do **not** treat this seam as a general-purpose control plane, and do
-not take on `tool_choice`, `parallel_tool_calls` or `max_tokens` in the same
-change.
+Thus: continue with **structured outputs**. Control them for each dialect, and
+set them off by default. Continue to return the existing `400` error for the
+model families that cannot enforce them. Do **not** use this seam as a control
+plane for general purposes. Do not add `tool_choice`, `parallel_tool_calls` or
+`max_tokens` in the same change.
 
-See [Recommendation](#recommendation) for the staging, and [Risks](#risks) for
-the two findings that should gate any merge — an experimental RPC surface, and
-an observed unbounded hang when an injected request is rejected upstream.
+Read [Recommendation](#recommendation) for the steps. Read [Risks](#risks) for
+the two results that must control a merge. The first result is an experimental
+RPC surface. The second result is an unbounded hang when the upstream service
+rejects an injected request.
 
 ## What I did
 
-Static analysis of the SDK, then four live probes against a real Copilot
-subscription.
+I did a static analysis of the SDK. Then I did four live probes against a real
+Copilot subscription.
 
-The probe is a throwaway test harness at
+The probe is a temporary test harness at
 `internal/copilotgw/spike_request_handler_probe_test.go`. It builds a real
-`RealGateway`, then **replaces that gateway's SDK client** with one that has a
-`copilot.CopilotRequestHandler` installed:
+`RealGateway`. Then it **replaces the SDK client of that gateway** with a client
+that has a `copilot.CopilotRequestHandler` installed:
 
 ```go
 transport := newSpikeCapturingTransport()
@@ -56,23 +57,25 @@ opts.RequestHandler = &copilot.CopilotRequestHandler{Transport: transport}
 gw.client = copilot.NewClient(opts)
 ```
 
-Production code is untouched. `newRealClientOptions` still returns a
-handler-free config, so nothing in the shipped request path changes.
+The production code does not change. `newRealClientOptions` still returns a
+configuration with no handler. Thus nothing changes in the request path that we
+release.
 
-The custom `http.RoundTripper`:
+The custom `http.RoundTripper` does these operations:
 
-- mirrors the SDK's own default transport (`DisableCompression = true`, see
-  `copilot_request_handler.go:44`);
-- reads and records the request body, optionally rewrites it, then replays it;
-- wraps the **response** body in a tee rather than buffering it, so streaming is
-  preserved and the capture is a side effect;
-- redacts credential headers **and** credential-bearing JSON body fields before
-  anything is written to disk.
+- It copies the behavior of the default transport of the SDK
+  (`DisableCompression = true`, see `copilot_request_handler.go:44`).
+- It reads and records the request body. It can also rewrite the body. Then it
+  sends the body again.
+- It puts the **response** body in a tee, and does not put it in a buffer. Thus
+  the stream continues, and the capture is only a secondary effect.
+- It removes the credential headers **and** the JSON body fields that contain
+  credentials. It does this before it writes anything to disk.
 
 ### Reproducing
 
-All probes skip unless `COPILOT_API_LIVE_TESTS=1`, per the convention in
-`internal/copilotgw/live_test.go`.
+All probes skip if `COPILOT_API_LIVE_TESTS=1` is not set. This agrees with the
+convention in `internal/copilotgw/live_test.go`.
 
 ```sh
 # Pass-through capture (question 1, 3, 5, 6)
@@ -102,15 +105,16 @@ COPILOT_CLI_PATH=/path/to/copilot \
   -run TestSpikeUpstreamErrorWithoutInterception -v -timeout 120s
 ```
 
-Environment for every result below:
+The environment for each result that follows:
 
 - Copilot Go SDK `v1.0.6`, Copilot CLI `1.0.75`, protocol `3`
 - Host `api.enterprise.githubcopilot.com`
 - Auth: the CLI's own logged-in user (`GITHUB_TOKEN` unset)
 - macOS, Go 1.26.5
 
-Capture artifacts were written to `/tmp` and are **not** committed; the excerpts
-in this document are copied by hand and re-checked for secrets.
+The capture artifacts went to `/tmp`. They are **not** in the repository. I
+copied the excerpts in this document by hand. Then I examined them again for
+secrets.
 
 ## Where the seam sits
 
@@ -132,18 +136,19 @@ flowchart TD
     K --> L
 ```
 
-The important structural point: the handler is registered **process-wide**, not
-per session. `client.go:399` calls `RPC.LlmInference.SetProvider` once on
-connect, and from then on _all_ model-layer traffic — including the model
-catalog and the call that mints a session token — is routed through our code.
+The important structural point is this: the handler is registered **for the full
+process**, and not for each session. `client.go:399` calls
+`RPC.LlmInference.SetProvider` one time at connection. After that, our code gets
+_all_ traffic of the model layer. This includes the model catalog and the call
+that makes a session token.
 
 ## Answers
 
 ### 1. Is the body an OpenAI `/chat/completions` payload, or a proprietary envelope? — **Observed**
 
-**Neither.** It is the _provider-native_ API of whichever model family the
-runtime resolved, sent to a GitHub-hosted endpoint, with GitHub-proprietary
-extensions mixed in.
+**It is neither of the two.** It is the _provider-native_ API of the model
+family that the runtime selected. The runtime sends it to an endpoint that
+GitHub hosts. The payload also contains extensions that belong to GitHub.
 
 | Model requested                             | URL                      | Dialect                 |
 | ------------------------------------------- | ------------------------ | ----------------------- |
@@ -151,27 +156,29 @@ extensions mixed in.
 | `gpt-5.5`, `gpt-5-mini`                     | `POST /responses`        | OpenAI Responses        |
 | `gemini-3.6-flash`                          | `POST /chat/completions` | OpenAI Chat Completions |
 
-It is not a runtime envelope — there is no wrapper around a provider payload,
-these are the real upstream request bodies, and the `X-Stainless-Helper-Method`
-header on the Anthropic path shows the CLI is driving a stock Anthropic SDK
+It is not a runtime envelope. There is no wrapper around a provider payload.
+These are the true upstream request bodies. The `X-Stainless-Helper-Method`
+header on the Anthropic path shows that the CLI uses a standard Anthropic SDK
 client.
 
-Proprietary extensions observed in these "standard" payloads:
+The probes found these GitHub extensions in the "standard" payloads:
 
 - `snippy: {enabled: false}` in the Chat Completions request;
-- `copilot_usage` with nano-AIU billing detail in the Chat Completions response;
+- `copilot_usage` with the nano-AIU billing detail in the Chat Completions
+  response;
 - `reasoning_opaque` (an encrypted blob) in the Chat Completions response;
 - `thinking: {type, budget_tokens, display: "summarized"}` in the Anthropic
-  request — `display` is not part of the public Anthropic API.
+  request. The field `display` is not part of the public Anthropic API.
 
-This single finding invalidates the issue's premise. There is no one payload to
-mutate.
+This one result makes the premise of the issue incorrect. There is no single
+payload to change.
 
 ### 2. Does the runtime re-parse responses in a way injection would break? — **Observed for structured outputs; open for tool controls**
 
-**Observed:** it does not break, for the case that matters most.
+**Observed:** the injection does not break the runtime for the most important
+case.
 
-Injecting into the `/responses` dialect:
+The injection into the `/responses` dialect:
 
 ```go
 text["format"] = map[string]any{
@@ -182,7 +189,7 @@ payload["text"] = text
 payload["max_output_tokens"] = 2048
 ```
 
-Result on `gpt-5.5`, verbatim from the probe:
+The result on `gpt-5.5`, copied exactly from the probe:
 
 ```text
 turn text: "{\"age\":36,\"name\":\"Ada Lovelace\"}"
@@ -190,133 +197,144 @@ capture ... mutated=true status=200 POST .../responses
 RESULT: structured output enforced end to end: name="Ada Lovelace" age=36
 ```
 
-Upstream accepted it, the runtime parsed the (still perfectly normal) response,
-the turn completed, and the gateway returned the JSON as assistant content. The
-merge also had to preserve `text.verbosity`, which the runtime sets itself — a
-naive assignment to `text` would have clobbered it. That is a small preview of
-the coupling cost.
+The upstream service accepted the request. The runtime parsed the response,
+which was still fully normal. The turn completed. The gateway returned the JSON
+as the assistant content. The merge also had to keep `text.verbosity`, which the
+runtime sets itself. A simple assignment to `text` would have deleted that
+value. This shows a small part of the cost of the coupling.
 
-`max_output_tokens` rode along in the same injection without complaint, so
-question 4's `max_tokens` limitation is technically solvable here too.
+`max_output_tokens` went with the same injection and caused no error. Thus the
+`max_tokens` limitation of question 4 is also possible to solve here.
 
-**Open:** I did not test `tool_choice` or `parallel_tool_calls`, so I have no
-evidence about the runtime's tool-call reconciliation. Note that `tool_choice`
-is the one control that _exists_ in all three dialects (Anthropic has
-`tool_choice: {type: "any" | "tool"}`), which makes it the natural second target
-— but see the silent-ignore result below before assuming it works.
+**Open:** I did not test `tool_choice` or `parallel_tool_calls`. Thus I have no
+evidence about how the runtime reconciles the tool calls. Note that
+`tool_choice` is the one control that _exists_ in all three dialects. Anthropic
+has `tool_choice: {type: "any" | "tool"}`. This makes it the natural second
+target. But read the result about the ignored injection below before you assume
+that it operates.
 
 ### 3. How are streaming bodies framed, can they pass through untouched? — **Observed**
 
-**Yes, and the pass-through must be a tee, not a buffer.**
+**Yes, they can pass through. The pass-through must be a tee, and not a
+buffer.**
 
-Observed framing:
+The observed framing:
 
 - Anthropic path: `Content-Type: text/event-stream`, `stream: true` in the
-  request, standard Anthropic SSE (`event: message_start`, `content_block_delta`
-  with `thinking_delta`, etc.), ~17 KB for a short turn.
-- OpenAI Responses path: for a non-streaming proxy request the runtime issued a
-  **non-streaming** request and got a single JSON body back.
-- Chat Completions path: single JSON body.
+  request, and standard Anthropic SSE (`event: message_start`,
+  `content_block_delta` with `thinking_delta`, and more). The size was about 17
+  KB for a short turn.
+- OpenAI Responses path: for a proxy request that was not a stream, the runtime
+  sent a **non-streaming** request. It got back one JSON body.
+- Chat Completions path: one JSON body.
 
-So the runtime decides streaming per dialect, independently of whether the proxy
-client asked for a stream.
+Thus the runtime selects the streaming behavior for each dialect. This
+selection is independent of a request for a stream from the proxy client.
 
-The SDK forwards the response by reading 32 KiB at a time and pushing each chunk
-to the runtime (`streamResponseToSink`, `copilot_request_handler.go:218`). My
-tee wrapper preserved this exactly: the turn completed normally while a copy
-accumulated. A custom RoundTripper that does `io.ReadAll(resp.Body)` would
-convert every streaming turn into a buffered one.
+The SDK forwards the response. It reads 32 KiB at a time and sends each chunk to
+the runtime (`streamResponseToSink`, `copilot_request_handler.go:218`). My tee
+wrapper kept this behavior exactly. The turn completed normally while a copy
+collected the data. A custom RoundTripper that calls `io.ReadAll(resp.Body)`
+would change every streaming turn into a buffered turn.
 
-Two inherited constraints, both **observed in source**, that a production
-transport must respect:
+A production transport must obey two inherited constraints. The source code
+shows both of them:
 
-- `DisableCompression = true` on the SDK's default transport. Forget it and you
-  silently change framing.
-- `RoundTrip` is called directly, so **redirects are not followed**.
+- `DisableCompression = true` on the default transport of the SDK. If you forget
+  it, you change the framing and get no error message.
+- The code calls `RoundTrip` directly. Thus it **does not follow redirects**.
 
-**Inferred, untested:** `streamResponseToSink` does `string(buf[:n])` on an
-arbitrary 32 KiB boundary and sends it as JSON-RPC text. A multi-byte UTF-8 rune
-straddling that boundary looks corruptible. This is the SDK's own default path,
-so it applies whenever `RequestHandler` is set at all, not just when we mutate.
+**Inferred, not tested:** `streamResponseToSink` calls `string(buf[:n])` on an
+arbitrary 32 KiB boundary. Then it sends the result as JSON-RPC text. A
+multi-byte UTF-8 rune on that boundary can become corrupt. This is the default
+path of the SDK. Thus it applies each time that `RequestHandler` is set, and not
+only when we change the payload.
 
 ### 4. Is the shape stable enough to depend on? — **Observed, and the answer is no**
 
-Three independent signals, all observed:
+The probes found three independent signals:
 
-1. **The RPC surface declares itself experimental.** Every generated type is
-   annotated: _"Experimental: LlmInferenceHTTPRequestStartRequest is part of an
-   experimental API and may change or be removed."_ (`rpc/zrpc.go`). That
-   applies to the whole `LlmInference*` family and to `ServerLlmInferenceAPI`.
-2. **It is undocumented.** `RequestHandler` appears **zero times** in the SDK's
-   39 KB `README.md`. The only documentation is the doc comment on the struct.
-3. **The payloads are not the SDK's API at all.** They are the GitHub Copilot
-   service's upstream wire formats. They carry no version we can pin, and the
-   dialect is chosen server-influenced at request time.
+1. **The RPC surface says that it is experimental.** Each generated type has
+   this annotation: _"Experimental: LlmInferenceHTTPRequestStartRequest is part
+   of an experimental API and may change or be removed."_ (`rpc/zrpc.go`). This
+   applies to the full `LlmInference*` family and to `ServerLlmInferenceAPI`.
+2. **It has no documentation.** `RequestHandler` appears **zero times** in the
+   39 KB `README.md` of the SDK. The only documentation is the doc comment on
+   the struct.
+3. **The payloads are not the API of the SDK.** They are the upstream wire
+   formats of the GitHub Copilot service. They contain no version that we can
+   pin. The service also has an effect on the selection of the dialect at
+   request time.
 
-**Inferred:** maintenance cost is therefore _two_ independent streams — SDK
-upgrades (which may remove the seam outright, as the experimental annotation
-warns) and silent service-side changes (which we cannot observe). The
-`gemini-3.6-flash` result is the proof that the second stream is real and
-dangerous: the service accepted an injected `response_format` with a 200 and
-ignored it. A service change of exactly that shape would turn a working feature
-into a silently broken one with no error anywhere.
+**Inferred:** thus the maintenance cost has _two_ independent sources. The first
+source is the SDK upgrades. An upgrade can remove the seam, as the experimental
+annotation warns. The second source is service-side changes that we cannot see.
+The `gemini-3.6-flash` result proves that the second source is real and
+dangerous. The service accepted an injected `response_format` with a 200 and
+ignored it. A service change of this type would make a feature stop to operate,
+and there would be no error message.
 
 ### 5. Can `SessionID` correlate an intercepted call to the proxy request? — **Observed for Chat; inferred for Responses**
 
-**Observed:** yes for Chat Completions, and better than expected — the
-`SessionID` is the gateway's _own_ minted session id:
+**Observed:** yes, it can for Chat Completions. The result is better than
+expected. The `SessionID` is the session id that the gateway itself made:
 
 ```text
 capture transport=http session="chat_a5ce6535-b215-487a-b5db-fd477d0faf8a" ...
 ```
 
-Because the Chat path creates a session per proxy request, that is a 1:1
-mapping. `copilot.RequestContextFrom(req)` is the documented way to read it from
-inside a RoundTripper, and it worked.
+The Chat path creates one session for each proxy request. Thus the mapping is
+1:1. `copilot.RequestContextFrom(req)` is the documented method to read the id
+from inside a RoundTripper. It operated correctly.
 
 **Observed:** `SessionID` is **empty** for `GET /models`, `POST /models/session`
-and `POST /models/session/intent`, exactly as the RPC docs say ("Absent for
-requests issued outside any session"). So an injecting transport must not assume
-it is present, and must scope mutation by URL, not just by session.
+and `POST /models/session/intent`. The RPC documentation says the same ("Absent
+for requests issued outside any session"). Thus a transport that injects data
+must not assume that the id is present. It must limit the changes by URL, and
+not only by session.
 
-**Inferred (from `warm_response.go`, not observed live):** the Responses path
-reuses one `resp_sdk_<uuid>` session across many proxy requests via warm
-sessions and resume. There the mapping is 1:N and `SessionID` alone **cannot**
-identify which proxy request an intercepted call belongs to.
+**Inferred from `warm_response.go`, and not observed live:** the Responses path
+uses one `resp_sdk_<uuid>` session again for many proxy requests. It does this
+with warm sessions and resume. There the mapping is 1:N. `SessionID` alone
+**cannot** identify the proxy request that an intercepted call belongs to.
 
-**Observed in source, worth flagging:** the RPC envelope carries `agentId`,
-`parentAgentId` and `interactionType`, and the SDK adapter **drops all three**
-when building `CopilotRequestContext` (`copilot_request_handler.go:582`). On the
-CAPI transport they are partly recoverable from headers — captures showed
-`X-Interaction-Type: conversation-user`, `Openai-Intent: conversation-agent`,
-`X-Initiator: user`, `X-Agent-Task-Id` — but that means depending on header
-names instead of a typed field.
+**Observed in the source code, and important:** the RPC envelope contains
+`agentId`, `parentAgentId` and `interactionType`. The SDK adapter **removes all
+three** when it builds `CopilotRequestContext`
+(`copilot_request_handler.go:582`). On the CAPI transport you can get some of
+them from the headers. The captures showed
+`X-Interaction-Type: conversation-user`, `Openai-Intent:
+conversation-agent`,
+`X-Initiator: user` and `X-Agent-Task-Id`. But then the code depends on header
+names in place of a typed field.
 
 ### 6. Does interception interact badly with auth/token handling? — **Observed**
 
-**It does not break auth, but it makes us a credential-handling component.**
+**It does not break the authentication. But it makes us a component that
+controls credentials.**
 
-The runtime performs the entire token dance itself and hands the handler an
-already-authorized request; the SDK forwards headers verbatim minus hop-by-hop
-(`buildHTTPRequest`). Every probe authenticated fine.
+The runtime does the full token procedure itself. It gives the handler a request
+that already has authorization. The SDK forwards the headers exactly, but it
+removes the hop-by-hop headers (`buildHTTPRequest`). Each probe authenticated
+correctly.
 
-The problems are exposure, not breakage:
+The problems are about exposure, and not about breakage:
 
-- `Authorization` and `Copilot-Session-Token` pass through our process in
-  cleartext on every inference call.
-- **`POST /models/session` is itself routed through the handler**, and its
-  response body contains a `session_token` JWT. We sit on the credential-minting
-  path, not merely the inference path.
+- `Authorization` and `Copilot-Session-Token` go through our process as clear
+  text on each inference call.
+- **The handler also gets `POST /models/session`.** The response body of that
+  call contains a `session_token` JWT. Thus we are on the path that makes the
+  credential, and not only on the inference path.
 
-My first redactor only handled headers and would have written that JWT to disk.
-Body-level redaction had to be added (`spikeBodySecretPattern` in the probe).
-Any production use of this seam that logs anything must treat both directions as
-secret-bearing.
+My first redactor changed the headers only. It would have written that JWT to
+disk. I had to add redaction for the body (`spikeBodySecretPattern` in the
+probe). Any production use of this seam that writes a log must treat both
+directions as data that contains secrets.
 
 ## Redacted capture
 
-Pass-through capture, `gpt-5.5`, from a proxy request whose only content was
-`Reply with OK only.`
+This is a pass-through capture with `gpt-5.5`. The proxy request contained only
+the text `Reply with OK only.`
 
 **Request**
 
@@ -361,7 +379,7 @@ X-Interaction-Id: [REDACTED]
 }
 ```
 
-**Response** (HTTP 200, `application/json`, abridged)
+**Response** (HTTP 200, `application/json`, made shorter)
 
 ```json
 {
@@ -389,7 +407,7 @@ X-Interaction-Id: [REDACTED]
 }
 ```
 
-For contrast, the same proxy request routed to `claude-haiku-4.5`:
+For comparison, this is the same proxy request sent to `claude-haiku-4.5`:
 
 ```json
 {
@@ -418,28 +436,29 @@ For contrast, the same proxy request routed to `claude-haiku-4.5`:
 }
 ```
 
-Nothing in that payload can express a JSON schema.
+Nothing in that payload can give a JSON schema.
 
 ## Risks
 
 ### Undocumented, experimental coupling
 
-Covered in answer 4. The seam is annotated experimental in generated code and
-absent from the SDK README, and the payloads are upstream service formats with
-no pinnable version. **A silent service-side change is a realistic failure mode,
-and the `gemini` silent-ignore result shows what it looks like: HTTP 200 and a
-capability that stopped working.**
+Answer 4 gives the details. The generated code says that the seam is
+experimental. The README of the SDK does not mention it. The payloads are
+upstream service formats, and they have no version that we can pin. **A silent
+service-side change is a realistic failure mode. The ignored injection on
+`gemini` shows the result: HTTP 200 and a capability that stopped to operate.**
 
-Mitigation, if this proceeds: never trust injection to have taken effect —
-validate the _response_ against the schema and fail loudly when it does not
-match, rather than assuming enforcement.
+If this work continues, use this mitigation. Never trust that the injection had
+an effect. Check the _response_ against the schema. Fail with a clear error if
+the response does not agree with the schema. Do not assume enforcement.
 
 ### Hot path, with an observed unbounded hang
 
-Installing `RequestHandler` puts our code on **every** model-layer request for
-**every** user, including the model catalog and session-token minting.
+If you install `RequestHandler`, our code gets **every** request of the model
+layer for **every** user. This includes the model catalog and the creation of
+the session token.
 
-The failure mode is not theoretical. With a deliberately corrupted body
+The failure mode is not theoretical. I used a body that was corrupt on purpose
 (`temperature: "definitely-not-a-number"`):
 
 ```text
@@ -447,98 +466,103 @@ turn error: Execution failed: CAPIError: 400 failed to parse request
 capture ... mutated=true status=400 POST .../responses
 ```
 
-The error surfaced cleanly to the caller — but **the gateway's `Stop()` then
-never returned.** Reproduced three times; killed at 75 s, 120 s and 600 s.
+The error went to the caller correctly. But **the `Stop()` function of the
+gateway then did not return.** I reproduced this three times. I killed the
+process at 75 s, at 120 s and at 600 s.
 
-The control matters here. Without any handler installed, an upstream 400
-provoked by an oversized prompt behaved fine:
+The control probe is important here. With no handler installed, an upstream 400
+from a prompt that was too large caused no problem:
 
 ```text
 RESULT: handler-free oversized turn err=... 400 prompt token count of 800031 exceeds the limit of 128000
 RESULT: Stop took 10.782659125s err=timed out waiting for CLI process to exit after kill
 ```
 
-And a _successful_ intercepted turn also shut down in ~10.4 s. So the hang needs
-both interception and an upstream rejection.
+An intercepted turn that _succeeded_ also stopped in about 10.4 s. Thus the hang
+needs both the interception and a rejection from the upstream service.
 
-**Honest caveat:** the two error paths are not identical — the handler-free
-failure was retried five times by the runtime and reported as a model error,
-while the injected failure came back as `CAPIError: 400 failed to parse request`
-with no retry. The hang may be a property of that _error class_ rather than of
-interception itself. I did not isolate it further. Either way, it is an
-unexplained way to wedge the process that only appears once the seam is in use,
-and it should be understood before any merge.
+**A necessary caution:** the two error paths are not the same. The runtime tried
+the handler-free failure five times, and reported it as a model error. The
+injected failure returned as `CAPIError: 400 failed to parse request` with no
+second try. The hang can be a property of that _error class_, and not a property
+of the interception. I did not isolate it more. In both cases, this is an
+unexplained method to block the process. It appears only when the seam is in
+use. You must understand it before any merge.
 
-`TestSpikeCopilotRequestHandlerBadInjection` is gated behind a second env var
-(`COPILOT_API_SPIKE_BAD_INJECTION=1`) precisely because running it wedges the
-package.
+A second environment variable (`COPILOT_API_SPIKE_BAD_INJECTION=1`) controls
+`TestSpikeCopilotRequestHandlerBadInjection`. The reason is that a run of this
+test blocks the package.
 
 ### Scope creep
 
-The `text.verbosity` merge is the canary: correct injection already requires
-knowing what the runtime puts in the payload and preserving it. Each additional
-control multiplies that by three dialects. The temptation to re-implement
-runtime behaviour is real and should be resisted by keeping the injected surface
-tiny.
+The merge of `text.verbosity` is the first warning sign. A correct injection
+already needs knowledge of the data that the runtime puts in the payload. It
+must also keep that data. Each new control multiplies this work by three
+dialects. There is a real risk that we write the runtime behavior again. Keep
+the injected surface very small to prevent this.
 
 ## Recommendation
 
-**Go, but only for structured outputs, only where it is enforceable, and
-default-off.**
+**Go, but only for structured outputs, only where we can enforce them, and off
+by default.**
 
-Rationale for that ordering, against the issue's four candidates:
+This is the reason for that sequence, against the four candidates in the issue:
 
-| Limitation            | Verdict from this spike                                                                                                                                                      |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Structured outputs    | **First.** Only currently _rejected_ capability, so the upside is a hard 400 becoming a working feature. Proven end to end on `gpt-*`.                                       |
-| `tool_choice`         | **Second, pending evidence.** The only control present in all three dialects. But untested, and the `gemini` result means "the field exists" is not evidence it is honoured. |
-| `max_tokens`          | Technically easy (all three dialects have a field; it rode along in the probe). Low value — defer.                                                                           |
-| `parallel_tool_calls` | **Last.** Absent from the Anthropic dialect; the 2026-05 spike found it hard-coded on the other paths. Least tractable, least valuable.                                      |
+| Limitation            | Verdict from this spike                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Structured outputs    | **First.** It is the only capability that we now _reject_. A hard 400 becomes a feature that operates. Proved from end to end on `gpt-*`.                    |
+| `tool_choice`         | **Second, if there is evidence.** It is the only control in all three dialects. But it is not tested. The `gemini` result shows that a field can be ignored. |
+| `max_tokens`          | Technically easy. All three dialects have a field, and it went with the probe injection. The value is low. Do it later.                                      |
+| `parallel_tool_calls` | **Last.** The Anthropic dialect does not have it. The 2026-05 spike found it fixed on the other paths. It is the most difficult and the least valuable.      |
 
-Suggested staging for a follow-up:
+A suggested sequence for the follow-up work:
 
-1. **Default-off feature flag.** No user gets interception until explicitly
-   enabled. This is a prerequisite, not a nicety, given the hang above.
-2. **Dialect-gated enforcement.** Inject only on `/responses`. Keep returning
-   the existing `400` for `json_schema` on every other model family — do **not**
-   accept-and-ignore. A capability map keyed by model family, derived from the
-   URL observed at intercept time, is the smallest thing that works.
-3. **Verify, don't assume.** Validate the assistant output against the requested
-   schema and surface a real error if it does not conform, so a silent
-   service-side regression fails loudly.
-4. **Resolve the hang** (or bound it with a timeout) before the flag is
-   considered for default-on.
-5. **Redaction discipline** on both headers and bodies for any logging added at
-   this seam.
+1. **Make a feature flag that is off by default.** No user gets the interception
+   until a person enables it. The hang above makes this a prerequisite, and not
+   an option.
+2. **Enforce for each dialect.** Inject only on `/responses`. Continue to return
+   the existing `400` for `json_schema` on each other model family. Do **not**
+   accept the field and then ignore it. The smallest sufficient solution is a
+   capability map. Use the model family as the key, and get the family from the
+   URL that you see at the time of the interception.
+3. **Check, do not assume.** Check the assistant output against the requested
+   schema. Give a true error if the output does not agree with the schema. Then
+   a silent service-side regression gives a clear failure.
+4. **Correct the hang**, or limit it with a timeout. Do this before you think
+   about a default-on flag.
+5. **Keep the redaction discipline** for the headers and for the bodies in each
+   log that you add at this seam.
 
-If step 4 cannot be resolved, the recommendation flips to **no-go**: a proxy
-that can wedge on an upstream 400 is worse than a proxy that returns 400 for
+If you cannot do step 4, the recommendation changes to **no-go**. A proxy that
+can block on an upstream 400 is worse than a proxy that returns 400 for
 `json_schema`.
 
 ## Notes for whoever picks this up
 
-- The probe file is throwaway. Delete it, or rewrite it properly, rather than
-  promoting it.
+- The probe file is temporary. Delete it, or write it again correctly. Do not
+  move it into the production code.
 - `internal/copilotgw` has a `goleak` `TestMain`. **Live** runs in that package
-  already fail it, with or without a request handler — the leaked goroutines are
-  `os/exec.(*Cmd).Start` and `copilot-sdk.(*Client).monitorProcess`, both
-  SDK-owned. Verified against the pre-existing
-  `TestLiveCopilotReasoningStreamsBeforeContent`, which fails goleak identically
-  and has no handler installed. A custom transport does add its own leak (HTTP/2
-  read loops) unless you call `CloseIdleConnections`; the probe does.
-- `internal/copilotgw/live_test.go` hardcodes `gpt-5`, which is no longer in the
-  catalog, so `TestLiveCopilotTextCompletion` currently fails with
-  `model not found: gpt-5`. Out of scope here, but worth a separate issue.
+  already fail this check, with a request handler and without one. The leaked
+  goroutines are `os/exec.(*Cmd).Start` and
+  `copilot-sdk.(*Client).monitorProcess`. The SDK owns both of them. I checked
+  this against the existing `TestLiveCopilotReasoningStreamsBeforeContent`. That
+  test fails goleak in the same way, and it has no handler installed. A custom
+  transport adds its own leak (the read loops of HTTP/2) if you do not call
+  `CloseIdleConnections`. The probe calls it.
+- `internal/copilotgw/live_test.go` contains the fixed value `gpt-5`. That model
+  is no longer in the catalog. Thus `TestLiveCopilotTextCompletion` now fails
+  with `model not found: gpt-5`. This is not in the scope here, but it needs a
+  separate issue.
 - The 2026-05 spike `tool-choice-enforcement.md` captured a **BYOK** provider
-  request and saw OpenAI Chat Completions with `parallel_tool_calls: false`.
-  This spike captured the **CAPI** path and saw three dialects and no
-  `parallel_tool_calls` at all. Both are correct; they are different transports.
-  Do not carry conclusions across.
+  request. It saw OpenAI Chat Completions with `parallel_tool_calls: false`.
+  This spike captured the **CAPI** path. It saw three dialects and no
+  `parallel_tool_calls` at all. Both spikes are correct, because they use
+  different transports. Do not move a conclusion from one spike to the other.
 
 ## Validation
 
-- `make go-ci` — passes (fmt-check, build, vet, `go test ./... -race -count=1`,
-  staticcheck).
-- All live probes skip by default; the non-live unit tests covering redaction,
-  the streaming tee, and the per-dialect injection logic run in the normal
-  suite.
+- `make go-ci` passes. It runs fmt-check, build, vet,
+  `go test ./... -race -count=1` and staticcheck.
+- All live probes skip by default. The normal test suite runs the unit tests
+  that are not live. These tests cover the redaction, the streaming tee, and the
+  injection logic for each dialect.
